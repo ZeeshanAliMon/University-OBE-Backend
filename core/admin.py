@@ -1,50 +1,88 @@
-# core/admin.py
 from django.contrib import admin
-from django.contrib.auth.admin import UserAdmin
-from .models import *
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from .models import (
+    User, Department, Program, ProgramObjective, POGAMapping,
+    GraduateAttribute, QAProfile, InstructorProfile, Student,
+    Course, InstructorCourse,
+)
 
 
-class TeacherInline(admin.StackedInline):
-    model = Teacher
-    can_delete = False
-    extra = 0
-
-
-class StudentInline(admin.StackedInline):
-    model = Student
-    can_delete = False
-    extra = 0
-
-
-class CustomUserAdmin(UserAdmin):
-    # Add role to the user creation/edit form
-    fieldsets = UserAdmin.fieldsets + (
-        ('Role', {'fields': ('role',)}),
+@admin.register(User)
+class UserAdmin(BaseUserAdmin):
+    list_display  = ('username', 'email', 'role', 'is_active', 'is_staff')
+    list_filter   = ('role', 'is_active', 'is_staff')
+    fieldsets     = BaseUserAdmin.fieldsets + (
+        ('OBE Role', {'fields': ('role',)}),
     )
-    add_fieldsets = UserAdmin.add_fieldsets + (
-        ('Role', {'fields': ('role',)}),
+    add_fieldsets = BaseUserAdmin.add_fieldsets + (
+        ('OBE Role', {'fields': ('role',)}),
     )
-    inlines = [TeacherInline, StudentInline]
-    list_display = ['username', 'email', 'role', 'is_staff']
 
 
-admin.site.register(User, CustomUserAdmin)
-admin.site.register(Department)
-admin.site.register(Program)
-admin.site.register(ProgramObjective)
-admin.site.register(GraduateAttribute)
-admin.site.register(POGAMapping)
-admin.site.register(Semester)
-admin.site.register(Course)
-admin.site.register(CourseOffering)
-admin.site.register(Enrollment)
-admin.site.register(CLO)
-admin.site.register(CLOGAMapping)
-admin.site.register(Paper)
-admin.site.register(Question)
-admin.site.register(QuestionCLOMapping)
-admin.site.register(QuestionGAMapping)
-admin.site.register(StudentAnswer)
-admin.site.register(CLOAttainment)
-admin.site.register(GAAttainment)
-admin.site.register(POAttainment)
+@admin.register(Department)
+class DepartmentAdmin(admin.ModelAdmin):
+    list_display  = ('slug', 'name')
+    search_fields = ('slug', 'name')
+
+
+@admin.register(Program)
+class ProgramAdmin(admin.ModelAdmin):
+    list_display  = ('slug', 'code', 'name', 'department')
+    list_filter   = ('department',)
+    search_fields = ('slug', 'code', 'name')
+
+
+class POGAMappingInline(admin.TabularInline):
+    model = POGAMapping
+    extra = 1
+
+
+@admin.register(ProgramObjective)
+class ProgramObjectiveAdmin(admin.ModelAdmin):
+    list_display = ('program', 'code', 'description')
+    list_filter  = ('program',)
+    inlines      = [POGAMappingInline]
+
+
+@admin.register(GraduateAttribute)
+class GraduateAttributeAdmin(admin.ModelAdmin):
+    list_display  = ('ga_id', 'name', 'department', 'program')
+    list_filter   = ('department', 'program')
+    search_fields = ('ga_id', 'name')
+
+
+@admin.register(QAProfile)
+class QAProfileAdmin(admin.ModelAdmin):
+    list_display  = ('user', 'department', 'employee_id')
+    list_filter   = ('department',)
+    search_fields = ('user__username', 'employee_id')
+
+
+@admin.register(InstructorProfile)
+class InstructorProfileAdmin(admin.ModelAdmin):
+    list_display  = ('user', 'employee_id', 'department', 'designation')
+    list_filter   = ('department',)
+    search_fields = ('user__username', 'employee_id')
+
+
+@admin.register(Student)
+class StudentAdmin(admin.ModelAdmin):
+    list_display  = ('roll_number', 'user', 'program', 'batch_year')
+    list_filter   = ('program', 'batch_year')
+    search_fields = ('roll_number', 'user__username')
+
+
+@admin.register(Course)
+class CourseAdmin(admin.ModelAdmin):
+    list_display      = ('slug', 'code', 'title', 'type', 'department', 'program')
+    list_filter       = ('type', 'department', 'program')
+    search_fields     = ('slug', 'code', 'title')
+    filter_horizontal = ('mapped_gas',)
+
+
+@admin.register(InstructorCourse)
+class InstructorCourseAdmin(admin.ModelAdmin):
+    list_display  = ('code', 'title', 'instructor', 'department', 'program', 'credit_hours', 'updated_at')
+    list_filter   = ('department', 'program')
+    search_fields = ('code', 'title', 'instructor__user__username', 'frontend_id')
+    readonly_fields = ('frontend_id', 'created_at', 'updated_at')
