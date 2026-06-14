@@ -1,4 +1,5 @@
 from django.contrib.auth import authenticate
+from django.utils.text import slugify
 
 from rest_framework             import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -27,6 +28,28 @@ def get_instructor_profile(user):
         return user.instructor_profile
     except Exception:
         return None
+
+
+def make_unique_slug(base_slug, model_class, exclude_pk=None):
+    """
+    Generates a unique slug from base_slug.
+    If 'bscs' is taken it tries 'bscs-2', 'bscs-3', etc.
+    """
+    slug = slugify(base_slug)
+    qs   = model_class.objects.filter(slug=slug)
+    if exclude_pk:
+        qs = qs.exclude(pk=exclude_pk)
+    if not qs.exists():
+        return slug
+    counter = 2
+    while True:
+        candidate = f"{slug}-{counter}"
+        qs = model_class.objects.filter(slug=candidate)
+        if exclude_pk:
+            qs = qs.exclude(pk=exclude_pk)
+        if not qs.exists():
+            return candidate
+        counter += 1
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -101,6 +124,50 @@ class ProgramListView(APIView):
         ).all().order_by('name')
         return Response(ProgramSerializer(qs, many=True).data)
 
+    def post(self, request):
+        """
+        POST /api/programs/
+        Frontend sends: { id, name, code, departmentId, vision, mission, pos[], slug? }
+        slug is optional — if not sent or empty we auto-generate from code.
+        """
+        data        = request.data
+        name        = data.get('name', '').strip()
+        code        = data.get('code', '').strip()
+        dept_id     = data.get('departmentId', '').strip()
+        vision      = data.get('vision', '')
+        mission     = data.get('mission', '')
+        raw_slug    = data.get('slug', '') or data.get('id', '')
+
+        if not name or not code or not dept_id:
+            return Response(
+                {'error': 'name, code and departmentId are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            department = Department.objects.get(slug=dept_id)
+        except Department.DoesNotExist:
+            return Response(
+                {'error': f'Department "{dept_id}" not found'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Auto-generate slug if not provided or empty
+        slug_base = raw_slug if raw_slug else code
+        slug      = make_unique_slug(slug_base, Program)
+
+        if Program.objects.filter(code=code).exists():
+            return Response(
+                {'error': f'Program with code "{code}" already exists'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        program = Program.objects.create(
+            slug=slug, name=name, code=code,
+            department=department, vision=vision, mission=mission
+        )
+        return Response(ProgramSerializer(program).data, status=status.HTTP_201_CREATED)
+
 
 class ProgramDetailView(APIView):
     def get_permissions(self):
@@ -159,6 +226,68 @@ class CourseListView(APIView):
         ).prefetch_related('mapped_gas').all().order_by('code')
         return Response(CourseSerializer(qs, many=True).data)
 
+    def post(self, request):
+        """
+        POST /api/courses/
+        Frontend sends: { id, code, title, type, departmentId, programId,
+                          mappedGAs[], credit_hours, slug? }
+        slug is optional — auto-generated from id or code if not sent.
+        """
+        data       = request.data
+        code       = data.get('code', '').strip()
+        title      = data.get('title', '').strip()
+        dept_id    = data.get('departmentId', '').strip()
+        program_id = data.get('programId', '')
+        course_type= data.get('type', 'core')
+        mapped_gas = data.get('mappedGAs', [])
+        credit_hrs = data.get('credit_hours', 3)
+        raw_slug   = data.get('slug', '') or data.get('id', '')
+
+        if not code or not title or not dept_id:
+            return Response(
+                {'error': 'code, title and departmentId are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            department = Department.objects.get(slug=dept_id)
+        except Department.DoesNotExist:
+            return Response(
+                {'error': f'Department "{dept_id}" not found'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        program = None
+        if program_id:
+            try:
+                program = Program.objects.get(slug=program_id)
+            except Program.DoesNotExist:
+                pass
+
+        # Auto-generate slug if not provided
+        slug_base = raw_slug if raw_slug else code
+        slug      = make_unique_slug(slug_base, Course)
+
+        course = Course.objects.create(
+            slug=slug, code=code, title=title,
+            type=course_type, department=department,
+            program=program, credit_hours=credit_hrs
+        )
+
+        if mapped_gas:
+            gas = GraduateAttribute.objects.filter(ga_id__in=mapped_gas)
+            course.mapped_gas.set(gas)
+
+        course.refresh_from_db()
+        return Response(
+            CourseSerializer(
+                Course.objects.select_related('department','program')
+                              .prefetch_related('mapped_gas')
+                              .get(pk=course.pk)
+            ).data,
+            status=status.HTTP_201_CREATED
+        )
+
 
 class CourseDetailView(APIView):
     def get_permissions(self):
@@ -197,17 +326,6 @@ class CourseDetailView(APIView):
 # ─── Instructor Courses ───────────────────────────────────────────────────────
 
 class InstructorCourseView(APIView):
-    """
-    GET  /api/instructor/courses/
-         Returns all courses for the authenticated instructor.
-
-    POST /api/instructor/courses/
-         Bulk-upserts the entire course list.
-         Body: { "courses": [ { id, code, title, departmentId, programId,
-                                creditHours, categories, unitsData, students,
-                                obeQuestions, obeMarks }, ... ] }
-         Returns the saved list.
-    """
     permission_classes = [IsInstructor]
 
     def get(self, request):
@@ -261,16 +379,16 @@ class InstructorCourseView(APIView):
                 instructor=profile,
                 frontend_id=frontend_id,
                 defaults=dict(
-                    code         = c.get('code', ''),
-                    title        = c.get('title', ''),
-                    department   = department,
-                    program      = program,
-                    credit_hours = c.get('creditHours', 3),
-                    categories   = c.get('categories', []),
-                    units_data   = c.get('unitsData', {}),
-                    students     = c.get('students', []),
-                    obe_questions= c.get('obeQuestions', []),   # NEW
-                    obe_marks    = c.get('obeMarks', {}),       # NEW
+                    code          = c.get('code', ''),
+                    title         = c.get('title', ''),
+                    department    = department,
+                    program       = program,
+                    credit_hours  = c.get('creditHours', 3),
+                    categories    = c.get('categories', []),
+                    units_data    = c.get('unitsData', {}),
+                    students      = c.get('students', []),
+                    obe_questions = c.get('obeQuestions', []),
+                    obe_marks     = c.get('obeMarks', {}),
                 )
             )
             saved.append(obj)
