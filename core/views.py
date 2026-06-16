@@ -8,7 +8,11 @@ from rest_framework.views       import APIView
 
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models      import Department, Program, GraduateAttribute, Course, InstructorCourse
+from .models      import (
+    Department, Program, GraduateAttribute, Course,
+    InstructorCourse, MarksCategory, UnitItem,
+    OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
+)
 from .serializers import (
     LoginSerializer, UserSerializer,
     DepartmentSerializer, ProgramSerializer,
@@ -31,10 +35,6 @@ def get_instructor_profile(user):
 
 
 def make_unique_slug(base_slug, model_class, exclude_pk=None):
-    """
-    Generates a unique slug from base_slug.
-    If 'bscs' is taken it tries 'bscs-2', 'bscs-3', etc.
-    """
     slug = slugify(base_slug)
     qs   = model_class.objects.filter(slug=slug)
     if exclude_pk:
@@ -58,19 +58,17 @@ class LoginView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        serializer = LoginSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
+        s = LoginSerializer(data=request.data)
+        if not s.is_valid():
+            return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
         user = authenticate(
-            username=serializer.validated_data['username'],
-            password=serializer.validated_data['password'],
+            username=s.validated_data['username'],
+            password=s.validated_data['password'],
         )
         if user is None:
             return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
         if not user.is_active:
             return Response({'error': 'Account is disabled'}, status=status.HTTP_401_UNAUTHORIZED)
-
         return Response({**get_tokens_for_user(user), 'user': UserSerializer(user).data})
 
 
@@ -80,15 +78,12 @@ class DepartmentListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = Department.objects.all().order_by('name')
-        return Response(DepartmentSerializer(qs, many=True).data)
+        return Response(DepartmentSerializer(Department.objects.all().order_by('name'), many=True).data)
 
 
 class DepartmentDetailView(APIView):
     def get_permissions(self):
-        if self.request.method == 'GET':
-            return [IsAuthenticated()]
-        return [IsQA()]
+        return [IsAuthenticated()] if self.request.method == 'GET' else [IsQA()]
 
     def _get(self, slug):
         try:
@@ -125,55 +120,37 @@ class ProgramListView(APIView):
         return Response(ProgramSerializer(qs, many=True).data)
 
     def post(self, request):
-        """
-        POST /api/programs/
-        Frontend sends: { id, name, code, departmentId, vision, mission, pos[], slug? }
-        slug is optional — if not sent or empty we auto-generate from code.
-        """
-        data        = request.data
-        name        = data.get('name', '').strip()
-        code        = data.get('code', '').strip()
-        dept_id     = data.get('departmentId', '').strip()
-        vision      = data.get('vision', '')
-        mission     = data.get('mission', '')
-        raw_slug    = data.get('slug', '') or data.get('id', '')
+        data    = request.data
+        name    = data.get('name', '').strip()
+        code    = data.get('code', '').strip()
+        dept_id = data.get('departmentId', '').strip()
 
         if not name or not code or not dept_id:
             return Response(
                 {'error': 'name, code and departmentId are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
         try:
             department = Department.objects.get(slug=dept_id)
         except Department.DoesNotExist:
-            return Response(
-                {'error': f'Department "{dept_id}" not found'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Auto-generate slug if not provided or empty
-        slug_base = raw_slug if raw_slug else code
-        slug      = make_unique_slug(slug_base, Program)
+            return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
 
         if Program.objects.filter(code=code).exists():
-            return Response(
-                {'error': f'Program with code "{code}" already exists'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': f'Program with code "{code}" already exists'}, status=status.HTTP_400_BAD_REQUEST)
+
+        raw_slug = data.get('slug', '') or data.get('id', '') or code
+        slug     = make_unique_slug(raw_slug, Program)
 
         program = Program.objects.create(
-            slug=slug, name=name, code=code,
-            department=department, vision=vision, mission=mission
+            slug=slug, name=name, code=code, department=department,
+            vision=data.get('vision', ''), mission=data.get('mission', '')
         )
         return Response(ProgramSerializer(program).data, status=status.HTTP_201_CREATED)
 
 
 class ProgramDetailView(APIView):
     def get_permissions(self):
-        if self.request.method == 'GET':
-            return [IsAuthenticated()]
-        return [IsQA()]
+        return [IsAuthenticated()] if self.request.method == 'GET' else [IsQA()]
 
     def _get(self, slug):
         try:
@@ -209,9 +186,7 @@ class GraduateAttributeListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = GraduateAttribute.objects.select_related(
-            'department', 'program'
-        ).all().order_by('ga_id')
+        qs = GraduateAttribute.objects.select_related('department', 'program').all().order_by('ga_id')
         return Response(GraduateAttributeSerializer(qs, many=True).data)
 
 
@@ -221,41 +196,26 @@ class CourseListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = Course.objects.select_related(
-            'department', 'program'
-        ).prefetch_related('mapped_gas').all().order_by('code')
+        qs = Course.objects.select_related('department', 'program').prefetch_related('mapped_gas').all().order_by('code')
         return Response(CourseSerializer(qs, many=True).data)
 
     def post(self, request):
-        """
-        POST /api/courses/
-        Frontend sends: { id, code, title, type, departmentId, programId,
-                          mappedGAs[], credit_hours, slug? }
-        slug is optional — auto-generated from id or code if not sent.
-        """
         data       = request.data
         code       = data.get('code', '').strip()
         title      = data.get('title', '').strip()
         dept_id    = data.get('departmentId', '').strip()
         program_id = data.get('programId', '')
-        course_type= data.get('type', 'core')
         mapped_gas = data.get('mappedGAs', [])
-        credit_hrs = data.get('credit_hours', 3)
-        raw_slug   = data.get('slug', '') or data.get('id', '')
 
         if not code or not title or not dept_id:
             return Response(
                 {'error': 'code, title and departmentId are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
         try:
             department = Department.objects.get(slug=dept_id)
         except Department.DoesNotExist:
-            return Response(
-                {'error': f'Department "{dept_id}" not found'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
 
         program = None
         if program_id:
@@ -264,26 +224,22 @@ class CourseListView(APIView):
             except Program.DoesNotExist:
                 pass
 
-        # Auto-generate slug if not provided
-        slug_base = raw_slug if raw_slug else code
-        slug      = make_unique_slug(slug_base, Course)
+        raw_slug = data.get('slug', '') or data.get('id', '') or code
+        slug     = make_unique_slug(raw_slug, Course)
 
         course = Course.objects.create(
             slug=slug, code=code, title=title,
-            type=course_type, department=department,
-            program=program, credit_hours=credit_hrs
+            type=data.get('type', 'core'),
+            department=department, program=program,
+            credit_hours=data.get('credit_hours', 3)
         )
-
         if mapped_gas:
-            gas = GraduateAttribute.objects.filter(ga_id__in=mapped_gas)
-            course.mapped_gas.set(gas)
+            course.mapped_gas.set(GraduateAttribute.objects.filter(ga_id__in=mapped_gas))
 
-        course.refresh_from_db()
         return Response(
             CourseSerializer(
-                Course.objects.select_related('department','program')
-                              .prefetch_related('mapped_gas')
-                              .get(pk=course.pk)
+                Course.objects.select_related('department', 'program')
+                              .prefetch_related('mapped_gas').get(pk=course.pk)
             ).data,
             status=status.HTTP_201_CREATED
         )
@@ -291,15 +247,11 @@ class CourseListView(APIView):
 
 class CourseDetailView(APIView):
     def get_permissions(self):
-        if self.request.method == 'GET':
-            return [IsAuthenticated()]
-        return [IsQA()]
+        return [IsAuthenticated()] if self.request.method == 'GET' else [IsQA()]
 
     def _get(self, slug):
         try:
-            return Course.objects.select_related(
-                'department', 'program'
-            ).prefetch_related('mapped_gas').get(slug=slug)
+            return Course.objects.select_related('department', 'program').prefetch_related('mapped_gas').get(slug=slug)
         except Course.DoesNotExist:
             return None
 
@@ -331,29 +283,27 @@ class InstructorCourseView(APIView):
     def get(self, request):
         profile = get_instructor_profile(request.user)
         if not profile:
-            return Response(
-                {'error': 'Instructor profile not found for this user'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({'error': 'Instructor profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
         qs = InstructorCourse.objects.select_related(
             'department', 'program'
+        ).prefetch_related(
+            'categories__unit_items__questions',
+            'students__marks',
+            'students__obe_marks__question',
+            'obe_questions',
         ).filter(instructor=profile).order_by('created_at')
+
         return Response(InstructorCourseSerializer(qs, many=True).data)
 
     def post(self, request):
         profile = get_instructor_profile(request.user)
         if not profile:
-            return Response(
-                {'error': 'Instructor profile not found for this user'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({'error': 'Instructor profile not found'}, status=status.HTTP_403_FORBIDDEN)
 
         courses_data = request.data.get('courses', [])
         if not isinstance(courses_data, list):
-            return Response(
-                {'error': '"courses" must be a list'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': '"courses" must be a list'}, status=status.HTTP_400_BAD_REQUEST)
 
         saved, errors = [], []
 
@@ -375,31 +325,160 @@ class InstructorCourseView(APIView):
                 except Program.DoesNotExist:
                     pass
 
-            obj, _ = InstructorCourse.objects.update_or_create(
+            # Upsert course header
+            course, _ = InstructorCourse.objects.update_or_create(
                 instructor=profile,
                 frontend_id=frontend_id,
                 defaults=dict(
-                    code          = c.get('code', ''),
-                    title         = c.get('title', ''),
-                    department    = department,
-                    program       = program,
-                    credit_hours  = c.get('creditHours', 3),
-                    categories    = c.get('categories', []),
-                    units_data    = c.get('unitsData', {}),
-                    students      = c.get('students', []),
-                    obe_questions = c.get('obeQuestions', []),
-                    obe_marks     = c.get('obeMarks', {}),
+                    code                    = c.get('code', ''),
+                    title                   = c.get('title', ''),
+                    department              = department,
+                    program                 = program,
+                    credit_hours            = c.get('creditHours', 3),
+                    clo_count               = c.get('cloCount', 4),
+                    selected_grading_system = c.get('selectedGradingSystem', 'absolute'),
+                    custom_grading_system   = c.get('customGradingSystem', []),
                 )
             )
-            saved.append(obj)
+
+            # ── Sync Categories + UnitItems ───────────────────────────────────
+            incoming_categories = c.get('categories', [])
+            incoming_units_data = c.get('unitsData', {})
+
+            # Delete categories not in incoming list
+            incoming_cat_names = [cat['name'] for cat in incoming_categories]
+            course.categories.exclude(name__in=incoming_cat_names).delete()
+
+            for order, cat_data in enumerate(incoming_categories):
+                cat_name = cat_data['name']
+                cat_obj, _ = MarksCategory.objects.update_or_create(
+                    course=course, name=cat_name,
+                    defaults={
+                        'percentage': cat_data.get('percentage', 0),
+                        'units':      cat_data.get('units', 0),
+                        'order':      order,
+                    }
+                )
+
+                # Sync UnitItems for this category
+                incoming_units = incoming_units_data.get(cat_name, [])
+                incoming_unit_nos = [u['unitNo'] for u in incoming_units]
+                cat_obj.unit_items.exclude(unit_no__in=incoming_unit_nos).delete()
+
+                for unit_data in incoming_units:
+                    UnitItem.objects.update_or_create(
+                        category=cat_obj,
+                        unit_no=unit_data['unitNo'],
+                        defaults={
+                            'passing':     unit_data.get('passing', 5),
+                            'total_marks': unit_data.get('totalMarks', 10),
+                            'weightage':   unit_data.get('weightage', 0),
+                            'mapped_clos': unit_data.get('mappedCLOs', []),
+                        }
+                    )
+
+            # ── Sync OBE Questions ────────────────────────────────────────────
+            incoming_questions = c.get('obeQuestions', [])
+            incoming_q_ids     = [q['id'] for q in incoming_questions]
+            course.obe_questions.exclude(frontend_id__in=incoming_q_ids).delete()
+
+            for q_data in incoming_questions:
+                # Find the matching UnitItem if possible
+                unit_item = None
+                try:
+                    cat = course.categories.get(name=q_data.get('categoryName'))
+                    unit_item = cat.unit_items.get(unit_no=q_data.get('unitNo'))
+                except (MarksCategory.DoesNotExist, UnitItem.DoesNotExist):
+                    pass
+
+                OBEQuestion.objects.update_or_create(
+                    course=course,
+                    frontend_id=q_data['id'],
+                    defaults={
+                        'unit_item':     unit_item,
+                        'category_name': q_data.get('categoryName', ''),
+                        'unit_no':       q_data.get('unitNo', 0),
+                        'question_name': q_data.get('questionName', ''),
+                        'max_marks':     q_data.get('maxMarks', 0),
+                        'mapped_clos':   q_data.get('mappedCLOs', []),
+                    }
+                )
+
+            # ── Sync Students + Marks ─────────────────────────────────────────
+            incoming_students = c.get('students', [])
+            incoming_reg_nos  = [s['regNo'] for s in incoming_students]
+            course.students.exclude(reg_no__in=incoming_reg_nos).delete()
+
+            for s_data in incoming_students:
+                reg_no   = s_data['regNo']
+                student, _ = CourseStudent.objects.update_or_create(
+                    course=course, reg_no=reg_no,
+                    defaults={'name': s_data.get('name', '')}
+                )
+
+                # Sync regular marks: { "Assignments-1": 8.5 }
+                incoming_marks = s_data.get('marks', {})
+                for key, score in incoming_marks.items():
+                    try:
+                        # key format: '{categoryName}-{unitNo}'
+                        last_dash  = key.rfind('-')
+                        cat_name   = key[:last_dash]
+                        unit_no    = int(key[last_dash + 1:])
+                        StudentMark.objects.update_or_create(
+                            student=student,
+                            category_name=cat_name,
+                            unit_no=unit_no,
+                            defaults={'score': score}
+                        )
+                    except (ValueError, IndexError):
+                        pass
+
+                # Delete marks no longer in payload
+                existing_keys = set()
+                for m in incoming_marks:
+                    last_dash = m.rfind('-')
+                    try:
+                        existing_keys.add((m[:last_dash], int(m[last_dash + 1:])))
+                    except ValueError:
+                        pass
+                for mark in student.marks.all():
+                    if (mark.category_name, mark.unit_no) not in existing_keys:
+                        mark.delete()
+
+            # ── Sync OBE Marks ────────────────────────────────────────────────
+            # obeMarks: { regNo: { questionId: score } }
+            incoming_obe_marks = c.get('obeMarks', {})
+            for reg_no, q_marks in incoming_obe_marks.items():
+                try:
+                    student = CourseStudent.objects.get(course=course, reg_no=reg_no)
+                except CourseStudent.DoesNotExist:
+                    continue
+                for q_frontend_id, score in q_marks.items():
+                    try:
+                        question = OBEQuestion.objects.get(course=course, frontend_id=q_frontend_id)
+                        OBEStudentMark.objects.update_or_create(
+                            student=student, question=question,
+                            defaults={'score': score}
+                        )
+                    except OBEQuestion.DoesNotExist:
+                        pass
+
+            saved.append(course)
 
         if errors and not saved:
             return Response({'errors': errors}, status=status.HTTP_400_BAD_REQUEST)
 
-        result = InstructorCourseSerializer(saved, many=True).data
+        # Re-fetch with all relations for serialization
+        saved_qs = InstructorCourse.objects.select_related(
+            'department', 'program'
+        ).prefetch_related(
+            'categories__unit_items__questions',
+            'students__marks',
+            'students__obe_marks__question',
+            'obe_questions',
+        ).filter(pk__in=[obj.pk for obj in saved])
+
+        result = InstructorCourseSerializer(saved_qs, many=True).data
         if errors:
-            return Response(
-                {'courses': result, 'errors': errors},
-                status=status.HTTP_207_MULTI_STATUS
-            )
+            return Response({'courses': result, 'errors': errors}, status=status.HTTP_207_MULTI_STATUS)
         return Response(result, status=status.HTTP_200_OK)

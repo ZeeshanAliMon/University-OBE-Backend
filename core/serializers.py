@@ -1,10 +1,13 @@
 from rest_framework import serializers
 from .models import (
     User, Department, Program, ProgramObjective, POGAMapping,
-    GraduateAttribute, QAProfile, InstructorProfile, Course,
-    InstructorCourse,
+    GraduateAttribute, Course,
+    InstructorCourse, MarksCategory, UnitItem,
+    OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
 )
 
+
+# ─── Auth ─────────────────────────────────────────────────────────────────────
 
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField()
@@ -18,6 +21,8 @@ class UserSerializer(serializers.ModelSerializer):
         model  = User
         fields = ['id', 'username', 'email', 'user_type']
 
+
+# ─── QA Serializers ───────────────────────────────────────────────────────────
 
 class GraduateAttributeSerializer(serializers.ModelSerializer):
     id           = serializers.CharField(source='ga_id')
@@ -121,8 +126,7 @@ class CourseSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'code', 'title', 'type',
             'mappedGAs', 'mappedGAs_write',
-            'departmentId', 'programId',
-            'credit_hours',
+            'departmentId', 'programId', 'credit_hours',
         ]
 
     def get_programId(self, obj):
@@ -143,49 +147,109 @@ class CourseSerializer(serializers.ModelSerializer):
         return instance
 
 
+# ─── Instructor Serializers ───────────────────────────────────────────────────
+# These serialize TO and FROM the exact frontend types in types.ts.
+# The frontend sees the same JSON shapes as before — only the DB storage changed.
+
+class UnitItemSerializer(serializers.ModelSerializer):
+    unitNo      = serializers.IntegerField(source='unit_no')
+    totalMarks  = serializers.FloatField(source='total_marks')
+    mappedCLOs  = serializers.JSONField(source='mapped_clos')
+    questions   = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = UnitItem
+        fields = ['unitNo', 'passing', 'totalMarks', 'weightage', 'mappedCLOs', 'questions']
+
+    def get_questions(self, obj):
+        # UnitQuestion shape: { id, name, maxMarks, mappedCLOs }
+        return [
+            {
+                'id':         q.frontend_id,
+                'name':       q.question_name,
+                'maxMarks':   q.max_marks,
+                'mappedCLOs': q.mapped_clos,
+            }
+            for q in obj.questions.all()
+        ]
+
+
+class MarksCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = MarksCategory
+        fields = ['name', 'percentage', 'units']
+
+
+class OBEQuestionSerializer(serializers.ModelSerializer):
+    """
+    Frontend OBEQuestion type:
+    { id, categoryName, unitNo, questionName, maxMarks, mappedCLOs }
+    """
+    id           = serializers.CharField(source='frontend_id')
+    categoryName = serializers.CharField(source='category_name')
+    unitNo       = serializers.IntegerField(source='unit_no')
+    questionName = serializers.CharField(source='question_name')
+    maxMarks     = serializers.FloatField(source='max_marks')
+    mappedCLOs   = serializers.JSONField(source='mapped_clos')
+
+    class Meta:
+        model  = OBEQuestion
+        fields = ['id', 'categoryName', 'unitNo', 'questionName', 'maxMarks', 'mappedCLOs']
+
+
+class CourseStudentSerializer(serializers.ModelSerializer):
+    """
+    Frontend CourseStudent type:
+    { regNo, name, marks: Record<string, number> }
+    marks key format: '{categoryName}-{unitNo}'  e.g. 'Assignments-1'
+    """
+    regNo = serializers.CharField(source='reg_no')
+    marks = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = CourseStudent
+        fields = ['regNo', 'name', 'marks']
+
+    def get_marks(self, obj):
+        return {
+            f"{m.category_name}-{m.unit_no}": m.score
+            for m in obj.marks.all()
+        }
+
+
 class InstructorCourseSerializer(serializers.ModelSerializer):
     """
-    Full InstructorCourse object matching frontend InstructorCourse type exactly.
-
-    Read shape:
-    {
-        "id":            "course-demo-1",
-        "code":          "SE-311",
-        "title":         "Software Engineering",
-        "departmentId":  "computing",
-        "departmentName":"Department of Computing and Technology",
-        "programId":     "bscs",
-        "programName":   "Bachelor of Science in Computer Science (BSCS)",
-        "creditHours":   3,
-        "categories":    [...],
-        "unitsData":     {...},
-        "students":      [...],
-        "obeQuestions":  [...],   ← NEW
-        "obeMarks":      {...}    ← NEW
-    }
+    Serializes InstructorCourse to the exact InstructorCourse type the frontend expects.
+    All nested data is pulled from child tables and assembled here.
+    The frontend sees NO difference from before — same JSON shape.
     """
-    id             = serializers.CharField(source='frontend_id')
-    departmentId   = serializers.CharField(source='department.slug',  read_only=True)
-    departmentName = serializers.CharField(source='department.name',  read_only=True)
-    programId      = serializers.SerializerMethodField()
-    programName    = serializers.SerializerMethodField()
-    creditHours    = serializers.IntegerField(source='credit_hours')
-    unitsData      = serializers.JSONField(source='units_data')
-    obeQuestions   = serializers.JSONField(source='obe_questions')   # NEW
-    obeMarks       = serializers.JSONField(source='obe_marks')       # NEW
+    id                    = serializers.CharField(source='frontend_id')
+    departmentId          = serializers.CharField(source='department.slug',  read_only=True)
+    departmentName        = serializers.CharField(source='department.name',  read_only=True)
+    programId             = serializers.SerializerMethodField()
+    programName           = serializers.SerializerMethodField()
+    creditHours           = serializers.IntegerField(source='credit_hours')
+    cloCount              = serializers.IntegerField(source='clo_count')
+    selectedGradingSystem = serializers.CharField(source='selected_grading_system')
+    customGradingSystem   = serializers.JSONField(source='custom_grading_system')
+
+    # Nested — assembled from child tables
+    categories  = serializers.SerializerMethodField()
+    unitsData   = serializers.SerializerMethodField()
+    students    = serializers.SerializerMethodField()
+    obeQuestions = serializers.SerializerMethodField()
+    obeMarks    = serializers.SerializerMethodField()
 
     class Meta:
         model  = InstructorCourse
         fields = [
             'id', 'code', 'title',
             'departmentId', 'departmentName',
-            'programId',    'programName',
-            'creditHours',
-            'categories',
-            'unitsData',
-            'students',
-            'obeQuestions',
-            'obeMarks',
+            'programId', 'programName',
+            'creditHours', 'cloCount',
+            'selectedGradingSystem', 'customGradingSystem',
+            'categories', 'unitsData',
+            'students', 'obeQuestions', 'obeMarks',
         ]
 
     def get_programId(self, obj):
@@ -195,3 +259,39 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
         if not obj.program:
             return None
         return f"{obj.program.name} ({obj.program.code})"
+
+    def get_categories(self, obj):
+        # [ { name, percentage, units } ]
+        return MarksCategorySerializer(
+            obj.categories.all(), many=True
+        ).data
+
+    def get_unitsData(self, obj):
+        # { "Assignments": [ { unitNo, passing, totalMarks, weightage, mappedCLOs, questions } ] }
+        result = {}
+        for cat in obj.categories.prefetch_related('unit_items__questions').all():
+            result[cat.name] = UnitItemSerializer(cat.unit_items.all(), many=True).data
+        return result
+
+    def get_students(self, obj):
+        # [ { regNo, name, marks: { "Assignments-1": 8.5, ... } } ]
+        return CourseStudentSerializer(
+            obj.students.prefetch_related('marks').all(), many=True
+        ).data
+
+    def get_obeQuestions(self, obj):
+        # [ { id, categoryName, unitNo, questionName, maxMarks, mappedCLOs } ]
+        return OBEQuestionSerializer(
+            obj.obe_questions.all(), many=True
+        ).data
+
+    def get_obeMarks(self, obj):
+        # { "FA22-BSCS-0012": { "q-uuid-1": 4.5, ... } }
+        result = {}
+        for student in obj.students.prefetch_related('obe_marks__question').all():
+            student_marks = {}
+            for obe_mark in student.obe_marks.all():
+                student_marks[obe_mark.question.frontend_id] = obe_mark.score
+            if student_marks:
+                result[student.reg_no] = student_marks
+        return result

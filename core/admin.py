@@ -3,7 +3,8 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from .models import (
     User, Department, Program, ProgramObjective, POGAMapping,
     GraduateAttribute, QAProfile, InstructorProfile, Student,
-    Course, InstructorCourse,
+    Course, InstructorCourse, MarksCategory, UnitItem,
+    OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
 )
 
 
@@ -11,12 +12,8 @@ from .models import (
 class UserAdmin(BaseUserAdmin):
     list_display  = ('username', 'email', 'role', 'is_active', 'is_staff')
     list_filter   = ('role', 'is_active', 'is_staff')
-    fieldsets     = BaseUserAdmin.fieldsets + (
-        ('OBE Role', {'fields': ('role',)}),
-    )
-    add_fieldsets = BaseUserAdmin.add_fieldsets + (
-        ('OBE Role', {'fields': ('role',)}),
-    )
+    fieldsets     = BaseUserAdmin.fieldsets + (('OBE Role', {'fields': ('role',)}),)
+    add_fieldsets = BaseUserAdmin.add_fieldsets + (('OBE Role', {'fields': ('role',)}),)
 
 
 @admin.register(Department)
@@ -80,9 +77,62 @@ class CourseAdmin(admin.ModelAdmin):
     filter_horizontal = ('mapped_gas',)
 
 
+class MarksCategoryInline(admin.TabularInline):
+    model  = MarksCategory
+    extra  = 0
+    fields = ('name', 'percentage', 'units', 'order')
+
+
 @admin.register(InstructorCourse)
 class InstructorCourseAdmin(admin.ModelAdmin):
     list_display  = ('code', 'title', 'instructor', 'department', 'program', 'credit_hours', 'updated_at')
     list_filter   = ('department', 'program')
     search_fields = ('code', 'title', 'instructor__user__username', 'frontend_id')
     readonly_fields = ('frontend_id', 'created_at', 'updated_at')
+    inlines       = [MarksCategoryInline]
+
+
+class UnitItemInline(admin.TabularInline):
+    model  = UnitItem
+    extra  = 0
+    fields = ('unit_no', 'total_marks', 'passing', 'weightage')
+
+
+@admin.register(MarksCategory)
+class MarksCategoryAdmin(admin.ModelAdmin):
+    list_display = ('course', 'name', 'percentage', 'units', 'order')
+    list_filter  = ('course__department',)
+    inlines      = [UnitItemInline]
+
+
+@admin.register(UnitItem)
+class UnitItemAdmin(admin.ModelAdmin):
+    list_display = ('category', 'unit_no', 'total_marks', 'passing', 'weightage')
+    list_filter  = ('category__course__department',)
+
+
+@admin.register(OBEQuestion)
+class OBEQuestionAdmin(admin.ModelAdmin):
+    list_display  = ('course', 'category_name', 'unit_no', 'question_name', 'max_marks')
+    list_filter   = ('course__department',)
+    search_fields = ('question_name', 'course__code')
+
+
+@admin.register(CourseStudent)
+class CourseStudentAdmin(admin.ModelAdmin):
+    list_display  = ('reg_no', 'name', 'course')
+    list_filter   = ('course__department',)
+    search_fields = ('reg_no', 'name')
+
+
+@admin.register(StudentMark)
+class StudentMarkAdmin(admin.ModelAdmin):
+    list_display = ('student', 'category_name', 'unit_no', 'score')
+    list_filter  = ('category_name',)
+    search_fields = ('student__reg_no',)
+
+
+@admin.register(OBEStudentMark)
+class OBEStudentMarkAdmin(admin.ModelAdmin):
+    list_display  = ('student', 'question', 'score')
+    search_fields = ('student__reg_no',)
