@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import (
     User, Department, Program, ProgramObjective, POGAMapping,
     GraduateAttribute, Course,
-    InstructorCourse, MarksCategory, UnitItem,
+    InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
 )
 
@@ -71,8 +71,7 @@ class ProgramSerializer(serializers.ModelSerializer):
     departmentId = serializers.CharField(source='department.slug', read_only=True)
     pos          = POSerializer(source='objectives', many=True, read_only=True)
     pos_write    = serializers.ListField(
-        child=serializers.DictField(), write_only=True,
-        required=False, source='pos'
+        child=serializers.DictField(), write_only=True, required=False, source='pos'
     )
 
     class Meta:
@@ -95,8 +94,7 @@ class ProgramSerializer(serializers.ModelSerializer):
             po_text    = po_dict.get('text', '')
             mapped_gas = po_dict.get('mappedGAs', [])
             po_obj, _  = ProgramObjective.objects.get_or_create(
-                program=program, code=po_code,
-                defaults={'description': po_text}
+                program=program, code=po_code, defaults={'description': po_text}
             )
             po_obj.description = po_text
             po_obj.save()
@@ -112,22 +110,18 @@ class ProgramSerializer(serializers.ModelSerializer):
 
 
 class CourseSerializer(serializers.ModelSerializer):
-    id           = serializers.CharField(source='slug', read_only=True)
-    departmentId = serializers.CharField(source='department.slug', read_only=True)
-    programId    = serializers.SerializerMethodField()
-    mappedGAs    = serializers.SerializerMethodField()
+    id              = serializers.CharField(source='slug', read_only=True)
+    departmentId    = serializers.CharField(source='department.slug', read_only=True)
+    programId       = serializers.SerializerMethodField()
+    mappedGAs       = serializers.SerializerMethodField()
     mappedGAs_write = serializers.ListField(
-        child=serializers.CharField(),
-        write_only=True, required=False, source='mapped_gas_ids'
+        child=serializers.CharField(), write_only=True, required=False, source='mapped_gas_ids'
     )
 
     class Meta:
         model  = Course
-        fields = [
-            'id', 'code', 'title', 'type',
-            'mappedGAs', 'mappedGAs_write',
-            'departmentId', 'programId', 'credit_hours',
-        ]
+        fields = ['id', 'code', 'title', 'type', 'mappedGAs', 'mappedGAs_write',
+                  'departmentId', 'programId', 'credit_hours']
 
     def get_programId(self, obj):
         return obj.program.slug if obj.program else None
@@ -142,27 +136,23 @@ class CourseSerializer(serializers.ModelSerializer):
         instance.type  = validated_data.get('type',  instance.type)
         instance.save()
         if mapped_gas_ids is not None:
-            gas = GraduateAttribute.objects.filter(ga_id__in=mapped_gas_ids)
-            instance.mapped_gas.set(gas)
+            instance.mapped_gas.set(GraduateAttribute.objects.filter(ga_id__in=mapped_gas_ids))
         return instance
 
 
 # ─── Instructor Serializers ───────────────────────────────────────────────────
-# These serialize TO and FROM the exact frontend types in types.ts.
-# The frontend sees the same JSON shapes as before — only the DB storage changed.
 
 class UnitItemSerializer(serializers.ModelSerializer):
-    unitNo      = serializers.IntegerField(source='unit_no')
-    totalMarks  = serializers.FloatField(source='total_marks')
-    mappedCLOs  = serializers.JSONField(source='mapped_clos')
-    questions   = serializers.SerializerMethodField()
+    unitNo     = serializers.IntegerField(source='unit_no')
+    totalMarks = serializers.FloatField(source='total_marks')
+    mappedCLOs = serializers.JSONField(source='mapped_clos')
+    questions  = serializers.SerializerMethodField()
 
     class Meta:
         model  = UnitItem
         fields = ['unitNo', 'passing', 'totalMarks', 'weightage', 'mappedCLOs', 'questions']
 
     def get_questions(self, obj):
-        # UnitQuestion shape: { id, name, maxMarks, mappedCLOs }
         return [
             {
                 'id':         q.frontend_id,
@@ -170,7 +160,7 @@ class UnitItemSerializer(serializers.ModelSerializer):
                 'maxMarks':   q.max_marks,
                 'mappedCLOs': q.mapped_clos,
             }
-            for q in obj.questions.all()
+            for q in obj.questions.order_by('order').all()
         ]
 
 
@@ -181,10 +171,6 @@ class MarksCategorySerializer(serializers.ModelSerializer):
 
 
 class OBEQuestionSerializer(serializers.ModelSerializer):
-    """
-    Frontend OBEQuestion type:
-    { id, categoryName, unitNo, questionName, maxMarks, mappedCLOs }
-    """
     id           = serializers.CharField(source='frontend_id')
     categoryName = serializers.CharField(source='category_name')
     unitNo       = serializers.IntegerField(source='unit_no')
@@ -198,11 +184,6 @@ class OBEQuestionSerializer(serializers.ModelSerializer):
 
 
 class CourseStudentSerializer(serializers.ModelSerializer):
-    """
-    Frontend CourseStudent type:
-    { regNo, name, marks: Record<string, number> }
-    marks key format: '{categoryName}-{unitNo}'  e.g. 'Assignments-1'
-    """
     regNo = serializers.CharField(source='reg_no')
     marks = serializers.SerializerMethodField()
 
@@ -212,17 +193,32 @@ class CourseStudentSerializer(serializers.ModelSerializer):
 
     def get_marks(self, obj):
         return {
-            f"{m.category_name}-{m.unit_no}": m.score
-            for m in obj.marks.all()
+            f"{m.unit_item.category.name}-{m.unit_item.unit_no}": m.score
+            for m in obj.marks.select_related('unit_item__category').all()
         }
 
 
+class GradeScaleSerializer(serializers.ModelSerializer):
+    """
+    Serializes to frontend customGradingSystem shape:
+    { grade: string, percentage: string, points: string }
+    percentage and points are strings in the frontend type.
+    """
+    percentage = serializers.SerializerMethodField()
+    points     = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = GradeScale
+        fields = ['grade', 'percentage', 'points']
+
+    def get_percentage(self, obj):
+        return str(obj.min_percentage)
+
+    def get_points(self, obj):
+        return str(obj.points)
+
+
 class InstructorCourseSerializer(serializers.ModelSerializer):
-    """
-    Serializes InstructorCourse to the exact InstructorCourse type the frontend expects.
-    All nested data is pulled from child tables and assembled here.
-    The frontend sees NO difference from before — same JSON shape.
-    """
     id                    = serializers.CharField(source='frontend_id')
     departmentId          = serializers.CharField(source='department.slug',  read_only=True)
     departmentName        = serializers.CharField(source='department.name',  read_only=True)
@@ -231,14 +227,12 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     creditHours           = serializers.IntegerField(source='credit_hours')
     cloCount              = serializers.IntegerField(source='clo_count')
     selectedGradingSystem = serializers.CharField(source='selected_grading_system')
-    customGradingSystem   = serializers.JSONField(source='custom_grading_system')
-
-    # Nested — assembled from child tables
-    categories  = serializers.SerializerMethodField()
-    unitsData   = serializers.SerializerMethodField()
-    students    = serializers.SerializerMethodField()
-    obeQuestions = serializers.SerializerMethodField()
-    obeMarks    = serializers.SerializerMethodField()
+    customGradingSystem   = serializers.SerializerMethodField()
+    categories            = serializers.SerializerMethodField()
+    unitsData             = serializers.SerializerMethodField()
+    students              = serializers.SerializerMethodField()
+    obeQuestions          = serializers.SerializerMethodField()
+    obeMarks              = serializers.SerializerMethodField()
 
     class Meta:
         model  = InstructorCourse
@@ -260,38 +254,34 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
             return None
         return f"{obj.program.name} ({obj.program.code})"
 
+    def get_customGradingSystem(self, obj):
+        return GradeScaleSerializer(obj.grade_scale.all(), many=True).data
+
     def get_categories(self, obj):
-        # [ { name, percentage, units } ]
-        return MarksCategorySerializer(
-            obj.categories.all(), many=True
-        ).data
+        return MarksCategorySerializer(obj.categories.all(), many=True).data
 
     def get_unitsData(self, obj):
-        # { "Assignments": [ { unitNo, passing, totalMarks, weightage, mappedCLOs, questions } ] }
         result = {}
         for cat in obj.categories.prefetch_related('unit_items__questions').all():
             result[cat.name] = UnitItemSerializer(cat.unit_items.all(), many=True).data
         return result
 
     def get_students(self, obj):
-        # [ { regNo, name, marks: { "Assignments-1": 8.5, ... } } ]
         return CourseStudentSerializer(
-            obj.students.prefetch_related('marks').all(), many=True
+            obj.students.prefetch_related('marks__unit_item__category').all(),
+            many=True
         ).data
 
     def get_obeQuestions(self, obj):
-        # [ { id, categoryName, unitNo, questionName, maxMarks, mappedCLOs } ]
-        return OBEQuestionSerializer(
-            obj.obe_questions.all(), many=True
-        ).data
+        return OBEQuestionSerializer(obj.obe_questions.all(), many=True).data
 
     def get_obeMarks(self, obj):
-        # { "FA22-BSCS-0012": { "q-uuid-1": 4.5, ... } }
         result = {}
         for student in obj.students.prefetch_related('obe_marks__question').all():
-            student_marks = {}
-            for obe_mark in student.obe_marks.all():
-                student_marks[obe_mark.question.frontend_id] = obe_mark.score
+            student_marks = {
+                om.question.frontend_id: om.score
+                for om in student.obe_marks.all()
+            }
             if student_marks:
                 result[student.reg_no] = student_marks
         return result
