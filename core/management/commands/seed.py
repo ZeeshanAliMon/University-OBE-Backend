@@ -467,5 +467,3 @@ class Command(BaseCommand):
         self.stdout.write('   qa_engineering/ qapass123   → QA (Engineering)')
         self.stdout.write('   admission     / admpass123  → Admission Officer')
         self.stdout.write('   dr_ali        / instpass123 → Instructor')
-PYEOF
-echo "done"
