@@ -483,6 +483,10 @@ class AdmissionStudent(models.Model):
         ('Summer', 'Summer'),
         ('Fall',   'Fall'),
     ]
+    SEMESTER_CHOICES = [
+        ('1st', '1st'), ('2nd', '2nd'), ('3rd', '3rd'), ('4th', '4th'),
+        ('5th', '5th'), ('6th', '6th'), ('7th', '7th'), ('8th', '8th'),
+    ]
 
     reg_no     = models.CharField(max_length=60, unique=True)
     name       = models.CharField(max_length=200)
@@ -495,6 +499,7 @@ class AdmissionStudent(models.Model):
         related_name='admission_students'
     )
     batch      = models.CharField(max_length=10, choices=BATCH_CHOICES, default='Fall')
+    semester   = models.CharField(max_length=10, choices=SEMESTER_CHOICES, default='1st')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

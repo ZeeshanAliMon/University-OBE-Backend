@@ -587,9 +587,11 @@ class AdmissionStudentListView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        semester = data.get('semester', '1st')
         student = AdmissionStudent.objects.create(
             reg_no=reg_no, name=name,
-            department=department, program=program, batch=batch
+            department=department, program=program,
+            batch=batch, semester=semester
         )
         return Response(
             AdmissionStudentSerializer(student).data,
@@ -623,6 +625,8 @@ class AdmissionStudentDetailView(APIView):
             student.name = data['name'].strip()
         if 'batch' in data:
             student.batch = data['batch']
+        if 'semester' in data:
+            student.semester = data['semester']
 
         if 'departmentId' in data:
             try:
