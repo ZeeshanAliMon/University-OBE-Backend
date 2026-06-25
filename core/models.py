@@ -10,6 +10,8 @@ class User(AbstractUser):
         ('qa',         'QA'),
         ('instructor', 'Instructor'),
         ('student',    'Student'),
+        ('admission',  'Admission'),
+        ('dept_admin', 'Department Admin'),
         ('admin',      'Admin'),
     ]
     role = models.CharField(
@@ -242,6 +244,11 @@ class InstructorCourse(models.Model):
         InstructorProfile, on_delete=models.CASCADE, related_name='instructor_courses'
     )
     frontend_id             = models.CharField(max_length=100)
+    course_type             = models.CharField(
+        max_length=10,
+        choices=[('Theory', 'Theory'), ('Lab', 'Lab')],
+        default='Theory'
+    )
     code                    = models.CharField(max_length=30)
     title                   = models.CharField(max_length=200)
     department              = models.ForeignKey(
@@ -458,3 +465,43 @@ class OBEStudentMark(models.Model):
 
     def __str__(self):
         return f"{self.student.reg_no} | {self.question.question_name} = {self.score}"
+
+
+# ─── Admission Student Registry ───────────────────────────────────────────────
+
+class AdmissionStudent(models.Model):
+    """
+    Students registered through the Admission dashboard.
+    Separate from the auth Student model — this is the university
+    student registry managed by the admission officer.
+
+    Frontend type:
+    { regNo, name, departmentId, programId, batch: 'Spring'|'Summer'|'Fall' }
+    """
+    BATCH_CHOICES = [
+        ('Spring', 'Spring'),
+        ('Summer', 'Summer'),
+        ('Fall',   'Fall'),
+    ]
+
+    reg_no     = models.CharField(max_length=60, unique=True)
+    name       = models.CharField(max_length=200)
+    department = models.ForeignKey(
+        Department, on_delete=models.PROTECT,
+        related_name='admission_students'
+    )
+    program    = models.ForeignKey(
+        Program, on_delete=models.PROTECT,
+        related_name='admission_students'
+    )
+    batch      = models.CharField(max_length=10, choices=BATCH_CHOICES, default='Fall')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name        = 'Admission Student'
+        verbose_name_plural = 'Admission Students'
+        ordering            = ['reg_no']
+
+    def __str__(self):
+        return f"{self.reg_no} — {self.name} ({self.program.code}, {self.batch})"
