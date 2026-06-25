@@ -165,7 +165,15 @@ class ProgramListView(APIView):
             slug=slug, name=name, code=code, department=department,
             vision=data.get('vision', ''), mission=data.get('mission', '')
         )
-        return Response(ProgramSerializer(program).data, status=status.HTTP_201_CREATED)
+        # Also process POs if sent on creation
+        pos_data = data.get('pos', [])
+        if pos_data:
+            ProgramSerializer()._sync_pos(program, pos_data)
+
+        qs = Program.objects.select_related('department').prefetch_related(
+            'objectives__ga_mappings__graduate_attribute'
+        ).get(pk=program.pk)
+        return Response(ProgramSerializer(qs).data, status=status.HTTP_201_CREATED)
 
 
 class ProgramDetailView(APIView):
@@ -302,6 +310,13 @@ class CourseDetailView(APIView):
             s.save()
             return Response(CourseSerializer(self._get(slug)).data)
         return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, slug):
+        obj = self._get(slug)
+        if not obj:
+            return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # ─── Instructor Courses ───────────────────────────────────────────────────────
@@ -524,6 +539,75 @@ class InstructorCourseView(APIView):
         if errors:
             return Response({'courses': result, 'errors': errors}, status=status.HTTP_207_MULTI_STATUS)
         return Response(result, status=status.HTTP_200_OK)
+
+
+# ─── Graduate Attributes — Create
+class GraduateAttributeCreateView(APIView):
+    """
+    POST /api/gas/
+    Body: { id, name, description, departmentId, programId? }
+    QA only — called when a new program is created and its GAs are seeded.
+    """
+    permission_classes = [IsQA]
+
+    def post(self, request):
+        data    = request.data
+        ga_id   = data.get('id', '').strip()
+        name    = data.get('name', '').strip()
+        dept_id = data.get('departmentId', '').strip()
+        prog_id = data.get('programId', '')
+
+        if not ga_id or not name or not dept_id:
+            return Response(
+                {'error': 'id, name and departmentId are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if GraduateAttribute.objects.filter(ga_id=ga_id).exists():
+            # Return existing — idempotent
+            ga = GraduateAttribute.objects.get(ga_id=ga_id)
+            return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_200_OK)
+
+        try:
+            department = Department.objects.get(slug=dept_id)
+        except Department.DoesNotExist:
+            return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        program = None
+        if prog_id:
+            try:
+                program = Program.objects.get(slug=prog_id)
+            except Program.DoesNotExist:
+                pass
+
+        ga = GraduateAttribute.objects.create(
+            ga_id=ga_id, name=name,
+            description=data.get('description', ''),
+            department=department, program=program
+        )
+        return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_201_CREATED)
+
+
+# ─── Instructor Profile
+class InstructorProfileView(APIView):
+    """
+    GET /api/instructor/profile/
+    Returns the authenticated instructor's profile — department, designation.
+    Used by InstructorDashboard to pre-fill department when creating a course.
+    """
+    permission_classes = [IsInstructor]
+
+    def get(self, request):
+        profile = get_instructor_profile(request.user)
+        if not profile:
+            return Response({'error': 'Instructor profile not found'}, status=status.HTTP_403_FORBIDDEN)
+        return Response({
+            'employeeId':   profile.employee_id,
+            'designation':  profile.designation,
+            'department': {
+                'id':   profile.department.slug,
+                'name': profile.department.name,
+            }
+        })
 
 
 # ─── Admission Students ───────────────────────────────────────────────────────

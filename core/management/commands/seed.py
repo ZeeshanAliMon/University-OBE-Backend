@@ -82,7 +82,8 @@ class Command(BaseCommand):
                 slug=slug, name=name, code=code,
                 department=depts[dept_slug]
             )
-        self.stdout.write('  ✓ Programs (15)')
+        progs['bsai'] = prog_bsai
+        self.stdout.write('  ✓ Programs (16)')
 
         # ── Graduate Attributes ───────────────────────────────────────────────
         all_gas = {}
@@ -149,6 +150,12 @@ class Command(BaseCommand):
                 ('PO2', 'Implementing high-fidelity cryptographic models and access control measures.', ['GA-2','GA-5']),
                 ('PO3', 'Formulating disaster recovery protocols and ethical hacking methodologies.', ['GA-8','GA-9']),
                 ('PO4', 'Communicating risk profiles and policy compliance metrics effectively with executive stakeholders.', ['GA-7']),
+            ],
+            'bsai':   [
+                ('PO1', 'Apply mathematical and computational foundations to AI problem formulation and solution.', ['GA-1','GA-2']),
+                ('PO2', 'Design and implement intelligent systems using modern ML, DL, and NLP frameworks.', ['GA-3','GA-4','GA-5']),
+                ('PO3', 'Evaluate AI solutions for societal impact, fairness, and ethical implications.', ['GA-8','GA-9']),
+                ('PO4', 'Engage in research-oriented lifelong learning in the evolving field of artificial intelligence.', ['GA-7','GA-10']),
             ],
             'bba':    [
                 ('PO1', 'Mastering Core Business Management Skills and Analytical Tools.', ['GA-B1','GA-B4']),
