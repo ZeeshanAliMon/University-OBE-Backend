@@ -302,4 +302,4 @@ class AdmissionStudentSerializer(serializers.ModelSerializer):
     class Meta:
         from .models import AdmissionStudent
         model  = AdmissionStudent
-        fields = ['regNo', 'name', 'departmentId', 'programId', 'batch']
+        fields = ['regNo', 'name', 'departmentId', 'programId', 'batch', 'semester']
