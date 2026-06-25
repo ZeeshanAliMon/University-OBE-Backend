@@ -7,6 +7,7 @@ from .models import (
     GraduateAttribute, QAProfile, InstructorProfile, Student,
     Course, InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
+    AdmissionStudent,
 )
 
 
@@ -250,3 +251,13 @@ class OBEStudentMarkAdmin(admin.ModelAdmin):
         return super().get_queryset(request).select_related(
             'student__course', 'question__course'
         )
+
+
+# ─── Admission Students ───────────────────────────────────────────────────────
+
+@admin.register(AdmissionStudent)
+class AdmissionStudentAdmin(admin.ModelAdmin):
+    list_display  = ('reg_no', 'name', 'department', 'program', 'batch', 'created_at')
+    list_filter   = ('department', 'program', 'batch')
+    search_fields = ('reg_no', 'name')
+    ordering      = ('reg_no',)

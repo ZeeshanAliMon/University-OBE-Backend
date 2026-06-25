@@ -29,3 +29,13 @@ class IsInstructor(BasePermission):
             request.user.is_authenticated and
             request.user.role in ('instructor', 'admin')
         )
+
+
+class IsAdmission(BasePermission):
+    """Only admission officers and admins can manage student records."""
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ('admission', 'admin')
+        )

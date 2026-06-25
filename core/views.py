@@ -363,6 +363,7 @@ class InstructorCourseView(APIView):
                 defaults=dict(
                     code                    = c.get('code', ''),
                     title                   = c.get('title', ''),
+                    course_type             = c.get('courseType', 'Theory'),
                     department              = department,
                     program                 = program,
                     credit_hours            = c.get('creditHours', 3),
@@ -523,3 +524,130 @@ class InstructorCourseView(APIView):
         if errors:
             return Response({'courses': result, 'errors': errors}, status=status.HTTP_207_MULTI_STATUS)
         return Response(result, status=status.HTTP_200_OK)
+
+
+# ─── Admission Students ───────────────────────────────────────────────────────
+
+from .models      import AdmissionStudent
+from .serializers import AdmissionStudentSerializer
+from .permissions import IsAdmission
+
+
+class AdmissionStudentListView(APIView):
+    """
+    GET  /api/students/   → list all students (admission + any authenticated)
+    POST /api/students/   → create student (admission only)
+
+    Frontend Student type: { regNo, name, departmentId, programId, batch }
+    """
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [IsAuthenticated()]
+        return [IsAdmission()]
+
+    def get(self, request):
+        qs = AdmissionStudent.objects.select_related(
+            'department', 'program'
+        ).all().order_by('reg_no')
+        return Response(AdmissionStudentSerializer(qs, many=True).data)
+
+    def post(self, request):
+        data       = request.data
+        reg_no     = data.get('regNo', '').strip().upper()
+        name       = data.get('name', '').strip()
+        dept_id    = data.get('departmentId', '').strip()
+        program_id = data.get('programId', '').strip()
+        batch      = data.get('batch', 'Fall')
+
+        if not reg_no or not name or not dept_id or not program_id:
+            return Response(
+                {'error': 'regNo, name, departmentId and programId are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if AdmissionStudent.objects.filter(reg_no=reg_no).exists():
+            return Response(
+                {'error': f'Student with registration number "{reg_no}" already exists'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            department = Department.objects.get(slug=dept_id)
+        except Department.DoesNotExist:
+            return Response(
+                {'error': f'Department "{dept_id}" not found'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            program = Program.objects.get(slug=program_id)
+        except Program.DoesNotExist:
+            return Response(
+                {'error': f'Program "{program_id}" not found'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        student = AdmissionStudent.objects.create(
+            reg_no=reg_no, name=name,
+            department=department, program=program, batch=batch
+        )
+        return Response(
+            AdmissionStudentSerializer(student).data,
+            status=status.HTTP_201_CREATED
+        )
+
+
+class AdmissionStudentDetailView(APIView):
+    """
+    PATCH  /api/students/<reg_no>/   → update student
+    DELETE /api/students/<reg_no>/   → delete student
+    """
+    def get_permissions(self):
+        return [IsAdmission()]
+
+    def _get(self, reg_no):
+        try:
+            return AdmissionStudent.objects.select_related(
+                'department', 'program'
+            ).get(reg_no=reg_no.upper())
+        except AdmissionStudent.DoesNotExist:
+            return None
+
+    def patch(self, request, reg_no):
+        student = self._get(reg_no)
+        if not student:
+            return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        data = request.data
+        if 'name' in data:
+            student.name = data['name'].strip()
+        if 'batch' in data:
+            student.batch = data['batch']
+
+        if 'departmentId' in data:
+            try:
+                student.department = Department.objects.get(slug=data['departmentId'])
+            except Department.DoesNotExist:
+                return Response(
+                    {'error': f'Department "{data["departmentId"]}" not found'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        if 'programId' in data:
+            try:
+                student.program = Program.objects.get(slug=data['programId'])
+            except Program.DoesNotExist:
+                return Response(
+                    {'error': f'Program "{data["programId"]}" not found'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        student.save()
+        return Response(AdmissionStudentSerializer(student).data)
+
+    def delete(self, request, reg_no):
+        student = self._get(reg_no)
+        if not student:
+            return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+        student.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

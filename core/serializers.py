@@ -220,6 +220,7 @@ class GradeScaleSerializer(serializers.ModelSerializer):
 
 class InstructorCourseSerializer(serializers.ModelSerializer):
     id                    = serializers.CharField(source='frontend_id')
+    courseType            = serializers.CharField(source='course_type')
     departmentId          = serializers.CharField(source='department.slug',  read_only=True)
     departmentName        = serializers.CharField(source='department.name',  read_only=True)
     programId             = serializers.SerializerMethodField()
@@ -237,7 +238,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     class Meta:
         model  = InstructorCourse
         fields = [
-            'id', 'code', 'title',
+            'id', 'code', 'title', 'courseType',
             'departmentId', 'departmentName',
             'programId', 'programName',
             'creditHours', 'cloCount',
@@ -285,3 +286,20 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
             if student_marks:
                 result[student.reg_no] = student_marks
         return result
+
+
+# ─── Admission Student ────────────────────────────────────────────────────────
+
+class AdmissionStudentSerializer(serializers.ModelSerializer):
+    """
+    Frontend Student type:
+    { regNo, name, departmentId, programId, batch }
+    """
+    regNo        = serializers.CharField(source='reg_no')
+    departmentId = serializers.CharField(source='department.slug', read_only=True)
+    programId    = serializers.CharField(source='program.slug',    read_only=True)
+
+    class Meta:
+        from .models import AdmissionStudent
+        model  = AdmissionStudent
+        fields = ['regNo', 'name', 'departmentId', 'programId', 'batch']
