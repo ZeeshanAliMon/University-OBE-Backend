@@ -59,6 +59,7 @@ class Command(BaseCommand):
             # Computing
             ('bscs',   'Bachelor of Science in Computer Science',              'BSCS',   'computing'),
             ('bsse',   'Bachelor of Science in Software Engineering',          'BSSE',   'computing'),
+            ('bsai',   'Bachelor of Science in Artificial Intelligence',       'BSAI',   'computing'),
             ('bscy',   'Bachelor of Science in Cyber Security',                'BSCY',   'computing'),
             # Business
             ('bba',    'Bachelor of Business Administration',                  'BBA',    'business'),
@@ -82,7 +83,6 @@ class Command(BaseCommand):
                 slug=slug, name=name, code=code,
                 department=depts[dept_slug]
             )
-        progs['bsai'] = prog_bsai
         self.stdout.write('  ✓ Programs (16)')
 
         # ── Graduate Attributes ───────────────────────────────────────────────
