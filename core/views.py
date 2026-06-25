@@ -102,7 +102,7 @@ class DepartmentDetailView(APIView):
 
     def _get(self, slug):
         try:
-            return Department.objects.get(slug=slug)
+            return Department.objects.get(dept_id=slug)
         except Department.DoesNotExist:
             return None
 
@@ -146,23 +146,20 @@ class ProgramListView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         try:
-            department = Department.objects.get(slug=dept_id)
+            department = Department.objects.get(dept_id=dept_id)
         except Department.DoesNotExist:
             return Response(
                 {'error': f'Department "{dept_id}" not found'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if Program.objects.filter(code=code).exists():
+        if Program.objects.filter(code__iexact=code).exists():
             return Response(
                 {'error': f'Program with code "{code}" already exists'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        raw_slug = data.get('slug', '') or data.get('id', '') or code
-        slug     = make_unique_slug(raw_slug, Program)
-
         program = Program.objects.create(
-            slug=slug, name=name, code=code, department=department,
+            name=name, code=code, department=department,
             vision=data.get('vision', ''), mission=data.get('mission', '')
         )
         # Also process POs if sent on creation
@@ -184,7 +181,7 @@ class ProgramDetailView(APIView):
         try:
             return Program.objects.select_related('department').prefetch_related(
                 'objectives__ga_mappings__graduate_attribute'
-            ).get(slug=slug)
+            ).get(code__iexact=slug)
         except Program.DoesNotExist:
             return None
 
@@ -245,7 +242,7 @@ class CourseListView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         try:
-            department = Department.objects.get(slug=dept_id)
+            department = Department.objects.get(dept_id=dept_id)
         except Department.DoesNotExist:
             return Response(
                 {'error': f'Department "{dept_id}" not found'},
@@ -255,15 +252,12 @@ class CourseListView(APIView):
         program = None
         if program_id:
             try:
-                program = Program.objects.get(slug=program_id)
+                program = Program.objects.get(code__iexact=program_id)
             except Program.DoesNotExist:
                 pass
 
-        raw_slug = data.get('slug', '') or data.get('id', '') or code
-        slug     = make_unique_slug(raw_slug, Course)
-
         course = Course.objects.create(
-            slug=slug, code=code, title=title,
+            code=code, title=title,
             type=data.get('type', 'core'),
             department=department, program=program,
             credit_hours=data.get('credit_hours', 3)
@@ -288,7 +282,7 @@ class CourseDetailView(APIView):
         try:
             return Course.objects.select_related(
                 'department', 'program'
-            ).prefetch_related('mapped_gas').get(slug=slug)
+            ).prefetch_related('mapped_gas').get(code__iexact=slug)
         except Course.DoesNotExist:
             return None
 
@@ -359,7 +353,7 @@ class InstructorCourseView(APIView):
             program_id  = c.get('programId')
 
             try:
-                department = Department.objects.get(slug=dept_id)
+                department = Department.objects.get(dept_id=dept_id)
             except Department.DoesNotExist:
                 errors.append({'index': idx, 'error': f'Department "{dept_id}" not found'})
                 continue
@@ -367,7 +361,7 @@ class InstructorCourseView(APIView):
             program = None
             if program_id:
                 try:
-                    program = Program.objects.get(slug=program_id)
+                    program = Program.objects.get(code__iexact=program_id)
                 except Program.DoesNotExist:
                     pass
 
@@ -568,14 +562,14 @@ class GraduateAttributeCreateView(APIView):
             return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_200_OK)
 
         try:
-            department = Department.objects.get(slug=dept_id)
+            department = Department.objects.get(dept_id=dept_id)
         except Department.DoesNotExist:
             return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
 
         program = None
         if prog_id:
             try:
-                program = Program.objects.get(slug=prog_id)
+                program = Program.objects.get(code__iexact=prog_id)
             except Program.DoesNotExist:
                 pass
 
@@ -656,7 +650,7 @@ class AdmissionStudentListView(APIView):
             )
 
         try:
-            department = Department.objects.get(slug=dept_id)
+            department = Department.objects.get(dept_id=dept_id)
         except Department.DoesNotExist:
             return Response(
                 {'error': f'Department "{dept_id}" not found'},
@@ -664,7 +658,7 @@ class AdmissionStudentListView(APIView):
             )
 
         try:
-            program = Program.objects.get(slug=program_id)
+            program = Program.objects.get(code__iexact=program_id)
         except Program.DoesNotExist:
             return Response(
                 {'error': f'Program "{program_id}" not found'},

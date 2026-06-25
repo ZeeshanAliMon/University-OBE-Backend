@@ -77,17 +77,17 @@ class UserAdmin(BaseUserAdmin):
 
 @admin.register(Department)
 class DepartmentAdmin(admin.ModelAdmin):
-    list_display  = ('slug', 'name')
-    search_fields = ('slug', 'name')
+    list_display  = ('dept_id', 'name')
+    search_fields = ('dept_id', 'name')
 
 
 # ─── Program ──────────────────────────────────────────────────────────────────
 
 @admin.register(Program)
 class ProgramAdmin(admin.ModelAdmin):
-    list_display  = ('slug', 'code', 'name', 'department')
+    list_display  = ('code', 'name', 'department')
     list_filter   = ('department',)
-    search_fields = ('slug', 'code', 'name')
+    search_fields = ('code', 'name')
 
 
 # ─── Program Objectives ───────────────────────────────────────────────────────
@@ -140,9 +140,9 @@ class StudentAdmin(admin.ModelAdmin):
 
 @admin.register(Course)
 class CourseAdmin(admin.ModelAdmin):
-    list_display      = ('slug', 'code', 'title', 'type', 'department', 'program')
+    list_display      = ('code', 'title', 'type', 'department', 'program')
     list_filter       = ('type', 'department', 'program')
-    search_fields     = ('slug', 'code', 'title')
+    search_fields     = ('code', 'title')
     filter_horizontal = ('mapped_gas',)
 
 

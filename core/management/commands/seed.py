@@ -49,7 +49,7 @@ class Command(BaseCommand):
         ]
         for slug, name, vision, mission in dept_data:
             depts[slug] = Department.objects.create(
-                slug=slug, name=name, vision=vision, mission=mission
+                dept_id=slug, name=name, vision=vision, mission=mission
             )
         self.stdout.write('  ✓ Departments (5)')
 
@@ -80,7 +80,7 @@ class Command(BaseCommand):
         ]
         for slug, name, code, dept_slug in prog_data:
             progs[slug] = Program.objects.create(
-                slug=slug, name=name, code=code,
+                name=name, code=code,
                 department=depts[dept_slug]
             )
         self.stdout.write('  ✓ Programs (16)')
@@ -307,12 +307,12 @@ class Command(BaseCommand):
         ]
 
         for slug, code, title, ctype, ga_ids in cs_courses:
-            c = Course.objects.create(slug=slug, code=code, title=title, type=ctype,
+            c = Course.objects.create(code=code, title=title, type=ctype,
                                       program=progs['bscs'], department=depts['computing'], credit_hours=3)
             c.mapped_gas.set([all_gas[g] for g in ga_ids if g in all_gas])
 
         for slug, code, title, ctype, ga_ids in biz_courses:
-            c = Course.objects.create(slug=slug, code=code, title=title, type=ctype,
+            c = Course.objects.create(code=code, title=title, type=ctype,
                                       program=progs['bba'], department=depts['business'], credit_hours=3)
             c.mapped_gas.set([all_gas[g] for g in ga_ids if g in all_gas])
 

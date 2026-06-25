@@ -26,8 +26,14 @@ class UserSerializer(serializers.ModelSerializer):
 
 class GraduateAttributeSerializer(serializers.ModelSerializer):
     id           = serializers.CharField(source='ga_id')
-    departmentId = serializers.CharField(source='department.slug', read_only=True, default=None)
-    programId    = serializers.CharField(source='program.slug',    read_only=True, default=None)
+    departmentId = serializers.SerializerMethodField()
+    programId    = serializers.SerializerMethodField()
+
+    def get_departmentId(self, obj):
+        return obj.department.dept_id if obj.department else None
+
+    def get_programId(self, obj):
+        return obj.program.code.lower() if obj.program else None
 
     class Meta:
         model  = GraduateAttribute
@@ -52,7 +58,7 @@ class POSerializer(serializers.ModelSerializer):
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
-    id = serializers.CharField(source='slug', read_only=True)
+    id = serializers.CharField(source='dept_id')
 
     class Meta:
         model  = Department
@@ -67,12 +73,18 @@ class DepartmentSerializer(serializers.ModelSerializer):
 
 
 class ProgramSerializer(serializers.ModelSerializer):
-    id           = serializers.CharField(source='slug', read_only=True)
-    departmentId = serializers.CharField(source='department.slug', read_only=True)
+    id           = serializers.SerializerMethodField()
+    departmentId = serializers.SerializerMethodField()
     pos          = POSerializer(source='objectives', many=True, read_only=True)
     pos_write    = serializers.ListField(
         child=serializers.DictField(), write_only=True, required=False, source='pos'
     )
+
+    def get_id(self, obj):
+        return obj.code.lower()   # 'BSCS' -> 'bscs' for frontend
+
+    def get_departmentId(self, obj):
+        return obj.department.dept_id
 
     class Meta:
         model  = Program
@@ -123,8 +135,11 @@ class CourseSerializer(serializers.ModelSerializer):
         fields = ['id', 'code', 'title', 'type', 'mappedGAs', 'mappedGAs_write',
                   'departmentId', 'programId', 'credit_hours']
 
+    def get_departmentId(self, obj):
+        return obj.department.dept_id
+
     def get_programId(self, obj):
-        return obj.program.slug if obj.program else None
+        return obj.program.code.lower() if obj.program else None
 
     def get_mappedGAs(self, obj):
         return list(obj.mapped_gas.values_list('ga_id', flat=True))
@@ -221,7 +236,7 @@ class GradeScaleSerializer(serializers.ModelSerializer):
 class InstructorCourseSerializer(serializers.ModelSerializer):
     id                    = serializers.CharField(source='frontend_id')
     courseType            = serializers.CharField(source='course_type')
-    departmentId          = serializers.CharField(source='department.slug',  read_only=True)
+    departmentId          = serializers.SerializerMethodField()
     departmentName        = serializers.CharField(source='department.name',  read_only=True)
     programId             = serializers.SerializerMethodField()
     programName           = serializers.SerializerMethodField()
@@ -247,8 +262,11 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
             'students', 'obeQuestions', 'obeMarks',
         ]
 
+    def get_departmentId(self, obj):
+        return obj.department.dept_id
+
     def get_programId(self, obj):
-        return obj.program.slug if obj.program else None
+        return obj.program.code.lower() if obj.program else None
 
     def get_programName(self, obj):
         if not obj.program:
@@ -296,10 +314,16 @@ class AdmissionStudentSerializer(serializers.ModelSerializer):
     { regNo, name, departmentId, programId, batch }
     """
     regNo        = serializers.CharField(source='reg_no')
-    departmentId = serializers.CharField(source='department.slug', read_only=True)
-    programId    = serializers.CharField(source='program.slug',    read_only=True)
+    departmentId = serializers.SerializerMethodField()
+    programId    = serializers.SerializerMethodField()
 
     class Meta:
         from .models import AdmissionStudent
         model  = AdmissionStudent
+    def get_departmentId(self, obj):
+        return obj.department.dept_id
+
+    def get_programId(self, obj):
+        return obj.program.code.lower()
+
         fields = ['regNo', 'name', 'departmentId', 'programId', 'batch', 'semester']

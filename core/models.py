@@ -1,5 +1,4 @@
 from django.contrib.auth.models import AbstractUser
-from django.core.validators import validate_slug
 from django.db import models
 
 
@@ -40,7 +39,7 @@ class User(AbstractUser):
 # ─── University Structure ─────────────────────────────────────────────────────
 
 class Department(models.Model):
-    slug       = models.CharField(max_length=50, unique=True, validators=[validate_slug])
+    dept_id    = models.CharField(max_length=50, unique=True)   # e.g. 'computing', 'business'
     name       = models.CharField(max_length=200, unique=True)
     vision     = models.TextField(blank=True)
     mission    = models.TextField(blank=True)
@@ -57,7 +56,6 @@ class Department(models.Model):
 
 
 class Program(models.Model):
-    slug       = models.CharField(max_length=50, unique=True, validators=[validate_slug])
     name       = models.CharField(max_length=200)
     code       = models.CharField(max_length=20, unique=True)
     department = models.ForeignKey(
@@ -197,8 +195,7 @@ class Student(models.Model):
 class Course(models.Model):
     COURSE_TYPE_CHOICES = [('core', 'Core'), ('elective', 'Elective')]
 
-    slug         = models.CharField(max_length=50, unique=True, validators=[validate_slug])
-    code         = models.CharField(max_length=30, unique=True)   # FIXED: unique on its own — codes are globally unique
+    code         = models.CharField(max_length=30, unique=True)
     title        = models.CharField(max_length=200)
     type         = models.CharField(max_length=10, choices=COURSE_TYPE_CHOICES, default='core')
     department   = models.ForeignKey(
