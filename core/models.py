@@ -507,3 +507,57 @@ class AdmissionStudent(models.Model):
 
     def __str__(self):
         return f"{self.reg_no} — {self.name} ({self.program.code}, {self.batch})"
+
+
+# ─── Dept Admin Profile ───────────────────────────────────────────────────────
+
+class DeptAdminProfile(models.Model):
+    user        = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name='dept_admin_profile'
+    )
+    employee_id = models.CharField(max_length=50, unique=True, blank=True)
+    department  = models.ForeignKey(
+        Department, on_delete=models.PROTECT, related_name='dept_admins'
+    )
+
+    class Meta:
+        verbose_name        = 'Dept Admin Profile'
+        verbose_name_plural = 'Dept Admin Profiles'
+
+    def __str__(self):
+        return f"{self.user.username} — Admin @ {self.department.name}"
+
+
+# ─── Course Assignment (Dept Admin assigns instructor to course+program) ───────
+
+class CourseAssignment(models.Model):
+    """
+    Junction table: one instructor teaches one course for one program.
+    Compound key (instructor, course, program) is unique — no collisions.
+    This decouples the course catalog from active teaching instances.
+    """
+    instructor = models.ForeignKey(
+        InstructorProfile, on_delete=models.CASCADE, related_name='course_assignments'
+    )
+    course     = models.ForeignKey(
+        Course, on_delete=models.CASCADE, related_name='assignments'
+    )
+    program    = models.ForeignKey(
+        Program, on_delete=models.SET_NULL,
+        related_name='course_assignments', null=True, blank=True
+    )
+    assigned_by = models.ForeignKey(
+        DeptAdminProfile, on_delete=models.SET_NULL,
+        related_name='assignments_made', null=True, blank=True
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = 'Course Assignment'
+        verbose_name_plural = 'Course Assignments'
+        unique_together     = ('instructor', 'course', 'program')
+        ordering            = ['course__code']
+
+    def __str__(self):
+        prog = self.program.code if self.program else 'All'
+        return f"{self.instructor.user.username} → {self.course.code} ({prog})"

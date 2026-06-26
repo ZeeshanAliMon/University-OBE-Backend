@@ -6,7 +6,7 @@ from core.models import (
     GraduateAttribute, QAProfile, InstructorProfile, Student,
     Course, InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
-    AdmissionStudent,
+    AdmissionStudent, DeptAdminProfile,
 )
 
 
@@ -337,6 +337,17 @@ class Command(BaseCommand):
             role='admission', password=make_password('admpass123'), is_active=True
         )
 
+        # Department Admins
+        for username, first, last, email, dept_slug, emp_id in [
+            ('admin_computing',  'Ahmad',  'Raza',   'admin.computing@iqra.edu.pk',  'computing',   'DA-CS-001'),
+            ('admin_business',   'Bilal',  'Tahir',  'admin.business@iqra.edu.pk',   'business',    'DA-BIZ-001'),
+            ('admin_engineering','Hira',   'Baig',   'admin.engineering@iqra.edu.pk','engineering', 'DA-ENG-001'),
+        ]:
+            u = User.objects.create(username=username, email=email,
+                first_name=first, last_name=last,
+                role='dept_admin', password=make_password('adminpass123'), is_active=True)
+            DeptAdminProfile.objects.create(user=u, department=depts[dept_slug], employee_id=emp_id)
+
         # Instructors
         instructor_profiles = {}
         for username, first, last, email, dept_slug, emp_id, designation in [
@@ -354,7 +365,7 @@ class Command(BaseCommand):
             )
             instructor_profiles[username] = p
 
-        self.stdout.write('  ✓ Users (3 QA, 1 Admission, 4 Instructors)')
+        self.stdout.write('  ✓ Users (3 QA, 3 Dept Admins, 1 Admission, 4 Instructors)')
 
         # ── Admission Students ────────────────────────────────────────────────
         admission_data = [
@@ -465,5 +476,6 @@ class Command(BaseCommand):
         self.stdout.write('   qa_computing  / qapass123   → QA (Computing)')
         self.stdout.write('   qa_business   / qapass123   → QA (Business)')
         self.stdout.write('   qa_engineering/ qapass123   → QA (Engineering)')
-        self.stdout.write('   admission     / admpass123  → Admission Officer')
+        self.stdout.write('   admission       / admpass123   → Admission Officer')
+        self.stdout.write('   admin_computing / adminpass123 → Dept Admin (Computing)')
         self.stdout.write('   dr_ali        / instpass123 → Instructor')
