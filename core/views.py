@@ -1,5 +1,4 @@
 from django.contrib.auth import authenticate
-from django.utils.text import slugify
 
 from rest_framework             import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -35,23 +34,6 @@ def get_instructor_profile(user):
     except Exception:
         return None
 
-
-def make_unique_slug(base_slug, model_class, exclude_pk=None):
-    slug = slugify(base_slug)
-    qs   = model_class.objects.filter(slug=slug)
-    if exclude_pk:
-        qs = qs.exclude(pk=exclude_pk)
-    if not qs.exists():
-        return slug
-    counter = 2
-    while True:
-        candidate = f"{slug}-{counter}"
-        qs = model_class.objects.filter(slug=candidate)
-        if exclude_pk:
-            qs = qs.exclude(pk=exclude_pk)
-        if not qs.exists():
-            return candidate
-        counter += 1
 
 
 def prefetch_instructor_course(qs):
