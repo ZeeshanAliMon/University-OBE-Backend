@@ -122,18 +122,22 @@ class ProgramSerializer(serializers.ModelSerializer):
 
 
 class CourseSerializer(serializers.ModelSerializer):
-    id              = serializers.CharField(source='slug', read_only=True)
-    departmentId    = serializers.CharField(source='department.slug', read_only=True)
+    id              = serializers.SerializerMethodField()
+    departmentId    = serializers.SerializerMethodField()
     programId       = serializers.SerializerMethodField()
     mappedGAs       = serializers.SerializerMethodField()
     mappedGAs_write = serializers.ListField(
         child=serializers.CharField(), write_only=True, required=False, source='mapped_gas_ids'
     )
+    creditHours     = serializers.IntegerField(source='credit_hours', required=False)
 
     class Meta:
         model  = Course
         fields = ['id', 'code', 'title', 'type', 'mappedGAs', 'mappedGAs_write',
-                  'departmentId', 'programId', 'credit_hours']
+                  'departmentId', 'programId', 'creditHours']
+
+    def get_id(self, obj):
+        return obj.code
 
     def get_departmentId(self, obj):
         return obj.department.dept_id
