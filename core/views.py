@@ -1036,15 +1036,14 @@ class StudentCoursesView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
+        # Try to get reg_no from Student profile
+        # Fall back to username (App.tsx passes username as studentRegNo)
         try:
-            # Find by reg_no stored in Student model
             student_profile = request.user.student_profile
             reg_no = student_profile.roll_number
         except Exception:
-            return Response(
-                {'error': 'Student profile not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            # No Student profile — use username as reg_no
+            reg_no = request.user.username
 
         # Find all CourseStudent rows matching this reg_no
         enrollments = CourseStudent.objects.filter(
