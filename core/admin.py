@@ -7,7 +7,7 @@ from .models import (
     GraduateAttribute, QAProfile, InstructorProfile, Student,
     Course, InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
-    AdmissionStudent,
+    AdmissionStudent, DeptAdminProfile, CourseAssignment, SemesterPlan,
 )
 
 
@@ -261,3 +261,24 @@ class AdmissionStudentAdmin(admin.ModelAdmin):
     list_filter   = ('department', 'program', 'batch')
     search_fields = ('reg_no', 'name')
     ordering      = ('reg_no',)
+
+
+@admin.register(DeptAdminProfile)
+class DeptAdminProfileAdmin(admin.ModelAdmin):
+    list_display  = ('user', 'department', 'employee_id')
+    list_filter   = ('department',)
+    search_fields = ('user__username', 'employee_id')
+
+
+@admin.register(CourseAssignment)
+class CourseAssignmentAdmin(admin.ModelAdmin):
+    list_display  = ('instructor', 'course', 'program', 'assigned_by', 'created_at')
+    list_filter   = ('course__department', 'program')
+    search_fields = ('instructor__user__username', 'course__code')
+
+
+@admin.register(SemesterPlan)
+class SemesterPlanAdmin(admin.ModelAdmin):
+    list_display  = ('program', 'semester', 'updated_by', 'updated_at')
+    list_filter   = ('program__department', 'semester')
+    search_fields = ('program__code',)

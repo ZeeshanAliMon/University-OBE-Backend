@@ -852,3 +852,231 @@ class CourseAssignmentView(APIView):
             return Response({'error': 'Assignment not found'}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+
+
+# ─── Teachers List (all instructors across all depts) ─────────────────────────
+
+class TeacherListView(APIView):
+    """
+    GET /api/teachers/
+    Returns all instructors across ALL departments.
+    Used by dept_admin when assigning teachers to courses
+    (can assign teachers from any department to their courses).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        profiles = InstructorProfile.objects.select_related(
+            'user', 'department'
+        ).all().order_by('department__name', 'user__last_name')
+        data = [
+            {
+                'employeeId':   p.employee_id,
+                'name':         p.user.get_full_name() or p.user.username,
+                'email':        p.user.email,
+                'designation':  p.designation,
+                'departmentId': p.department.dept_id,
+                'departmentName': p.department.name,
+            }
+            for p in profiles
+        ]
+        return Response(data)
+
+
+# ─── Dept Admin Profile ───────────────────────────────────────────────────────
+
+class DeptAdminProfileView(APIView):
+    """
+    GET /api/admin/profile/
+    Returns the dept_admin's managed department.
+    Frontend uses this on load to know which dept to scope the UI to.
+    """
+    permission_classes = [IsDeptAdmin]
+
+    def get(self, request):
+        try:
+            profile = request.user.dept_admin_profile
+        except Exception:
+            return Response(
+                {'error': 'Dept admin profile not found'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return Response({
+            'username':     request.user.username,
+            'user_type':    'dept_admin',
+            'departmentId': profile.department.dept_id,
+            'departmentName': profile.department.name,
+            'employeeId':   profile.employee_id,
+        })
+
+
+# ─── Semester Plans ───────────────────────────────────────────────────────────
+
+class SemesterPlanView(APIView):
+    """
+    GET  /api/admin/semester-plans/?programId=bscs
+         Returns all semester plans for a program.
+
+    POST /api/admin/semester-plans/
+         Body: { programId: 'bscs', semester: '1st', courseCodes: ['CMC111', ...] }
+         Upserts — safe to call multiple times.
+
+    DELETE /api/admin/semester-plans/
+         Body: { programId: 'bscs', semester: '1st' }
+         Clears a semester plan.
+    """
+    permission_classes = [IsDeptAdmin]
+
+    def _get_admin_dept(self, user):
+        try:
+            return user.dept_admin_profile.department
+        except Exception:
+            return None
+
+    def get(self, request):
+        program_id = request.query_params.get('programId', '').strip()
+        dept = self._get_admin_dept(request.user)
+        if not dept:
+            return Response({'error': 'Profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
+        qs = SemesterPlan.objects.select_related('program')
+        if program_id:
+            qs = qs.filter(program__code__iexact=program_id)
+        else:
+            qs = qs.filter(program__department=dept)
+
+        data = [
+            {
+                'programId':   plan.program.code.lower(),
+                'semester':    plan.semester,
+                'courseCodes': plan.course_codes,
+            }
+            for plan in qs
+        ]
+        return Response(data)
+
+    def post(self, request):
+        dept = self._get_admin_dept(request.user)
+        if not dept:
+            return Response({'error': 'Profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
+        program_id   = request.data.get('programId', '').strip()
+        semester     = request.data.get('semester', '').strip()
+        course_codes = request.data.get('courseCodes', [])
+
+        if not program_id or not semester:
+            return Response(
+                {'error': 'programId and semester are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            program = Program.objects.get(code__iexact=program_id, department=dept)
+        except Program.DoesNotExist:
+            return Response(
+                {'error': f'Program "{program_id}" not found in your department'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        admin_profile = request.user.dept_admin_profile
+        plan, _ = SemesterPlan.objects.update_or_create(
+            program=program, semester=semester,
+            defaults={'course_codes': course_codes, 'updated_by': admin_profile}
+        )
+        return Response({
+            'programId':   plan.program.code.lower(),
+            'semester':    plan.semester,
+            'courseCodes': plan.course_codes,
+        })
+
+    def delete(self, request):
+        dept = self._get_admin_dept(request.user)
+        if not dept:
+            return Response({'error': 'Profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
+        program_id = request.data.get('programId', '').strip()
+        semester   = request.data.get('semester', '').strip()
+        try:
+            plan = SemesterPlan.objects.get(
+                program__code__iexact=program_id,
+                program__department=dept,
+                semester=semester
+            )
+            plan.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except SemesterPlan.DoesNotExist:
+            return Response({'error': 'Plan not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+# ─── Student Course View (student sees their own courses + marks) ─────────────
+
+class StudentCoursesView(APIView):
+    """
+    GET /api/student/courses/
+    Returns all courses the authenticated student is enrolled in,
+    with their own marks only (not the full class roster).
+
+    Response shape per course:
+    {
+        "id":          "course-CMC111-INS-CS-001-bscs",
+        "code":        "CMC111",
+        "title":       "Programming Fundamentals (BSCS)",
+        "creditHours": 3,
+        "categories":  [...],
+        "studentMarks": { "Assignments-1": 8.5, "Mid Term-1": 24.5 }
+    }
+
+    Requires: User.role == 'student'
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.user.role != 'student':
+            return Response(
+                {'error': 'Only students can access this endpoint'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        try:
+            # Find by reg_no stored in Student model
+            student_profile = request.user.student_profile
+            reg_no = student_profile.roll_number
+        except Exception:
+            return Response(
+                {'error': 'Student profile not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Find all CourseStudent rows matching this reg_no
+        enrollments = CourseStudent.objects.filter(
+            reg_no=reg_no
+        ).select_related(
+            'course__department',
+            'course__program',
+        ).prefetch_related(
+            'marks__unit_item__category',
+            'course__categories',
+        )
+
+        result = []
+        for enrollment in enrollments:
+            ic = enrollment.course
+            # Build student-specific marks dict
+            student_marks = {
+                f"{m.unit_item.category.name}-{m.unit_item.unit_no}": m.score
+                for m in enrollment.marks.select_related('unit_item__category').all()
+            }
+            # Build categories list
+            categories = [
+                {'name': c.name, 'percentage': c.percentage, 'units': c.units}
+                for c in ic.categories.order_by('order').all()
+            ]
+            result.append({
+                'id':           f"course-{ic.code}-{ic.instructor.employee_id}-{ic.program.code.lower() if ic.program else 'all'}",
+                'code':         ic.code,
+                'title':        f"{ic.title} ({ic.program.code if ic.program else ''})",
+                'creditHours':  ic.credit_hours,
+                'categories':   categories,
+                'studentMarks': student_marks,
+            })
+
+        return Response(result)

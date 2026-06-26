@@ -561,3 +561,33 @@ class CourseAssignment(models.Model):
     def __str__(self):
         prog = self.program.code if self.program else 'All'
         return f"{self.instructor.user.username} → {self.course.code} ({prog})"
+
+
+# ─── Semester Plan ────────────────────────────────────────────────────────────
+
+class SemesterPlan(models.Model):
+    SEMESTER_CHOICES = [
+        ('1st','1st'),('2nd','2nd'),('3rd','3rd'),('4th','4th'),
+        ('5th','5th'),('6th','6th'),('7th','7th'),('8th','8th'),
+    ]
+
+    program      = models.ForeignKey(
+        Program, on_delete=models.CASCADE, related_name='semester_plans'
+    )
+    semester     = models.CharField(max_length=10, choices=SEMESTER_CHOICES)
+    course_codes = models.JSONField(default=list)
+    updated_by   = models.ForeignKey(
+        DeptAdminProfile, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='semester_plans'
+    )
+    created_at   = models.DateTimeField(auto_now_add=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name        = 'Semester Plan'
+        verbose_name_plural = 'Semester Plans'
+        unique_together     = ('program', 'semester')
+        ordering            = ['program__code', 'semester']
+
+    def __str__(self):
+        return f"{self.program.code} — Semester {self.semester} ({len(self.course_codes)} courses)"
