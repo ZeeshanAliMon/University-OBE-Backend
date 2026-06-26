@@ -18,7 +18,7 @@ from .serializers import (
     GraduateAttributeSerializer, CourseSerializer,
     InstructorCourseSerializer,
 )
-from .permissions import IsQA, IsInstructor
+from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -64,7 +64,30 @@ class LoginView(APIView):
             return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
         if not user.is_active:
             return Response({'error': 'Account is disabled'}, status=status.HTTP_401_UNAUTHORIZED)
-        return Response({**get_tokens_for_user(user), 'user': UserSerializer(user).data})
+        user_data = UserSerializer(user).data
+
+        if user.role == 'qa':
+            try:
+                user_data['departmentId']   = user.qa_profile.department.dept_id
+                user_data['departmentName'] = user.qa_profile.department.name
+            except Exception:
+                pass
+
+        if user.role == 'instructor':
+            try:
+                user_data['departmentId']   = user.instructor_profile.department.dept_id
+                user_data['departmentName'] = user.instructor_profile.department.name
+            except Exception:
+                pass
+
+        if user.role == 'dept_admin':
+            try:
+                user_data['departmentId']   = user.dept_admin_profile.department.dept_id
+                user_data['departmentName'] = user.dept_admin_profile.department.name
+            except Exception:
+                pass
+
+        return Response({**get_tokens_for_user(user), 'user': user_data})
 
 
 # ─── Departments ──────────────────────────────────────────────────────────────
@@ -190,13 +213,43 @@ class ProgramDetailView(APIView):
 # ─── Graduate Attributes ──────────────────────────────────────────────────────
 
 class GraduateAttributeListView(APIView):
-    permission_classes = [IsAuthenticated]
+    def get_permissions(self):
+        return [IsAuthenticated()] if self.request.method == 'GET' else [IsQA()]
 
     def get(self, request):
-        qs = GraduateAttribute.objects.select_related(
-            'department', 'program'
-        ).all().order_by('ga_id')
+        qs = GraduateAttribute.objects.select_related('department', 'program').order_by('ga_id')
+        dept = request.query_params.get('departmentId')
+        if dept:
+            qs = qs.filter(department__dept_id=dept)
         return Response(GraduateAttributeSerializer(qs, many=True).data)
+
+    def post(self, request):
+        data    = request.data
+        ga_id   = data.get('id', '').strip()
+        name    = data.get('name', '').strip()
+        dept_id = data.get('departmentId', '').strip()
+        prog_id = data.get('programId', '')
+        if not ga_id or not name or not dept_id:
+            return Response({'error': 'id, name and departmentId are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if GraduateAttribute.objects.filter(ga_id=ga_id).exists():
+            ga = GraduateAttribute.objects.get(ga_id=ga_id)
+            return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_200_OK)
+        try:
+            department = Department.objects.get(dept_id=dept_id)
+        except Department.DoesNotExist:
+            return Response({"error": f'Department "{dept_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
+        program = None
+        if prog_id:
+            try:
+                program = Program.objects.get(code__iexact=prog_id)
+            except Program.DoesNotExist:
+                pass
+        ga = GraduateAttribute.objects.create(
+            ga_id=ga_id, name=name,
+            description=data.get('description', ''),
+            department=department, program=program
+        )
+        return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_201_CREATED)
 
 
 # ─── Courses ──────────────────────────────────────────────────────────────────
@@ -580,7 +633,7 @@ class InstructorProfileView(APIView):
             'employeeId':   profile.employee_id,
             'designation':  profile.designation,
             'department': {
-                'id':   profile.department.slug,
+                'id':   profile.department.dept_id,
                 'name': profile.department.name,
             }
         })
@@ -590,7 +643,6 @@ class InstructorProfileView(APIView):
 
 from .models      import AdmissionStudent
 from .serializers import AdmissionStudentSerializer
-from .permissions import IsAdmission
 
 
 class AdmissionStudentListView(APIView):
@@ -612,51 +664,48 @@ class AdmissionStudentListView(APIView):
         return Response(AdmissionStudentSerializer(qs, many=True).data)
 
     def post(self, request):
-        data       = request.data
-        reg_no     = data.get('regNo', '').strip().upper()
-        name       = data.get('name', '').strip()
-        dept_id    = data.get('departmentId', '').strip()
-        program_id = data.get('programId', '').strip()
-        batch      = data.get('batch', 'Fall')
+        payload = request.data
+        is_bulk = isinstance(payload, list)
+        records = payload if is_bulk else [payload]
+        created, errors = [], []
 
-        if not reg_no or not name or not dept_id or not program_id:
-            return Response(
-                {'error': 'regNo, name, departmentId and programId are required'},
-                status=status.HTTP_400_BAD_REQUEST
+        for idx, data in enumerate(records):
+            reg_no     = data.get('regNo', '').strip().upper()
+            name       = data.get('name', '').strip()
+            dept_id    = data.get('departmentId', '').strip()
+            program_id = data.get('programId', '').strip()
+            batch      = data.get('batch', 'Fall')
+            semester   = data.get('semester', '1st')
+
+            if not reg_no or not name or not dept_id or not program_id:
+                errors.append({'index': idx, 'regNo': reg_no, 'error': 'regNo, name, departmentId and programId are required'})
+                continue
+            try:
+                department = Department.objects.get(dept_id=dept_id)
+            except Department.DoesNotExist:
+                errors.append({'index': idx, 'regNo': reg_no, 'error': f'Department "{dept_id}" not found'})
+                continue
+            try:
+                program = Program.objects.get(code__iexact=program_id)
+            except Program.DoesNotExist:
+                errors.append({'index': idx, 'regNo': reg_no, 'error': f'Program "{program_id}" not found'})
+                continue
+
+            student, _ = AdmissionStudent.objects.update_or_create(
+                reg_no=reg_no,
+                defaults=dict(name=name, department=department, program=program, batch=batch, semester=semester)
             )
+            created.append(student)
 
-        if AdmissionStudent.objects.filter(reg_no=reg_no).exists():
-            return Response(
-                {'error': f'Student with registration number "{reg_no}" already exists'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        try:
-            department = Department.objects.get(dept_id=dept_id)
-        except Department.DoesNotExist:
-            return Response(
-                {'error': f'Department "{dept_id}" not found'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        try:
-            program = Program.objects.get(code__iexact=program_id)
-        except Program.DoesNotExist:
-            return Response(
-                {'error': f'Program "{program_id}" not found'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        semester = data.get('semester', '1st')
-        student = AdmissionStudent.objects.create(
-            reg_no=reg_no, name=name,
-            department=department, program=program,
-            batch=batch, semester=semester
-        )
-        return Response(
-            AdmissionStudentSerializer(student).data,
-            status=status.HTTP_201_CREATED
-        )
+        serialized = AdmissionStudentSerializer(created, many=True).data
+        if is_bulk:
+            body = {'created': serialized}
+            if errors: body['errors'] = errors
+            code = status.HTTP_207_MULTI_STATUS if errors else status.HTTP_201_CREATED
+            return Response(body, status=code)
+        if errors:
+            return Response({'error': errors[0]['error']}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serialized[0], status=status.HTTP_201_CREATED)
 
 
 class AdmissionStudentDetailView(APIView):
@@ -715,3 +764,91 @@ class AdmissionStudentDetailView(APIView):
             return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
         student.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+# ─── Course Assignments (Dept Admin) ─────────────────────────────────────────
+
+from .models import CourseAssignment, DeptAdminProfile
+
+
+class CourseAssignmentView(APIView):
+    """
+    GET    /api/admin/course-assignments/
+    POST   /api/admin/course-assignments/   { teacherId, courseCode, programId }
+    DELETE /api/admin/course-assignments/   { teacherId, courseCode, programId }
+    Dept admin assigns an instructor to a course+program combination.
+    """
+    permission_classes = [IsDeptAdmin]
+
+    def get(self, request):
+        qs = CourseAssignment.objects.select_related(
+            'instructor__user', 'course', 'program'
+        ).all()
+        data = [{
+            'teacherId':   a.instructor.employee_id,
+            'teacherName': a.instructor.user.get_full_name() or a.instructor.user.username,
+            'courseCode':  a.course.code,
+            'courseTitle': a.course.title,
+            'programId':   a.program.code.lower() if a.program else None,
+            'programName': a.program.name         if a.program else None,
+        } for a in qs]
+        return Response(data)
+
+    def post(self, request):
+        data        = request.data
+        teacher_id  = data.get('teacherId', '').strip()
+        course_code = data.get('courseCode', '').strip().upper()
+        program_id  = data.get('programId', '').strip()
+
+        if not teacher_id or not course_code:
+            return Response({'error': 'teacherId and courseCode are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            instructor = InstructorProfile.objects.get(employee_id=teacher_id)
+        except InstructorProfile.DoesNotExist:
+            return Response({'error': f'Instructor "{teacher_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            course = Course.objects.get(code__iexact=course_code)
+        except Course.DoesNotExist:
+            return Response({'error': f'Course "{course_code}" not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        program = None
+        if program_id:
+            try:
+                program = Program.objects.get(code__iexact=program_id)
+            except Program.DoesNotExist:
+                return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        dept_admin = None
+        try:
+            dept_admin = request.user.dept_admin_profile
+        except Exception:
+            pass
+
+        assignment, created = CourseAssignment.objects.get_or_create(
+            instructor=instructor, course=course, program=program,
+            defaults={'assigned_by': dept_admin}
+        )
+        return Response({
+            'teacherId':  assignment.instructor.employee_id,
+            'courseCode': assignment.course.code,
+            'programId':  assignment.program.code.lower() if assignment.program else None,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    def delete(self, request):
+        data        = request.data
+        teacher_id  = data.get('teacherId', '').strip()
+        course_code = data.get('courseCode', '').strip().upper()
+        program_id  = data.get('programId', '').strip()
+
+        qs = CourseAssignment.objects.filter(
+            instructor__employee_id=teacher_id,
+            course__code__iexact=course_code
+        )
+        if program_id:
+            qs = qs.filter(program__code__iexact=program_id)
+        deleted, _ = qs.delete()
+        if not deleted:
+            return Response({'error': 'Assignment not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
