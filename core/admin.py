@@ -33,7 +33,7 @@ class StudentProfileInline(admin.StackedInline):
     model       = Student
     can_delete  = False
     verbose_name = 'Student Profile'
-    fields      = ('program', 'roll_number', 'batch_year')
+    fields      = ('reg_no', 'department', 'program', 'batch_year')
     extra       = 0
 
 
@@ -131,9 +131,9 @@ class InstructorProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
-    list_display  = ('roll_number', 'user', 'program', 'batch_year')
-    list_filter   = ('program', 'batch_year')
-    search_fields = ('roll_number', 'user__username')
+    list_display  = ('reg_no', 'user', 'department', 'program', 'batch_year')
+    list_filter   = ('department', 'program', 'batch_year')
+    search_fields = ('reg_no', 'user__username')
 
 
 # ─── QA Courses ───────────────────────────────────────────────────────────────

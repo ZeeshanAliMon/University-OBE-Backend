@@ -172,22 +172,38 @@ class InstructorProfile(models.Model):
 
 
 class Student(models.Model):
+    """
+    Links an auth User to a student reg_no.
+    Same pattern as InstructorProfile and QAProfile.
+
+    Created either:
+    a) When admission officer creates a student and assigns them a login, or
+    b) Manually in admin.
+
+    reg_no must match AdmissionStudent.reg_no for full data access.
+    """
+    BATCH_YEAR_CHOICES = [(y, str(y)) for y in range(2018, 2035)]
+
     user        = models.OneToOneField(
         User, on_delete=models.CASCADE, related_name='student_profile'
     )
-    roll_number = models.CharField(max_length=50, unique=True)
+    reg_no      = models.CharField(max_length=60, unique=True)
     program     = models.ForeignKey(
         Program, on_delete=models.PROTECT, related_name='students'
+    )
+    department  = models.ForeignKey(
+        Department, on_delete=models.PROTECT, related_name='students',
+        null=True, blank=True
     )
     batch_year  = models.IntegerField(null=True, blank=True)
 
     class Meta:
-        verbose_name        = 'Student'
-        verbose_name_plural = 'Students'
-        ordering            = ['roll_number']
+        verbose_name        = 'Student Profile'
+        verbose_name_plural = 'Student Profiles'
+        ordering            = ['reg_no']
 
     def __str__(self):
-        return f"{self.roll_number} — {self.user.get_full_name() or self.user.username}"
+        return f"{self.reg_no} — {self.user.get_full_name() or self.user.username}"
 
 
 # ─── QA Course Catalogue ─────────────────────────────────────────────────────
