@@ -5,6 +5,7 @@ from django.db import models
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
 class User(AbstractUser):
+    email = models.EmailField(unique=True)   # login identifier
     ROLE_CHOICES = [
         ('qa',         'QA'),
         ('instructor', 'Instructor'),
