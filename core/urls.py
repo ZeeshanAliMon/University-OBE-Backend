@@ -6,10 +6,13 @@ from .views import (
     DepartmentListView, DepartmentDetailView,
     ProgramListView, ProgramDetailView,
     GraduateAttributeListView,
-    InstructorProfileView,
     CourseListView, CourseDetailView,
+    InstructorProfileView,
     InstructorCourseView,
+    TeacherListView,
     CourseAssignmentView,
+    SemesterPlanView,
+    StudentCoursesView,
     AdmissionStudentListView, AdmissionStudentDetailView,
 )
 
@@ -31,7 +34,11 @@ urlpatterns = [
     path('instructor/profile/', InstructorProfileView.as_view(), name='instructor_profile'),
     path('instructor/courses/', InstructorCourseView.as_view(),  name='instructor_courses'),
 
+    path('teachers/',                 TeacherListView.as_view(),    name='teacher_list'),
     path('admin/course-assignments/', CourseAssignmentView.as_view(), name='course_assignments'),
+    path('admin/semester-plans/',     SemesterPlanView.as_view(),   name='semester_plans'),
+
+    path('student/courses/', StudentCoursesView.as_view(), name='student_courses'),
 
     path('students/',              AdmissionStudentListView.as_view(),   name='student_list'),
     path('students/<str:reg_no>/', AdmissionStudentDetailView.as_view(), name='student_detail'),
