@@ -11,10 +11,11 @@ from .views import (
     InstructorCourseView,
     TeacherListView,
     CourseAssignmentView,
-    DeptAdminProfileView,
     SemesterPlanView,
     StudentCoursesView,
     AdmissionStudentListView, AdmissionStudentDetailView,
+    CLOListView, CLODetailView,
+    DeptAdminProfileView,
     # Reports
     ProgramGAAttainmentView,
     StudentGAAttainmentView,
@@ -40,8 +41,11 @@ urlpatterns = [
     path('instructor/profile/', InstructorProfileView.as_view(), name='instructor_profile'),
     path('instructor/courses/', InstructorCourseView.as_view(),  name='instructor_courses'),
 
+    # CLO management per instructor course
+    path('instructor/courses/<str:frontend_id>/clos/',           CLOListView.as_view(),   name='clo_list'),
+    path('instructor/courses/<str:frontend_id>/clos/<int:clo_id>/', CLODetailView.as_view(), name='clo_detail'),
+
     path('teachers/',                 TeacherListView.as_view(),      name='teacher_list'),
-    path('admin/profile/',            DeptAdminProfileView.as_view(),  name='dept_admin_profile'),
     path('admin/course-assignments/', CourseAssignmentView.as_view(), name='course_assignments'),
     path('admin/semester-plans/',     SemesterPlanView.as_view(),     name='semester_plans'),
 
@@ -50,9 +54,13 @@ urlpatterns = [
     path('students/',              AdmissionStudentListView.as_view(),   name='student_list'),
     path('students/<str:reg_no>/', AdmissionStudentDetailView.as_view(), name='student_detail'),
 
-    # ── Reports ──────────────────────────────────────────────────────────────
+    path('admin/profile/', DeptAdminProfileView.as_view(), name='dept_admin_profile'),
+
+    # Reports
     path('reports/program-ga-attainment/', ProgramGAAttainmentView.as_view(),  name='report_program_ga'),
     path('reports/student-ga-attainment/', StudentGAAttainmentView.as_view(),  name='report_student_ga'),
     path('reports/course-attainment/',     CourseAttainmentView.as_view(),     name='report_course'),
     path('reports/student-summary/',       StudentSummaryView.as_view(),       name='report_student_summary'),
 ]
+
+

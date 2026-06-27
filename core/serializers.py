@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     User, Department, Program, ProgramObjective, POGAMapping,
-    GraduateAttribute, Course,
+    GraduateAttribute, Course, CLO,
     InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
 )
@@ -23,6 +23,21 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 # ─── QA Serializers ───────────────────────────────────────────────────────────
+
+class CLOSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Course Learning Outcomes.
+    mappedGA: GA id string (e.g. "GA-1") or null.
+    """
+    mappedGA = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = CLO
+        fields = ['id', 'code', 'description', 'mappedGA', 'order']
+
+    def get_mappedGA(self, obj):
+        return obj.mapped_ga.ga_id if obj.mapped_ga else None
+
 
 class GraduateAttributeSerializer(serializers.ModelSerializer):
     id           = serializers.CharField(source='ga_id')

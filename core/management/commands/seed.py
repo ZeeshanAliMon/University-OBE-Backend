@@ -2,7 +2,7 @@ from django.core.management.base import BaseCommand
 from django.contrib.auth.hashers import make_password
 from core.models import (
     User, Department, Program, ProgramObjective, POGAMapping,
-    GraduateAttribute, QAProfile, InstructorProfile, Student,
+    GraduateAttribute, CLO, QAProfile, InstructorProfile, Student,
     Course, InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
     AdmissionStudent, DeptAdminProfile, AdmissionProfile, CourseAssignment,
@@ -18,7 +18,7 @@ class Command(BaseCommand):
 
         # ── Clean slate ───────────────────────────────────────────────────────
         for model in [
-            OBEStudentMark, StudentMark, CourseStudent, OBEQuestion,
+            OBEStudentMark, StudentMark, CourseStudent, OBEQuestion, CLO,
             UnitItem, MarksCategory, GradeScale, InstructorCourse,
             POGAMapping, ProgramObjective, Course, GraduateAttribute,
             AdmissionStudent, Student,
@@ -468,6 +468,25 @@ class Command(BaseCommand):
                 OBEStudentMark.objects.create(student=s, question=q_map[qid], score=score)
 
         self.stdout.write('  ✓ Demo Instructor Course + Marks')
+
+        # ── Seed CLOs for demo instructor course ──────────────────────────────
+        demo_gas = list(GraduateAttribute.objects.filter(
+            department__dept_id='computing'
+        ).order_by('ga_id')[:4])
+
+        clo_defs = [
+            ('CLO-1', 'Apply fundamental software engineering principles to design and develop systems', 1),
+            ('CLO-2', 'Analyze and evaluate software requirements and produce technical documentation',  2),
+            ('CLO-3', 'Implement object-oriented solutions using appropriate design patterns',           3),
+            ('CLO-4', 'Conduct systematic testing and quality assurance of software systems',           4),
+        ]
+        for code, description, order in clo_defs:
+            ga = demo_gas[order - 1] if order <= len(demo_gas) else None
+            CLO.objects.create(
+                course=ic, code=code, description=description,
+                mapped_ga=ga, order=order
+            )
+        self.stdout.write(f'  ✓ CLOs (4 for demo course)')
 
         # ── Summary ───────────────────────────────────────────────────────────
         self.stdout.write(self.style.SUCCESS('\n✅  Seed complete!'))
