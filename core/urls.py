@@ -11,6 +11,7 @@ from .views import (
     InstructorCourseView,
     TeacherListView,
     CourseAssignmentView,
+    DeptAdminProfileView,
     SemesterPlanView,
     StudentCoursesView,
     AdmissionStudentListView, AdmissionStudentDetailView,
@@ -40,6 +41,7 @@ urlpatterns = [
     path('instructor/courses/', InstructorCourseView.as_view(),  name='instructor_courses'),
 
     path('teachers/',                 TeacherListView.as_view(),      name='teacher_list'),
+    path('admin/profile/',            DeptAdminProfileView.as_view(),  name='dept_admin_profile'),
     path('admin/course-assignments/', CourseAssignmentView.as_view(), name='course_assignments'),
     path('admin/semester-plans/',     SemesterPlanView.as_view(),     name='semester_plans'),
 
