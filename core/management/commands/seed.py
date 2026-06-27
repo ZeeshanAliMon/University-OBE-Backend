@@ -29,6 +29,11 @@ class Command(BaseCommand):
         ]:
             model.objects.all().delete()
         User.objects.filter(is_superuser=False).delete()
+        # Keep superuser but recreate if missing
+        if not User.objects.filter(is_superuser=True).exists():
+            User.objects.create_superuser(
+                username='zeeshan', email='zeeshan@iqra.edu.pk', password='zeeshan'
+            )
         self.stdout.write('  ✓ Cleared old data')
 
         # ── Departments ───────────────────────────────────────────────────────
@@ -526,3 +531,6 @@ class Command(BaseCommand):
         self.stdout.write('   admission       / admpass123   → Admission Officer')
         self.stdout.write('   admin_computing / adminpass123 → Dept Admin (Computing)')
         self.stdout.write('   dr_ali        / instpass123 → Instructor')
+        self.stdout.write('')
+        self.stdout.write('  Superuser:')
+        self.stdout.write('   zeeshan       / zeeshan     → Django Admin (/admin/)')
