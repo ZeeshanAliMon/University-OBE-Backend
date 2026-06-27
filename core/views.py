@@ -87,6 +87,13 @@ class LoginView(APIView):
             except Exception:
                 pass
 
+        if user.role == 'admission':
+            try:
+                user_data['departmentId']   = user.admission_profile.department.dept_id
+                user_data['departmentName'] = user.admission_profile.department.name
+            except Exception:
+                pass
+
         return Response({**get_tokens_for_user(user), 'user': user_data})
 
 
@@ -569,51 +576,6 @@ class InstructorCourseView(APIView):
             return Response({'courses': result, 'errors': errors}, status=status.HTTP_207_MULTI_STATUS)
         return Response(result, status=status.HTTP_200_OK)
 
-
-# ─── Graduate Attributes — Create
-class GraduateAttributeCreateView(APIView):
-    """
-    POST /api/gas/
-    Body: { id, name, description, departmentId, programId? }
-    QA only — called when a new program is created and its GAs are seeded.
-    """
-    permission_classes = [IsQA]
-
-    def post(self, request):
-        data    = request.data
-        ga_id   = data.get('id', '').strip()
-        name    = data.get('name', '').strip()
-        dept_id = data.get('departmentId', '').strip()
-        prog_id = data.get('programId', '')
-
-        if not ga_id or not name or not dept_id:
-            return Response(
-                {'error': 'id, name and departmentId are required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        if GraduateAttribute.objects.filter(ga_id=ga_id).exists():
-            # Return existing — idempotent
-            ga = GraduateAttribute.objects.get(ga_id=ga_id)
-            return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_200_OK)
-
-        try:
-            department = Department.objects.get(dept_id=dept_id)
-        except Department.DoesNotExist:
-            return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
-
-        program = None
-        if prog_id:
-            try:
-                program = Program.objects.get(code__iexact=prog_id)
-            except Program.DoesNotExist:
-                pass
-
-        ga = GraduateAttribute.objects.create(
-            ga_id=ga_id, name=name,
-            description=data.get('description', ''),
-            department=department, program=program
-        )
-        return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_201_CREATED)
 
 
 # ─── Instructor Profile

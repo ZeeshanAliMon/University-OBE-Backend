@@ -6,7 +6,7 @@ from core.models import (
     GraduateAttribute, QAProfile, InstructorProfile, Student,
     Course, InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
-    AdmissionStudent, DeptAdminProfile,
+    AdmissionStudent, DeptAdminProfile, AdmissionProfile, CourseAssignment,
 )
 
 
@@ -21,7 +21,9 @@ class Command(BaseCommand):
             OBEStudentMark, StudentMark, CourseStudent, OBEQuestion,
             UnitItem, MarksCategory, GradeScale, InstructorCourse,
             POGAMapping, ProgramObjective, Course, GraduateAttribute,
-            AdmissionStudent, Student, InstructorProfile, QAProfile,
+            AdmissionStudent, Student,
+            CourseAssignment, InstructorProfile, QAProfile,
+            DeptAdminProfile, AdmissionProfile,
             Program, Department,
         ]:
             model.objects.all().delete()
@@ -331,10 +333,13 @@ class Command(BaseCommand):
             QAProfile.objects.create(user=u, department=depts[dept_slug], employee_id=emp_id)
 
         # Admission Officer
-        User.objects.create(
+        adm_user = User.objects.create(
             username='admission', email='admission@iqra.edu.pk',
             first_name='Admission', last_name='Officer',
             role='admission', password=make_password('admpass123'), is_active=True
+        )
+        AdmissionProfile.objects.create(
+            user=adm_user, department=depts['computing'], employee_id='ADM-001'
         )
 
         # Department Admins

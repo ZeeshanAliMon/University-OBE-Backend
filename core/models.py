@@ -528,6 +528,25 @@ class DeptAdminProfile(models.Model):
         return f"{self.user.username} — Admin @ {self.department.name}"
 
 
+# ─── Admission Officer Profile ────────────────────────────────────────────────
+
+class AdmissionProfile(models.Model):
+    user        = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name='admission_profile'
+    )
+    employee_id = models.CharField(max_length=50, unique=True, blank=True)
+    department  = models.ForeignKey(
+        Department, on_delete=models.PROTECT, related_name='admission_officers'
+    )
+
+    class Meta:
+        verbose_name        = 'Admission Profile'
+        verbose_name_plural = 'Admission Profiles'
+
+    def __str__(self):
+        return f"{self.user.username} — Admission @ {self.department.name}"
+
+
 # ─── Course Assignment (Dept Admin assigns instructor to course+program) ───────
 
 class CourseAssignment(models.Model):
@@ -551,6 +570,7 @@ class CourseAssignment(models.Model):
         related_name='assignments_made', null=True, blank=True
     )
     created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name        = 'Course Assignment'
