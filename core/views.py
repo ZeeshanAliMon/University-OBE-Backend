@@ -1764,7 +1764,7 @@ class COAttainmentSummaryView(APIView):
             clos_data = []
             for clo in ic.clos.select_related('mapped_ga').all():
                 # Find questions mapped to this CLO
-                questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
+                questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
                 total_possible = 0
                 total_obtained  = 0
                 for q in questions:
@@ -1849,7 +1849,7 @@ class POAttainmentView(APIView):
             for ic in courses:
                 clos_for_ga = ic.clos.filter(mapped_ga=ga)
                 for clo in clos_for_ga:
-                    questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
+                    questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
                     for q in questions:
                         marks = OBEStudentMark.objects.filter(question=q)
                         total_possible += q.max_marks * marks.count()
@@ -1930,7 +1930,7 @@ class InstructorPerformanceView(APIView):
             for ic in profile.instructor_courses.all():
                 clo_attainments = []
                 for clo in ic.clos.all():
-                    questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
+                    questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
                     total_p = sum(q.max_marks * OBEStudentMark.objects.filter(question=q).count() for q in questions)
                     total_o = sum(
                         m.score
@@ -1976,19 +1976,29 @@ class CohortComparisonView(APIView):
         program_id = request.query_params.get('programId', '').strip()
         ga_id      = request.query_params.get('gaId', '').strip()
 
-        if not program_id or not ga_id:
-            return Response({'error': 'programId and gaId are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not program_id:
+            return Response({'error': 'programId is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             program = Program.objects.get(code__iexact=program_id)
-            ga      = GraduateAttribute.objects.get(ga_id=ga_id)
-        except (Program.DoesNotExist, GraduateAttribute.DoesNotExist) as e:
-            return Response({'error': str(e)}, status=status.HTTP_404_NOT_FOUND)
+        except Program.DoesNotExist:
+            return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        courses = InstructorCourse.objects.filter(
-            program=program,
-            clos__mapped_ga=ga
-        ).prefetch_related('clos', 'obe_questions').distinct()
+        ga = None
+        if ga_id:
+            try:
+                ga = GraduateAttribute.objects.get(ga_id=ga_id)
+            except GraduateAttribute.DoesNotExist:
+                return Response({'error': f'GA "{ga_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if ga:
+            courses = InstructorCourse.objects.filter(
+                program=program, clos__mapped_ga=ga
+            ).prefetch_related('clos', 'obe_questions').distinct()
+        else:
+            courses = InstructorCourse.objects.filter(
+                program=program
+            ).prefetch_related('clos', 'obe_questions')
 
         # Group by academic_year
         by_year = {}
@@ -1997,8 +2007,9 @@ class CohortComparisonView(APIView):
             if year not in by_year:
                 by_year[year] = {'total_possible': 0, 'total_obtained': 0}
 
-            for clo in ic.clos.filter(mapped_ga=ga):
-                questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
+            clo_qs = ic.clos.filter(mapped_ga=ga) if ga else ic.clos.all()
+            for clo in clo_qs:
+                questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
                 for q in questions:
                     marks = OBEStudentMark.objects.filter(question=q)
                     by_year[year]['total_possible'] += q.max_marks * marks.count()
@@ -2016,7 +2027,7 @@ class CohortComparisonView(APIView):
         return Response({
             'programId': program.code.lower(),
             'gaId':      ga_id,
-            'gaName':    ga.name,
+            'gaName':    ga.name if ga else None,
             'cohorts':   cohorts,
         })
 
@@ -2050,17 +2061,20 @@ class AtRiskStudentsView(APIView):
         student_failures = {}
 
         for ic in ic_qs.prefetch_related('students__obe_marks__question', 'clos', 'obe_questions'):
+            # Build mark lookup dict once per course — avoids N×M×P×Q DB queries
+            # Structure: { (student_pk, question_pk): score }
+            all_questions = list(ic.obe_questions.all())
+            mark_lookup   = {}
+            for student in ic.students.prefetch_related('obe_marks__question').all():
+                for obe_mark in student.obe_marks.all():
+                    mark_lookup[(student.pk, obe_mark.question_id)] = obe_mark.score
+
             for student in ic.students.all():
                 for clo in ic.clos.all():
-                    questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
-                    total_p = sum(q.max_marks for q in questions)
-                    total_o = sum(
-                        OBEStudentMark.objects.filter(question=q, student=student)
-                        .values_list('score', flat=True)
-                        .first() or 0
-                        for q in questions
-                    )
-                    pct = round(total_o / total_p * 100, 1) if total_p > 0 else 0
+                    questions = [q for q in all_questions if clo.code in (q.mapped_clos or [])]
+                    total_p   = sum(q.max_marks for q in questions)
+                    total_o   = sum(mark_lookup.get((student.pk, q.pk), 0) for q in questions)
+                    pct       = round(total_o / total_p * 100, 1) if total_p > 0 else 0
 
                     if pct < ATTAINMENT_THRESHOLD:
                         key = student.reg_no
@@ -2133,7 +2147,7 @@ class GapAnalysisView(APIView):
             total_p = 0
             total_o = 0
             for clo in active_clos:
-                questions = clo.course.obe_questions.filter(mapped_clos__contains=clo.code)
+                questions = clo.course.obe_questions.filter(pk__in=[q.pk for q in clo.course.obe_questions.all() if clo.code in (q.mapped_clos or [])])
                 for q in questions:
                     marks = OBEStudentMark.objects.filter(question=q)
                     total_p += q.max_marks * marks.count()
