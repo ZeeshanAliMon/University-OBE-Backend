@@ -999,13 +999,11 @@ class StudentCoursesView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Try to get reg_no from Student profile
-        # Fall back to username (App.tsx passes username as studentRegNo)
+        # Get reg_no from Student profile
         try:
-            student_profile = request.user.student_profile
-            reg_no = student_profile.roll_number
+            reg_no = request.user.student_profile.reg_no
         except Exception:
-            # No Student profile — use username as reg_no
+            # No Student profile — fall back to username for demo/seed users
             reg_no = request.user.username
 
         # Find all CourseStudent rows matching this reg_no
