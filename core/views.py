@@ -12,12 +12,15 @@ from .models      import (
     Department, Program, GraduateAttribute, CLO, Course,
     InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
+    InstructorProfile, QAProfile, Student,
+    AdmissionProfile, DeptAdminProfile, CourseAssignment,
+    SemesterPlan, AdmissionStudent,
 )
 from .serializers import (
     LoginSerializer, UserSerializer,
     DepartmentSerializer, ProgramSerializer,
     GraduateAttributeSerializer, CLOSerializer, CourseSerializer,
-    InstructorCourseSerializer,
+    InstructorCourseSerializer, AdmissionStudentSerializer,
 )
 from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin
 
@@ -604,8 +607,6 @@ class InstructorProfileView(APIView):
 
 # ─── Admission Students ───────────────────────────────────────────────────────
 
-from .models      import AdmissionStudent
-from .serializers import AdmissionStudentSerializer
 
 
 class AdmissionStudentListView(APIView):
@@ -730,7 +731,6 @@ class AdmissionStudentDetailView(APIView):
 
 # ─── Course Assignments (Dept Admin) ─────────────────────────────────────────
 
-from .models import CourseAssignment, DeptAdminProfile
 
 
 class CourseAssignmentView(APIView):
