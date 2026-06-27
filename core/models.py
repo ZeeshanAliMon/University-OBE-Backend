@@ -237,6 +237,41 @@ class Course(models.Model):
         return f"{self.code} — {self.title}"
 
 
+# ─── Course Learning Outcomes (CLOs) ────────────────────────────────────────
+#
+# Replaces the string-based ["CLO-1", "CLO-2"] JSON approach.
+# UnitItem.mapped_clos and OBEQuestion.mapped_clos JSON fields are kept
+# as migration path — they store CLO codes like "CLO-1" which match
+# CLO.code below.
+#
+
+class CLO(models.Model):
+    """
+    A Course Learning Outcome — belongs to one InstructorCourse.
+    mapped_ga: which Graduate Attribute this CLO contributes to.
+    code: human-readable label like "CLO-1", "CLO-2" — matches JSON fields.
+    """
+    course      = models.ForeignKey(
+        'InstructorCourse', on_delete=models.CASCADE, related_name='clos'
+    )
+    code        = models.CharField(max_length=20)          # e.g. "CLO-1"
+    description = models.TextField(blank=True, default='') # e.g. "Explain syntax..."
+    mapped_ga   = models.ForeignKey(
+        GraduateAttribute, on_delete=models.SET_NULL,
+        related_name='mapped_clos', null=True, blank=True
+    )
+    order       = models.PositiveSmallIntegerField(default=1)
+
+    class Meta:
+        verbose_name        = 'CLO'
+        verbose_name_plural = 'CLOs'
+        unique_together     = ('course', 'code')
+        ordering            = ['order', 'code']
+
+    def __str__(self):
+        return f"{self.course.code} — {self.code}: {self.description[:60]}"
+
+
 # ─── Instructor Course ────────────────────────────────────────────────────────
 
 class InstructorCourse(models.Model):

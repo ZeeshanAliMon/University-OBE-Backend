@@ -9,14 +9,14 @@ from rest_framework.views       import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models      import (
-    Department, Program, GraduateAttribute, Course,
+    Department, Program, GraduateAttribute, CLO, Course,
     InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
 )
 from .serializers import (
     LoginSerializer, UserSerializer,
     DepartmentSerializer, ProgramSerializer,
-    GraduateAttributeSerializer, CourseSerializer,
+    GraduateAttributeSerializer, CLOSerializer, CourseSerializer,
     InstructorCourseSerializer,
 )
 from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin
@@ -1413,14 +1413,30 @@ class CourseAttainmentView(APIView):
             code__iexact=course_code
         ).prefetch_related('mapped_gas').first()
 
-        # Build CLO → first GA mapping (best effort for display)
+        # Build CLO → GA mapping
+        # Priority: real CLO table records (exact join) → fallback to first course GA
         clo_to_ga = {}
+        db_clos = CLO.objects.filter(
+            course__in=qs
+        ).select_related('mapped_ga')
+        for db_clo in db_clos:
+            if db_clo.mapped_ga:
+                clo_to_ga[db_clo.code] = db_clo.mapped_ga.ga_id
+
+        # Fallback for CLOs not yet in CLO table
         if catalog_course:
             ga_list = list(catalog_course.mapped_gas.all())
             for q in all_questions:
-                for clo in q.mapped_clos:
-                    if clo not in clo_to_ga and ga_list:
-                        clo_to_ga[clo] = ga_list[0].ga_id   # first GA as default
+                for clo_code in q.mapped_clos:
+                    if clo_code not in clo_to_ga and ga_list:
+                        clo_to_ga[clo_code] = ga_list[0].ga_id
+
+        # Build CLO description map from DB
+        clo_description_map = {
+            c.code: c.description
+            for c in CLO.objects.filter(course__in=qs)
+            if c.description
+        }
 
         clos_result = []
         for clo in sorted(clo_scores_all.keys()):
@@ -1431,7 +1447,7 @@ class CourseAttainmentView(APIView):
             mapped_q_count = sum(1 for q in all_questions if clo in q.mapped_clos)
             clos_result.append({
                 'code':                clo,
-                'description':         clo,    # placeholder until CLO table added
+                'description':         clo_description_map.get(clo, clo),  # real desc or code as fallback
                 'mappedGA':            clo_to_ga.get(clo, ''),
                 'averageMarks':        class_avg,
                 'maxMarks':            100,
@@ -1553,3 +1569,125 @@ class StudentSummaryView(APIView):
             'totalCreditsCompleted': total_credits,
             'enrolledCourses':      enrolled_courses,
         })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLO MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CLOListView(APIView):
+    """
+    GET  /api/instructor/courses/<frontend_id>/clos/
+         Returns all CLOs for a specific instructor course.
+
+    POST /api/instructor/courses/<frontend_id>/clos/
+         Create a new CLO.
+         Body: { code, description, mappedGA, order }
+         mappedGA: GA id string e.g. "GA-1" or null
+    """
+    permission_classes = [IsInstructor]
+
+    def _get_course(self, frontend_id):
+        try:
+            return InstructorCourse.objects.get(frontend_id=frontend_id)
+        except InstructorCourse.DoesNotExist:
+            return None
+
+    def get(self, request, frontend_id):
+        course = self._get_course(frontend_id)
+        if not course:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        clos = course.clos.select_related('mapped_ga').all()
+        return Response(CLOSerializer(clos, many=True).data)
+
+    def post(self, request, frontend_id):
+        course = self._get_course(frontend_id)
+        if not course:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        data        = request.data
+        code        = data.get('code', '').strip()
+        description = data.get('description', '').strip()
+        ga_id       = data.get('mappedGA', '')
+        order       = data.get('order', 1)
+
+        if not code:
+            return Response({'error': 'code is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if CLO.objects.filter(course=course, code=code).exists():
+            return Response(
+                {'error': f'CLO "{code}" already exists for this course'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        ga = None
+        if ga_id:
+            try:
+                ga = GraduateAttribute.objects.get(ga_id=ga_id)
+            except GraduateAttribute.DoesNotExist:
+                return Response(
+                    {'error': f'Graduate Attribute "{ga_id}" not found'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        clo = CLO.objects.create(
+            course=course, code=code,
+            description=description, mapped_ga=ga, order=order
+        )
+        return Response(CLOSerializer(clo).data, status=status.HTTP_201_CREATED)
+
+
+class CLODetailView(APIView):
+    """
+    GET    /api/instructor/courses/<frontend_id>/clos/<clo_id>/
+    PATCH  /api/instructor/courses/<frontend_id>/clos/<clo_id>/
+           Body: { description?, mappedGA?, order? }
+    DELETE /api/instructor/courses/<frontend_id>/clos/<clo_id>/
+    """
+    permission_classes = [IsInstructor]
+
+    def _get(self, frontend_id, clo_id):
+        try:
+            return CLO.objects.select_related('mapped_ga', 'course').get(
+                pk=clo_id, course__frontend_id=frontend_id
+            )
+        except CLO.DoesNotExist:
+            return None
+
+    def get(self, request, frontend_id, clo_id):
+        clo = self._get(frontend_id, clo_id)
+        if not clo:
+            return Response({'error': 'CLO not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(CLOSerializer(clo).data)
+
+    def patch(self, request, frontend_id, clo_id):
+        clo = self._get(frontend_id, clo_id)
+        if not clo:
+            return Response({'error': 'CLO not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        data = request.data
+        if 'description' in data:
+            clo.description = data['description'].strip()
+        if 'order' in data:
+            clo.order = data['order']
+        if 'mappedGA' in data:
+            ga_id = data['mappedGA']
+            if ga_id:
+                try:
+                    clo.mapped_ga = GraduateAttribute.objects.get(ga_id=ga_id)
+                except GraduateAttribute.DoesNotExist:
+                    return Response(
+                        {'error': f'Graduate Attribute "{ga_id}" not found'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            else:
+                clo.mapped_ga = None
+        clo.save()
+        return Response(CLOSerializer(clo).data)
+
+    def delete(self, request, frontend_id, clo_id):
+        clo = self._get(frontend_id, clo_id)
+        if not clo:
+            return Response({'error': 'CLO not found'}, status=status.HTTP_404_NOT_FOUND)
+        clo.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
