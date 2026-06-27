@@ -467,7 +467,49 @@ class Command(BaseCommand):
             for qid, score in obe.items():
                 OBEStudentMark.objects.create(student=s, question=q_map[qid], score=score)
 
+
+
+        # ── CLOs for demo course ──────────────────────────────────────────────
+        from core.models import CLO
+        ga_1 = all_gas.get('GA-1')
+        ga_2 = all_gas.get('GA-2')
+        ga_3 = all_gas.get('GA-3')
+        ga_4 = all_gas.get('GA-4')
+        clo_defs = [
+            ('CLO-1', 'Explain fundamental software engineering concepts and lifecycle models.', ga_1, 1),
+            ('CLO-2', 'Apply software design principles to produce modular and maintainable systems.', ga_2, 2),
+            ('CLO-3', 'Analyse and decompose complex software problems using structured methodologies.', ga_3, 3),
+            ('CLO-4', 'Evaluate software quality using testing strategies and review techniques.', ga_4, 4),
+        ]
+        for code, desc, ga, order in clo_defs:
+            CLO.objects.create(
+                course=ic, code=code, description=desc,
+                mapped_ga=ga, order=order
+            )
+        self.stdout.write('  ✓ CLOs (4 CLOs mapped to GA-1 through GA-4)')
+
         self.stdout.write('  ✓ Demo Instructor Course + Marks')
+
+        # ── Student Users (linked to AdmissionStudent reg_nos) ───────────────
+        # These are login accounts for students whose directory entries
+        # already exist in AdmissionStudent. reg_no must match exactly.
+        from core.models import Student
+        student_logins = [
+            ('ahmed_cs',  'Ahmed',  'Raza',     'ahmed.raza@student.iqra.edu.pk',    'FA22-BSCS-0012', progs['bscs'], depts['computing']),
+            ('zara_cs',   'Zara',   'Siddiqui', 'zara.siddiqui@student.iqra.edu.pk', 'FA22-BSCS-0045', progs['bscs'], depts['computing']),
+            ('hamza_se',  'Hamza',  'Tariq',    'hamza.tariq@student.iqra.edu.pk',   'FA22-BSSE-0011', progs['bsse'], depts['computing']),
+        ]
+        for username, first, last, email, reg_no, prog, dept in student_logins:
+            u = User.objects.create(
+                username=username, email=email,
+                first_name=first, last_name=last,
+                role='student', password=make_password('stupass123'), is_active=True
+            )
+            Student.objects.create(
+                user=u, reg_no=reg_no,
+                program=prog, department=dept
+            )
+        self.stdout.write('  ✓ Student Users (ahmed_cs, zara_cs, hamza_se → stupass123)')
 
         # ── Seed CLOs for demo instructor course ──────────────────────────────
         demo_gas = list(GraduateAttribute.objects.filter(
