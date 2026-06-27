@@ -9,6 +9,7 @@ from rest_framework.views       import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models      import (
+    User,
     Department, Program, GraduateAttribute, CLO, Course,
     InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
@@ -60,10 +61,19 @@ class LoginView(APIView):
         s = LoginSerializer(data=request.data)
         if not s.is_valid():
             return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
-        user = authenticate(
-            username=s.validated_data['username'],
-            password=s.validated_data['password'],
-        )
+
+        email    = s.validated_data['email'].lower().strip()
+        password = s.validated_data['password']
+
+        # Look up user by email, then authenticate with their username
+        try:
+            user_obj = User.objects.get(email__iexact=email)
+        except User.DoesNotExist:
+            return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+        except User.MultipleObjectsReturned:
+            return Response({'error': 'Multiple accounts with this email — contact admin'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = authenticate(username=user_obj.username, password=password)
         if user is None:
             return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
         if not user.is_active:
