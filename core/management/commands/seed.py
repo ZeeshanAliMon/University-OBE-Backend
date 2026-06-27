@@ -470,7 +470,6 @@ class Command(BaseCommand):
 
 
         # ── CLOs for demo course ──────────────────────────────────────────────
-        from core.models import CLO
         ga_1 = all_gas.get('GA-1')
         ga_2 = all_gas.get('GA-2')
         ga_3 = all_gas.get('GA-3')
@@ -493,7 +492,6 @@ class Command(BaseCommand):
         # ── Student Users (linked to AdmissionStudent reg_nos) ───────────────
         # These are login accounts for students whose directory entries
         # already exist in AdmissionStudent. reg_no must match exactly.
-        from core.models import Student
         student_logins = [
             ('ahmed_cs',  'Ahmed',  'Raza',     'ahmed.raza@student.iqra.edu.pk',    'FA22-BSCS-0012', progs['bscs'], depts['computing']),
             ('zara_cs',   'Zara',   'Siddiqui', 'zara.siddiqui@student.iqra.edu.pk', 'FA22-BSCS-0045', progs['bscs'], depts['computing']),
@@ -511,24 +509,6 @@ class Command(BaseCommand):
             )
         self.stdout.write('  ✓ Student Users (ahmed_cs, zara_cs, hamza_se → stupass123)')
 
-        # ── Seed CLOs for demo instructor course ──────────────────────────────
-        demo_gas = list(GraduateAttribute.objects.filter(
-            department__dept_id='computing'
-        ).order_by('ga_id')[:4])
-
-        clo_defs = [
-            ('CLO-1', 'Apply fundamental software engineering principles to design and develop systems', 1),
-            ('CLO-2', 'Analyze and evaluate software requirements and produce technical documentation',  2),
-            ('CLO-3', 'Implement object-oriented solutions using appropriate design patterns',           3),
-            ('CLO-4', 'Conduct systematic testing and quality assurance of software systems',           4),
-        ]
-        for code, description, order in clo_defs:
-            ga = demo_gas[order - 1] if order <= len(demo_gas) else None
-            CLO.objects.create(
-                course=ic, code=code, description=description,
-                mapped_ga=ga, order=order
-            )
-        self.stdout.write(f'  ✓ CLOs (4 for demo course)')
 
         # ── Summary ───────────────────────────────────────────────────────────
         self.stdout.write(self.style.SUCCESS('\n✅  Seed complete!'))
