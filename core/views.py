@@ -1701,3 +1701,472 @@ class CLODetailView(APIView):
             return Response({'error': 'CLO not found'}, status=status.HTTP_404_NOT_FOUND)
         clo.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ─── Additional OBE Reports ───────────────────────────────────────────────────
+
+ATTAINMENT_THRESHOLD = 50.0
+
+
+class COAttainmentSummaryView(APIView):
+    """
+    GET /api/reports/co-attainment-summary/?programId=bscs&semester=6th
+
+    Course Outcome Attainment Summary — the primary HEC deliverable.
+    Shows for each course: CLO × attainment%, mapped GA, pass/fail status.
+    QA uses this to identify weak courses in a program.
+
+    Response:
+    {
+      "programId": "bscs",
+      "semester": "6th",
+      "courses": [
+        {
+          "courseCode": "CMC371",
+          "courseTitle": "Software Engineering",
+          "clos": [
+            {
+              "code": "CLO-1",
+              "description": "...",
+              "mappedGA": "GA-1",
+              "attainmentPercent": 72.5,
+              "status": "Met"
+            }
+          ]
+        }
+      ]
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        program_id = request.query_params.get('programId', '').strip()
+        semester   = request.query_params.get('semester', '').strip()
+
+        if not program_id:
+            return Response({'error': 'programId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            program = Program.objects.get(code__iexact=program_id)
+        except Program.DoesNotExist:
+            return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        ic_qs = InstructorCourse.objects.filter(program=program).prefetch_related(
+            'clos__mapped_ga',
+            'students__obe_marks__question',
+            'obe_questions',
+        )
+        if semester:
+            ic_qs = ic_qs.filter(semester=semester)
+
+        courses_data = []
+        for ic in ic_qs:
+            clos_data = []
+            for clo in ic.clos.select_related('mapped_ga').all():
+                # Find questions mapped to this CLO
+                questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
+                total_possible = 0
+                total_obtained  = 0
+                for q in questions:
+                    marks = OBEStudentMark.objects.filter(question=q)
+                    total_possible += q.max_marks * marks.count()
+                    total_obtained  += sum(m.score for m in marks)
+
+                pct    = round((total_obtained / total_possible * 100), 1) if total_possible > 0 else 0
+                status_str = 'Met' if pct >= ATTAINMENT_THRESHOLD else 'Not Met'
+
+                clos_data.append({
+                    'code':               clo.code,
+                    'description':        clo.description,
+                    'mappedGA':           clo.mapped_ga.ga_id if clo.mapped_ga else None,
+                    'attainmentPercent':  pct,
+                    'status':             status_str,
+                })
+
+            courses_data.append({
+                'courseCode':  ic.code,
+                'courseTitle': ic.title,
+                'semester':    ic.semester,
+                'academicYear':ic.academic_year,
+                'clos':        clos_data,
+            })
+
+        return Response({
+            'programId': program.code.lower(),
+            'semester':  semester or 'all',
+            'courses':   courses_data,
+        })
+
+
+class POAttainmentView(APIView):
+    """
+    GET /api/reports/po-attainment/?programId=bscs
+
+    Program Outcome Attainment — aggregates CLO → GA → PO.
+    The direct HEC compliance report.
+
+    Response:
+    {
+      "programId": "bscs",
+      "programName": "...",
+      "pos": [
+        {
+          "id": "PO1",
+          "text": "...",
+          "attainmentPercent": 68.3,
+          "status": "Partially Met",
+          "contributingGAs": [
+            { "gaId": "GA-1", "gaName": "...", "attainmentPercent": 72.5 }
+          ]
+        }
+      ]
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        program_id = request.query_params.get('programId', '').strip()
+        if not program_id:
+            return Response({'error': 'programId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            program = Program.objects.get(code__iexact=program_id)
+        except Program.DoesNotExist:
+            return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Compute GA attainment for this program
+        gas = GraduateAttribute.objects.filter(department=program.department)
+        ga_attainment = {}   # ga_id → percent
+
+        for ga in gas:
+            courses = InstructorCourse.objects.filter(
+                program=program,
+                clos__mapped_ga=ga
+            ).prefetch_related('clos', 'students__obe_marks__question', 'obe_questions').distinct()
+
+            total_possible = 0
+            total_obtained  = 0
+            for ic in courses:
+                clos_for_ga = ic.clos.filter(mapped_ga=ga)
+                for clo in clos_for_ga:
+                    questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
+                    for q in questions:
+                        marks = OBEStudentMark.objects.filter(question=q)
+                        total_possible += q.max_marks * marks.count()
+                        total_obtained  += sum(m.score for m in marks)
+
+            ga_attainment[ga.ga_id] = round(
+                (total_obtained / total_possible * 100), 1
+            ) if total_possible > 0 else 0
+
+        # Map GAs up to POs
+        pos_data = []
+        for po in program.objectives.prefetch_related('ga_mappings__graduate_attribute').all():
+            contributing_gas = []
+            po_percents = []
+
+            for mapping in po.ga_mappings.select_related('graduate_attribute').all():
+                ga     = mapping.graduate_attribute
+                pct    = ga_attainment.get(ga.ga_id, 0)
+                po_percents.append(pct)
+                contributing_gas.append({
+                    'gaId':              ga.ga_id,
+                    'gaName':            ga.name,
+                    'attainmentPercent': pct,
+                })
+
+            po_avg = round(sum(po_percents) / len(po_percents), 1) if po_percents else 0
+            if po_avg >= 70:
+                po_status = 'Met'
+            elif po_avg >= ATTAINMENT_THRESHOLD:
+                po_status = 'Partially Met'
+            else:
+                po_status = 'Not Met'
+
+            pos_data.append({
+                'id':                 po.code,
+                'text':               po.description,
+                'attainmentPercent':  po_avg,
+                'status':             po_status,
+                'contributingGAs':    contributing_gas,
+            })
+
+        return Response({
+            'programId':   program.code.lower(),
+            'programName': program.name,
+            'pos':         pos_data,
+        })
+
+
+class InstructorPerformanceView(APIView):
+    """
+    GET /api/reports/instructor-performance/?departmentId=computing
+
+    Shows per-instructor: which courses are below attainment threshold.
+    For dept_admin and QA use.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        dept_id = request.query_params.get('departmentId', '').strip()
+        if not dept_id:
+            return Response({'error': 'departmentId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            department = Department.objects.get(dept_id=dept_id)
+        except Department.DoesNotExist:
+            return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        instructors = InstructorProfile.objects.filter(
+            department=department
+        ).select_related('user').prefetch_related(
+            'instructor_courses__clos',
+            'instructor_courses__obe_questions',
+        )
+
+        result = []
+        for profile in instructors:
+            courses_data = []
+            for ic in profile.instructor_courses.all():
+                clo_attainments = []
+                for clo in ic.clos.all():
+                    questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
+                    total_p = sum(q.max_marks * OBEStudentMark.objects.filter(question=q).count() for q in questions)
+                    total_o = sum(
+                        m.score
+                        for q in questions
+                        for m in OBEStudentMark.objects.filter(question=q)
+                    )
+                    pct = round(total_o / total_p * 100, 1) if total_p > 0 else 0
+                    clo_attainments.append(pct)
+
+                avg = round(sum(clo_attainments) / len(clo_attainments), 1) if clo_attainments else 0
+                courses_data.append({
+                    'courseCode':        ic.code,
+                    'courseTitle':       ic.title,
+                    'semester':          ic.semester,
+                    'academicYear':      ic.academic_year,
+                    'avgCLOAttainment':  avg,
+                    'belowThreshold':    avg < ATTAINMENT_THRESHOLD,
+                })
+
+            below_count = sum(1 for c in courses_data if c['belowThreshold'])
+            result.append({
+                'employeeId':       profile.employee_id,
+                'name':             profile.user.get_full_name() or profile.user.username,
+                'designation':      profile.designation,
+                'totalCourses':     len(courses_data),
+                'coursesBelowThreshold': below_count,
+                'courses':          courses_data,
+            })
+
+        return Response({'departmentId': dept_id, 'instructors': result})
+
+
+class CohortComparisonView(APIView):
+    """
+    GET /api/reports/cohort-comparison/?programId=bscs&gaId=GA-1
+
+    Compares GA attainment across academic years/batches.
+    Requires InstructorCourse.academic_year to be populated.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        program_id = request.query_params.get('programId', '').strip()
+        ga_id      = request.query_params.get('gaId', '').strip()
+
+        if not program_id or not ga_id:
+            return Response({'error': 'programId and gaId are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            program = Program.objects.get(code__iexact=program_id)
+            ga      = GraduateAttribute.objects.get(ga_id=ga_id)
+        except (Program.DoesNotExist, GraduateAttribute.DoesNotExist) as e:
+            return Response({'error': str(e)}, status=status.HTTP_404_NOT_FOUND)
+
+        courses = InstructorCourse.objects.filter(
+            program=program,
+            clos__mapped_ga=ga
+        ).prefetch_related('clos', 'obe_questions').distinct()
+
+        # Group by academic_year
+        by_year = {}
+        for ic in courses:
+            year = ic.academic_year or 'Unknown'
+            if year not in by_year:
+                by_year[year] = {'total_possible': 0, 'total_obtained': 0}
+
+            for clo in ic.clos.filter(mapped_ga=ga):
+                questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
+                for q in questions:
+                    marks = OBEStudentMark.objects.filter(question=q)
+                    by_year[year]['total_possible'] += q.max_marks * marks.count()
+                    by_year[year]['total_obtained']  += sum(m.score for m in marks)
+
+        cohorts = []
+        for year in sorted(by_year.keys()):
+            tp = by_year[year]['total_possible']
+            to = by_year[year]['total_obtained']
+            cohorts.append({
+                'academicYear':      year,
+                'attainmentPercent': round(to / tp * 100, 1) if tp > 0 else 0,
+            })
+
+        return Response({
+            'programId': program.code.lower(),
+            'gaId':      ga_id,
+            'gaName':    ga.name,
+            'cohorts':   cohorts,
+        })
+
+
+class AtRiskStudentsView(APIView):
+    """
+    GET /api/reports/at-risk-students/?programId=bscs&semester=6th
+
+    Students below attainment threshold on 2+ CLOs across enrolled courses.
+    For dept_admin and admission early intervention.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        program_id = request.query_params.get('programId', '').strip()
+        semester   = request.query_params.get('semester', '').strip()
+
+        if not program_id:
+            return Response({'error': 'programId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            program = Program.objects.get(code__iexact=program_id)
+        except Program.DoesNotExist:
+            return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        ic_qs = InstructorCourse.objects.filter(program=program)
+        if semester:
+            ic_qs = ic_qs.filter(semester=semester)
+
+        # Map regNo → list of failed CLOs
+        student_failures = {}
+
+        for ic in ic_qs.prefetch_related('students__obe_marks__question', 'clos', 'obe_questions'):
+            for student in ic.students.all():
+                for clo in ic.clos.all():
+                    questions = ic.obe_questions.filter(mapped_clos__contains=clo.code)
+                    total_p = sum(q.max_marks for q in questions)
+                    total_o = sum(
+                        OBEStudentMark.objects.filter(question=q, student=student)
+                        .values_list('score', flat=True)
+                        .first() or 0
+                        for q in questions
+                    )
+                    pct = round(total_o / total_p * 100, 1) if total_p > 0 else 0
+
+                    if pct < ATTAINMENT_THRESHOLD:
+                        key = student.reg_no
+                        if key not in student_failures:
+                            student_failures[key] = {
+                                'regNo':      student.reg_no,
+                                'name':       student.name,
+                                'failedCLOs': [],
+                            }
+                        student_failures[key]['failedCLOs'].append({
+                            'courseCode': ic.code,
+                            'cloCode':    clo.code,
+                            'attainment': pct,
+                        })
+
+        at_risk = [
+            v for v in student_failures.values()
+            if len(v['failedCLOs']) >= 2
+        ]
+        at_risk.sort(key=lambda x: len(x['failedCLOs']), reverse=True)
+
+        return Response({
+            'programId':   program.code.lower(),
+            'semester':    semester or 'all',
+            'threshold':   ATTAINMENT_THRESHOLD,
+            'atRiskCount': len(at_risk),
+            'students':    at_risk,
+        })
+
+
+class GapAnalysisView(APIView):
+    """
+    GET /api/reports/gap-analysis/?programId=bscs
+
+    Which GAs have zero or low course coverage in this program.
+    Tells QA where curriculum gaps exist.
+
+    Response per GA:
+    {
+      "gaId": "GA-6",
+      "gaName": "Individual and Team Work",
+      "mappedCoursesCount": 0,
+      "activeCLOsCount": 0,
+      "avgAttainment": 0,
+      "status": "No Coverage"
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        program_id = request.query_params.get('programId', '').strip()
+        if not program_id:
+            return Response({'error': 'programId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            program = Program.objects.get(code__iexact=program_id)
+        except Program.DoesNotExist:
+            return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        gas = GraduateAttribute.objects.filter(department=program.department)
+        result = []
+
+        for ga in gas:
+            mapped_courses = Course.objects.filter(program=program, mapped_gas=ga)
+            active_clos    = CLO.objects.filter(
+                course__program=program,
+                mapped_ga=ga
+            )
+
+            total_p = 0
+            total_o = 0
+            for clo in active_clos:
+                questions = clo.course.obe_questions.filter(mapped_clos__contains=clo.code)
+                for q in questions:
+                    marks = OBEStudentMark.objects.filter(question=q)
+                    total_p += q.max_marks * marks.count()
+                    total_o += sum(m.score for m in marks)
+
+            avg_att = round(total_o / total_p * 100, 1) if total_p > 0 else 0
+            courses_count = mapped_courses.count()
+            clos_count    = active_clos.count()
+
+            if courses_count == 0:
+                gap_status = 'No Coverage'
+            elif clos_count == 0:
+                gap_status = 'Mapped but No CLOs'
+            elif avg_att < ATTAINMENT_THRESHOLD:
+                gap_status = 'Low Attainment'
+            else:
+                gap_status = 'Adequate'
+
+            result.append({
+                'gaId':               ga.ga_id,
+                'gaName':             ga.name,
+                'mappedCoursesCount': courses_count,
+                'activeCLOsCount':    clos_count,
+                'avgAttainment':      avg_att,
+                'status':             gap_status,
+            })
+
+        critical = sum(1 for r in result if r['status'] in ('No Coverage', 'Mapped but No CLOs'))
+
+        return Response({
+            'programId':     program.code.lower(),
+            'programName':   program.name,
+            'totalGAs':      len(result),
+            'criticalGaps':  critical,
+            'attributes':    result,
+        })

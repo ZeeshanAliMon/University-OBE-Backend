@@ -312,6 +312,17 @@ class InstructorCourse(models.Model):
     selected_grading_system = models.CharField(
         max_length=10, choices=GRADING_SYSTEM_CHOICES, default='ready1'
     )
+    # Semester and academic year — required for cohort comparison reports
+    semester                = models.CharField(
+        max_length=10, blank=True,
+        choices=[
+            ('1st','1st'),('2nd','2nd'),('3rd','3rd'),('4th','4th'),
+            ('5th','5th'),('6th','6th'),('7th','7th'),('8th','8th'),
+        ]
+    )
+    academic_year           = models.CharField(
+        max_length=20, blank=True
+    )   # e.g. 'Fall-2024', 'Spring-2025'
     created_at              = models.DateTimeField(auto_now_add=True)
     updated_at              = models.DateTimeField(auto_now=True)
 
