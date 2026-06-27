@@ -1,4 +1,5 @@
 from django.contrib.auth import authenticate
+from django.db import models
 
 from rest_framework             import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -1041,3 +1042,480 @@ class StudentCoursesView(APIView):
             })
 
         return Response(result)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OBE REPORTS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# All report endpoints are read-only (GET).
+# Computations are done dynamically — no caching — so grade updates
+# immediately reflect in reports.
+#
+# Attainment threshold: 50% (v1 hardcoded, configurable later via dept settings)
+# Missing GA mappings: gracefully omitted (no 500 errors)
+# ───────────────────────────────────────────────────────────────────────────────
+
+ATTAINMENT_THRESHOLD = 50.0   # % — student "attains" a CLO/GA if score >= this
+
+# ── Built-in grading scales ───────────────────────────────────────────────────
+READY1_SCALE = [
+    ('A',  90.0, 4.0),
+    ('B+', 85.0, 3.5),
+    ('B',  80.0, 3.0),
+    ('C+', 75.0, 2.5),
+    ('C',  70.0, 2.0),
+    ('D+', 65.0, 1.5),
+    ('D',  60.0, 1.0),
+    ('F',   0.0, 0.0),
+]
+READY2_SCALE = [
+    ('A',  88.0, 4.0),
+    ('B+', 81.0, 3.5),
+    ('B',  74.0, 3.0),
+    ('C+', 67.0, 2.5),
+    ('C',  60.0, 2.0),
+    ('D',  50.0, 1.0),
+    ('F',   0.0, 0.0),
+]
+
+
+def _apply_scale(percentage: float, scale: list) -> tuple:
+    """Return (grade_letter, grade_points) for a percentage score."""
+    for grade, threshold, points in scale:
+        if percentage >= threshold:
+            return grade, points
+    return 'F', 0.0
+
+
+def _get_grade(percentage: float, instructor_course) -> tuple:
+    """
+    Return (grade_letter, grade_points) using the course's grading system.
+    Falls back to ready1 if custom scale is missing entries.
+    """
+    system = instructor_course.selected_grading_system
+    if system == 'ready2':
+        return _apply_scale(percentage, READY2_SCALE)
+    if system == 'custom':
+        custom = list(
+            instructor_course.grade_scale.order_by('-min_percentage')
+            .values_list('grade', 'min_percentage', 'points')
+        )
+        if custom:
+            return _apply_scale(percentage, custom)
+    return _apply_scale(percentage, READY1_SCALE)
+
+
+def _student_total_percentage(course_student) -> float:
+    """
+    Compute a student's weighted total percentage in a course.
+    Formula per unit:
+      contribution = (score / total_marks) * (unit_weightage / 100) * category_percentage
+    Sums to a 0-100 scale overall.
+    """
+    marks_qs = course_student.marks.select_related('unit_item__category')
+    total_weighted = 0.0
+    for mark in marks_qs:
+        ui  = mark.unit_item
+        cat = ui.category
+        if ui.total_marks > 0 and cat.percentage > 0:
+            unit_contribution = (mark.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage
+            total_weighted   += unit_contribution
+    return round(total_weighted, 2)
+
+
+def _clo_attainments_for_student(course_student, questions_qs):
+    """
+    Returns dict: { 'CLO-1': percentage_float, ... }
+    Aggregates all OBE marks for a student, grouped by CLO.
+    """
+    obe_marks = {
+        m.question_id: m.score
+        for m in course_student.obe_marks.select_related('question').all()
+    }
+    clo_scores   = {}   # CLO → [score, ...]
+    clo_max      = {}   # CLO → [max_marks, ...]
+
+    for q in questions_qs:
+        score = obe_marks.get(q.pk, 0.0)
+        for clo in q.mapped_clos:
+            clo_scores.setdefault(clo, []).append(score)
+            clo_max.setdefault(clo,   []).append(q.max_marks)
+
+    result = {}
+    for clo in clo_scores:
+        total_score = sum(clo_scores[clo])
+        total_max   = sum(clo_max[clo])
+        result[clo] = round((total_score / total_max * 100) if total_max > 0 else 0.0, 2)
+    return result
+
+
+# ── 1. Program GA Attainment ──────────────────────────────────────────────────
+
+class ProgramGAAttainmentView(APIView):
+    """
+    GET /api/reports/program-ga-attainment/?programId=bscs
+    Returns GA-level attainment aggregated across all instructor courses
+    in that program.
+    Permission: QA, DeptAdmin, Instructor (read-only)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        program_id = request.query_params.get('programId', '').strip()
+        if not program_id:
+            return Response({'error': 'programId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            program = Program.objects.get(code__iexact=program_id)
+        except Program.DoesNotExist:
+            return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # All GAs for this program's department (and program-specific GAs)
+        gas = GraduateAttribute.objects.filter(
+            models.Q(department=program.department, program__isnull=True) |
+            models.Q(program=program)
+        ).order_by('ga_id')
+
+        # All instructor courses for this program with their students + marks
+        instructor_courses = InstructorCourse.objects.filter(
+            program=program
+        ).prefetch_related(
+            'students__marks__unit_item',
+            models.Prefetch('course_catalog', queryset=None),  # handled below
+        )
+
+        # Build a map: course_code → list of student percentages
+        # We need the Course catalog record to check GA mappings
+        # InstructorCourse.code links to Course.code
+        course_avg_map = {}   # course_code → average_percentage across students
+        course_title_map = {}
+
+        for ic in instructor_courses:
+            students = list(ic.students.prefetch_related('marks__unit_item').all())
+            if not students:
+                continue
+            percentages = [_student_total_percentage(s) for s in students]
+            avg = round(sum(percentages) / len(percentages), 2) if percentages else 0.0
+            course_avg_map[ic.code]  = avg
+            course_title_map[ic.code] = ic.title
+
+        # Get Course catalog records with GA mappings
+        course_codes = list(course_avg_map.keys())
+        catalog_courses = Course.objects.filter(
+            code__in=course_codes
+        ).prefetch_related('mapped_gas')
+
+        # Build GA → contributing courses map
+        ga_courses = {}   # ga_id → list of { code, title, averageMarks }
+        for course in catalog_courses:
+            avg = course_avg_map.get(course.code, 0.0)
+            for ga in course.mapped_gas.all():
+                ga_courses.setdefault(ga.ga_id, []).append({
+                    'code':         course.code,
+                    'title':        course_title_map.get(course.code, course.title),
+                    'averageMarks': avg,
+                })
+
+        result = []
+        for ga in gas:
+            contributing = ga_courses.get(ga.ga_id, [])
+            if not contributing:
+                # No courses mapped yet — include with zeros rather than omitting
+                result.append({
+                    'gaId':               ga.ga_id,
+                    'name':               ga.name,
+                    'description':        ga.description,
+                    'averageAttainment':  0.0,
+                    'targetAttainment':   ATTAINMENT_THRESHOLD,
+                    'mappedCoursesCount': 0,
+                    'contributingCourses': [],
+                })
+                continue
+
+            avg_attainment = round(
+                sum(c['averageMarks'] for c in contributing) / len(contributing), 2
+            )
+            result.append({
+                'gaId':               ga.ga_id,
+                'name':               ga.name,
+                'description':        ga.description,
+                'averageAttainment':  avg_attainment,
+                'targetAttainment':   ATTAINMENT_THRESHOLD,
+                'mappedCoursesCount': len(contributing),
+                'contributingCourses': contributing,
+            })
+
+        return Response(result)
+
+
+# ── 2. Student GA Attainment ──────────────────────────────────────────────────
+
+class StudentGAAttainmentView(APIView):
+    """
+    GET /api/reports/student-ga-attainment/?regNo=FA22-BSCS-0012
+    Returns per-GA attainment for one student across all their enrolled courses.
+    Permission: Authenticated (students see their own, admins see any)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        reg_no = request.query_params.get('regNo', '').strip()
+        if not reg_no:
+            return Response({'error': 'regNo is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Get student info from AdmissionStudent registry
+        admission_student = AdmissionStudent.objects.filter(
+            reg_no__iexact=reg_no
+        ).select_related('program', 'department').first()
+
+        student_name    = admission_student.name       if admission_student else reg_no
+        student_program = admission_student.program    if admission_student else None
+
+        # Find all CourseStudent records for this reg_no
+        course_students = CourseStudent.objects.filter(
+            reg_no__iexact=reg_no
+        ).select_related(
+            'course__program', 'course__department'
+        ).prefetch_related(
+            'obe_marks__question',
+            'marks__unit_item__category',
+        )
+
+        if not course_students.exists():
+            return Response({
+                'student': {
+                    'regNo':     reg_no,
+                    'name':      student_name,
+                    'programId': student_program.code.lower() if student_program else None,
+                },
+                'attainments': [],
+            })
+
+        # Collect all course codes this student is enrolled in
+        course_codes = [cs.course.code for cs in course_students]
+
+        # Get catalog Course records with GA mappings
+        catalog_map = {
+            c.code: c
+            for c in Course.objects.filter(code__in=course_codes).prefetch_related('mapped_gas')
+        }
+
+        # For each course student — compute CLO attainments → map to GAs
+        # GA attainment = average of student's % scores in courses mapped to that GA
+        ga_scores  = {}   # ga_id → list of student percentages
+        ga_info    = {}   # ga_id → { name }
+        ga_courses_list = {}  # ga_id → list of "code - title"
+
+        for cs in course_students:
+            catalog_course = catalog_map.get(cs.course.code)
+            if not catalog_course:
+                continue
+
+            student_pct = _student_total_percentage(cs)
+
+            for ga in catalog_course.mapped_gas.all():
+                ga_scores.setdefault(ga.ga_id, []).append(student_pct)
+                ga_info[ga.ga_id] = ga.name
+                label = f"{cs.course.code} - {cs.course.title}"
+                ga_courses_list.setdefault(ga.ga_id, [])
+                if label not in ga_courses_list[ga.ga_id]:
+                    ga_courses_list[ga.ga_id].append(label)
+
+        attainments = []
+        for ga_id, scores in ga_scores.items():
+            avg_score = round(sum(scores) / len(scores), 2) if scores else 0.0
+            attainments.append({
+                'gaId':        ga_id,
+                'name':        ga_info.get(ga_id, ga_id),
+                'score':       avg_score,
+                'status':      'Attained' if avg_score >= ATTAINMENT_THRESHOLD else 'Not Attained',
+                'coursesList': ga_courses_list.get(ga_id, []),
+            })
+
+        # Sort by GA id
+        attainments.sort(key=lambda x: x['gaId'])
+
+        return Response({
+            'student': {
+                'regNo':     reg_no,
+                'name':      student_name,
+                'programId': student_program.code.lower() if student_program else None,
+            },
+            'attainments': attainments,
+        })
+
+
+# ── 3. Course GA & CLO Attainment ────────────────────────────────────────────
+
+class CourseAttainmentView(APIView):
+    """
+    GET /api/reports/course-attainment/?courseCode=CMC111&programId=bscs
+    Returns CLO and GA attainment for a specific course offering.
+    Permission: Authenticated
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        course_code = request.query_params.get('courseCode', '').strip().upper()
+        program_id  = request.query_params.get('programId', '').strip()
+
+        if not course_code:
+            return Response({'error': 'courseCode is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Find instructor course(s) matching code + optional program
+        qs = InstructorCourse.objects.filter(code__iexact=course_code)
+        if program_id:
+            qs = qs.filter(program__code__iexact=program_id)
+
+        if not qs.exists():
+            return Response({'error': f'No course offering found for "{course_code}"'}, status=status.HTTP_404_NOT_FOUND)
+
+        # If multiple offerings (multiple instructors), aggregate across all
+        all_students  = []
+        all_questions = []
+        course_title  = ''
+        credit_hours  = 3
+
+        for ic in qs.prefetch_related(
+            'students__obe_marks__question',
+            'students__marks__unit_item',
+            'obe_questions',
+        ):
+            course_title  = ic.title
+            credit_hours  = ic.credit_hours
+            all_students.extend(list(ic.students.prefetch_related('obe_marks__question', 'marks__unit_item').all()))
+            all_questions.extend(list(ic.obe_questions.all()))
+
+        class_size = len(all_students)
+
+        # Build CLO aggregation
+        clo_scores_all  = {}   # clo → list of per-student percentages
+        clo_max_marks   = {}   # clo → total max marks
+
+        for q in all_questions:
+            for clo in q.mapped_clos:
+                clo_max_marks.setdefault(clo, 0.0)
+                clo_max_marks[clo] += q.max_marks
+
+        for student in all_students:
+            clo_attain = _clo_attainments_for_student(student, all_questions)
+            for clo, pct in clo_attain.items():
+                clo_scores_all.setdefault(clo, []).append(pct)
+
+        clos_result = []
+        for clo in sorted(clo_scores_all.keys()):
+            scores = clo_scores_all[clo]
+            if not scores:
+                continue
+            class_avg     = round(sum(scores) / len(scores), 2)
+            attained_count = sum(1 for s in scores if s >= ATTAINMENT_THRESHOLD)
+            attainment_rate = round((attained_count / len(scores) * 100), 2) if scores else 0.0
+            mapped_q_count  = sum(1 for q in all_questions if clo in q.mapped_clos)
+            clos_result.append({
+                'code':                clo,
+                'description':         '',   # CLO table not yet introduced — string-based for now
+                'classAverage':        class_avg,
+                'attainmentRate':      attainment_rate,
+                'mappedQuestionsCount': mapped_q_count,
+            })
+
+        # GA mappings from catalog
+        catalog_course = Course.objects.filter(
+            code__iexact=course_code
+        ).prefetch_related('mapped_gas').first()
+
+        mapped_gas = []
+        if catalog_course:
+            mapped_gas = [
+                {'gaId': ga.ga_id, 'name': ga.name}
+                for ga in catalog_course.mapped_gas.all()
+            ]
+
+        return Response({
+            'courseCode':  course_code,
+            'courseTitle': course_title,
+            'classSize':   class_size,
+            'clos':        clos_result,
+            'mappedGAs':   mapped_gas,
+        })
+
+
+# ── 4. Student Summary Report Card ───────────────────────────────────────────
+
+class StudentSummaryView(APIView):
+    """
+    GET /api/reports/student-summary/?regNo=FA22-BSCS-0012
+    Returns full report card: grades, CLO attainments, CGPA.
+    Permission: Authenticated
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        reg_no = request.query_params.get('regNo', '').strip()
+        if not reg_no:
+            return Response({'error': 'regNo is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        admission_student = AdmissionStudent.objects.filter(
+            reg_no__iexact=reg_no
+        ).select_related('program').first()
+
+        student_name    = admission_student.name    if admission_student else reg_no
+        student_program = admission_student.program if admission_student else None
+
+        course_students = CourseStudent.objects.filter(
+            reg_no__iexact=reg_no
+        ).select_related('course').prefetch_related(
+            'marks__unit_item__category',
+            'obe_marks__question',
+            'course__grade_scale',
+        )
+
+        courses_result = []
+        total_credit_points = 0.0
+        total_credits       = 0
+
+        for cs in course_students:
+            ic = cs.course
+            student_pct = _student_total_percentage(cs)
+            grade_letter, grade_points = _get_grade(student_pct, ic)
+
+            # CLO attainments
+            questions = list(ic.obe_questions.all())
+            clo_pcts  = _clo_attainments_for_student(cs, questions)
+            clo_attainments = [
+                {
+                    'code':       clo,
+                    'attained':   pct >= ATTAINMENT_THRESHOLD,
+                    'percentage': pct,
+                }
+                for clo, pct in sorted(clo_pcts.items())
+            ]
+
+            credit_hours = ic.credit_hours
+            total_credit_points += grade_points * credit_hours
+            total_credits       += credit_hours
+
+            courses_result.append({
+                'code':        ic.code,
+                'title':       ic.title,
+                'creditHours': credit_hours,
+                'grade':       grade_letter,
+                'marksSummary': {
+                    'obtained': student_pct,
+                    'total':    100.0,
+                },
+                'cloAttainments': clo_attainments,
+            })
+
+        cgpa = round(total_credit_points / total_credits, 2) if total_credits > 0 else 0.0
+
+        return Response({
+            'student': {
+                'regNo':     reg_no,
+                'name':      student_name,
+                'programId': student_program.code.lower() if student_program else None,
+                'cgpa':      cgpa,
+            },
+            'courses': courses_result,
+        })

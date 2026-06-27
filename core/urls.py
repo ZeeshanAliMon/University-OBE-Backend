@@ -14,6 +14,11 @@ from .views import (
     SemesterPlanView,
     StudentCoursesView,
     AdmissionStudentListView, AdmissionStudentDetailView,
+    # Reports
+    ProgramGAAttainmentView,
+    StudentGAAttainmentView,
+    CourseAttainmentView,
+    StudentSummaryView,
 )
 
 urlpatterns = [
@@ -34,12 +39,18 @@ urlpatterns = [
     path('instructor/profile/', InstructorProfileView.as_view(), name='instructor_profile'),
     path('instructor/courses/', InstructorCourseView.as_view(),  name='instructor_courses'),
 
-    path('teachers/',                 TeacherListView.as_view(),    name='teacher_list'),
+    path('teachers/',                 TeacherListView.as_view(),      name='teacher_list'),
     path('admin/course-assignments/', CourseAssignmentView.as_view(), name='course_assignments'),
-    path('admin/semester-plans/',     SemesterPlanView.as_view(),   name='semester_plans'),
+    path('admin/semester-plans/',     SemesterPlanView.as_view(),     name='semester_plans'),
 
     path('student/courses/', StudentCoursesView.as_view(), name='student_courses'),
 
     path('students/',              AdmissionStudentListView.as_view(),   name='student_list'),
     path('students/<str:reg_no>/', AdmissionStudentDetailView.as_view(), name='student_detail'),
+
+    # ── Reports ──────────────────────────────────────────────────────────────
+    path('reports/program-ga-attainment/', ProgramGAAttainmentView.as_view(),  name='report_program_ga'),
+    path('reports/student-ga-attainment/', StudentGAAttainmentView.as_view(),  name='report_student_ga'),
+    path('reports/course-attainment/',     CourseAttainmentView.as_view(),     name='report_course'),
+    path('reports/student-summary/',       StudentSummaryView.as_view(),       name='report_student_summary'),
 ]
