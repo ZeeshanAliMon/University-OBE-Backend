@@ -1,4 +1,3 @@
-'PYEOF'
 from django.core.management.base import BaseCommand
 from django.contrib.auth.hashers import make_password
 from core.models import (
@@ -7,6 +6,7 @@ from core.models import (
     Course, InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
     AdmissionStudent, DeptAdminProfile, AdmissionProfile, CourseAssignment,
+    SemesterPlan,
 )
 
 
@@ -24,6 +24,7 @@ class Command(BaseCommand):
             AdmissionStudent, Student,
             CourseAssignment, InstructorProfile, QAProfile,
             DeptAdminProfile, AdmissionProfile,
+            SemesterPlan,
             Program, Department,
         ]:
             model.objects.all().delete()
