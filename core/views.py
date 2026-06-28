@@ -652,6 +652,10 @@ class AdmissionStudentListView(APIView):
             batch      = data.get('batch', 'Fall')
             semester   = data.get('semester', '1st')
 
+            # Email: use provided or auto-generate from reg_no
+            raw_email = data.get('email', '').strip().lower()
+            email = raw_email if raw_email else f"{reg_no.lower().replace(' ', '')}@iqra.edu.pk"
+
             if not reg_no or not name or not dept_id or not program_id:
                 errors.append({'index': idx, 'regNo': reg_no, 'error': 'regNo, name, departmentId and programId are required'})
                 continue
@@ -668,8 +672,50 @@ class AdmissionStudentListView(APIView):
 
             student, _ = AdmissionStudent.objects.update_or_create(
                 reg_no=reg_no,
-                defaults=dict(name=name, department=department, program=program, batch=batch, semester=semester)
+                defaults=dict(
+                    name=name, email=email,
+                    department=department, program=program,
+                    batch=batch, semester=semester
+                )
             )
+
+            # Auto-create or update the login User + Student profile
+            from django.contrib.auth.hashers import make_password as _make_password
+            import re as _re
+            base_uname = _re.sub(r'[^a-zA-Z0-9]', '_', reg_no.lower())[:20]
+            user_obj   = User.objects.filter(email__iexact=email).first()
+            if not user_obj:
+                # New student — create account with default password
+                uname   = base_uname
+                counter = 1
+                while User.objects.filter(username=uname).exists():
+                    uname = f"{base_uname}_{counter}"
+                    counter += 1
+                name_parts = name.split()
+                user_obj = User.objects.create(
+                    username=uname,
+                    email=email,
+                    first_name=name_parts[0] if name_parts else '',
+                    last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
+                    role='student',
+                    password=_make_password('zeeshan123'),
+                    must_change_password=False,
+                    is_active=True,
+                )
+            else:
+                # Update name if changed
+                name_parts = name.split()
+                user_obj.first_name = name_parts[0] if name_parts else ''
+                user_obj.last_name  = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+                user_obj.save()
+
+            # Link Student profile (reg_no is the bridge)
+            from .models import Student as StudentProfile
+            StudentProfile.objects.update_or_create(
+                user=user_obj,
+                defaults=dict(reg_no=reg_no, department=department, program=program)
+            )
+
             created.append(student)
 
         serialized = AdmissionStudentSerializer(created, many=True).data
