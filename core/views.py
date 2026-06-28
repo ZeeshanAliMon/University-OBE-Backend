@@ -108,6 +108,7 @@ class LoginView(APIView):
             except Exception:
                 pass
 
+        user_data['mustChangePassword'] = user.must_change_password
         return Response({**get_tokens_for_user(user), 'user': user_data})
 
 
@@ -2184,3 +2185,179 @@ class GapAnalysisView(APIView):
             'criticalGaps':  critical,
             'attributes':    result,
         })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEACHER ONBOARDING (Dept Admin)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TeacherOnboardingView(APIView):
+    """
+    POST /api/admin/teachers/
+    Create a new instructor account. Dept Admin only.
+
+    Payload:
+    {
+      "name":        "Dr. Ahmed Ali",
+      "email":       "ahmed.ali@iqra.edu.pk",
+      "employeeId":  "INS-CS-005",
+      "designation": "Assistant Professor",
+      "departmentId": "computing"
+    }
+
+    - Creates User with role='instructor', temp password = employeeId
+    - Sets must_change_password = True
+    - Creates InstructorProfile linked to the user
+    - Returns the teacher object + mustChangePassword flag
+
+    DELETE /api/admin/teachers/<employee_id>/
+    Remove a teacher. Cannot delete if they have active InstructorCourse records.
+    """
+    permission_classes = [IsDeptAdmin]
+
+    def post(self, request):
+        data        = request.data
+        name        = data.get('name', '').strip()
+        email       = data.get('email', '').strip().lower()
+        employee_id = data.get('employeeId', '').strip()
+        designation = data.get('designation', '').strip()
+        dept_id     = data.get('departmentId', '').strip()
+
+        if not name or not email or not employee_id or not dept_id:
+            return Response(
+                {'error': 'name, email, employeeId and departmentId are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if User.objects.filter(email__iexact=email).exists():
+            return Response(
+                {'error': f'An account with email "{email}" already exists'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if InstructorProfile.objects.filter(employee_id=employee_id).exists():
+            return Response(
+                {'error': f'Employee ID "{employee_id}" is already registered'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            department = Department.objects.get(dept_id=dept_id)
+        except Department.DoesNotExist:
+            return Response(
+                {'error': f'Department "{dept_id}" not found'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Generate username from email prefix + random suffix to ensure uniqueness
+        import re
+        base_username = re.sub(r'[^a-zA-Z0-9]', '_', email.split('@')[0])[:20]
+        username      = base_username
+        counter       = 1
+        while User.objects.filter(username=username).exists():
+            username = f"{base_username}_{counter}"
+            counter += 1
+
+        # Temp password = employeeId — instructor must change on first login
+        from django.contrib.auth.hashers import make_password
+        user = User.objects.create(
+            username=username,
+            email=email,
+            first_name=name.split()[0] if name else '',
+            last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
+            role='instructor',
+            password=make_password(employee_id),
+            must_change_password=True,
+            is_active=True,
+        )
+
+        profile = InstructorProfile.objects.create(
+            user=user,
+            employee_id=employee_id,
+            designation=designation,
+            department=department,
+        )
+
+        return Response({
+            'employeeId':         profile.employee_id,
+            'name':               user.get_full_name() or name,
+            'email':              user.email,
+            'designation':        profile.designation,
+            'departmentId':       department.dept_id,
+            'departmentName':     department.name,
+            'mustChangePassword': True,
+            'message':            f'Account created. Temporary password is the Employee ID: {employee_id}',
+        }, status=status.HTTP_201_CREATED)
+
+    def delete(self, request, employee_id=None):
+        if not employee_id:
+            return Response({'error': 'employeeId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            profile = InstructorProfile.objects.select_related('user').get(
+                employee_id=employee_id
+            )
+        except InstructorProfile.DoesNotExist:
+            return Response(
+                {'error': f'Instructor "{employee_id}" not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Block deletion if they have active courses with student data
+        active_courses = InstructorCourse.objects.filter(
+            instructor=profile
+        ).filter(students__isnull=False).distinct()
+
+        if active_courses.exists():
+            return Response({
+                'error': f'Cannot delete — instructor has {active_courses.count()} active course(s) with enrolled students. Remove course assignments first.',
+            }, status=status.HTTP_409_CONFLICT)
+
+        user = profile.user
+        profile.delete()
+        user.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ── Change Password ───────────────────────────────────────────────────────────
+
+class ChangePasswordView(APIView):
+    """
+    POST /api/auth/change-password/
+    Authenticated. Used on first login or voluntary password change.
+
+    Payload: { "currentPassword": "...", "newPassword": "..." }
+
+    On success, clears must_change_password flag.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        data             = request.data
+        current_password = data.get('currentPassword', '')
+        new_password     = data.get('newPassword', '').strip()
+
+        if not current_password or not new_password:
+            return Response(
+                {'error': 'currentPassword and newPassword are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if len(new_password) < 6:
+            return Response(
+                {'error': 'New password must be at least 6 characters'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user = request.user
+        if not user.check_password(current_password):
+            return Response(
+                {'error': 'Current password is incorrect'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user.set_password(new_password)
+        user.must_change_password = False
+        user.save()
+
+        return Response({'message': 'Password changed successfully'})

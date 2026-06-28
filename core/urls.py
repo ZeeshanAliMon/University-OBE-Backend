@@ -10,6 +10,8 @@ from .views import (
     InstructorProfileView,
     InstructorCourseView,
     TeacherListView,
+    TeacherOnboardingView,
+    ChangePasswordView,
     CourseAssignmentView,
     SemesterPlanView,
     StudentCoursesView,
@@ -45,7 +47,10 @@ urlpatterns = [
     path('instructor/courses/<str:frontend_id>/clos/',           CLOListView.as_view(),   name='clo_list'),
     path('instructor/courses/<str:frontend_id>/clos/<int:clo_id>/', CLODetailView.as_view(), name='clo_detail'),
 
-    path('teachers/',                 TeacherListView.as_view(),      name='teacher_list'),
+    path('teachers/',                          TeacherListView.as_view(),          name='teacher_list'),
+    path('admin/teachers/',                    TeacherOnboardingView.as_view(),    name='teacher_onboard'),
+    path('admin/teachers/<str:employee_id>/',  TeacherOnboardingView.as_view(),    name='teacher_delete'),
+    path('auth/change-password/',              ChangePasswordView.as_view(),       name='change_password'),
     path('admin/course-assignments/', CourseAssignmentView.as_view(), name='course_assignments'),
     path('admin/semester-plans/',     SemesterPlanView.as_view(),     name='semester_plans'),
 
