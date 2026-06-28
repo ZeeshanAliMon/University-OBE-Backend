@@ -551,6 +551,7 @@ class AdmissionStudent(models.Model):
 
     reg_no     = models.CharField(max_length=60, unique=True)
     name       = models.CharField(max_length=200)
+    email      = models.EmailField(blank=True, default='')
     department = models.ForeignKey(
         Department, on_delete=models.PROTECT,
         related_name='admission_students'

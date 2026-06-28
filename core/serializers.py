@@ -330,7 +330,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
 class AdmissionStudentSerializer(serializers.ModelSerializer):
     """
     Frontend Student type:
-    { regNo, name, departmentId, programId, batch }
+    { regNo, name, email, departmentId, programId, batch, semester }
     """
     regNo        = serializers.CharField(source='reg_no')
     departmentId = serializers.SerializerMethodField()
@@ -339,10 +339,10 @@ class AdmissionStudentSerializer(serializers.ModelSerializer):
     class Meta:
         from .models import AdmissionStudent
         model  = AdmissionStudent
+        fields = ['regNo', 'name', 'email', 'departmentId', 'programId', 'batch', 'semester']
+
     def get_departmentId(self, obj):
         return obj.department.dept_id
 
     def get_programId(self, obj):
         return obj.program.code.lower()
-
-        fields = ['regNo', 'name', 'departmentId', 'programId', 'batch', 'semester']
