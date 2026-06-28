@@ -2258,7 +2258,7 @@ class TeacherOnboardingView(APIView):
             username = f"{base_username}_{counter}"
             counter += 1
 
-        # Temp password = employeeId — instructor must change on first login
+        # Default password = zeeshan123 — same for all new accounts
         from django.contrib.auth.hashers import make_password
         user = User.objects.create(
             username=username,
@@ -2266,7 +2266,7 @@ class TeacherOnboardingView(APIView):
             first_name=name.split()[0] if name else '',
             last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
             role='instructor',
-            password=make_password(employee_id),
+            password=make_password('zeeshan123'),
             must_change_password=True,
             is_active=True,
         )
@@ -2286,7 +2286,7 @@ class TeacherOnboardingView(APIView):
             'departmentId':       department.dept_id,
             'departmentName':     department.name,
             'mustChangePassword': True,
-            'message':            f'Account created. Temporary password is the Employee ID: {employee_id}',
+            'message':            'Account created. Default password is: zeeshan123',
         }, status=status.HTTP_201_CREATED)
 
     def delete(self, request, employee_id=None):
