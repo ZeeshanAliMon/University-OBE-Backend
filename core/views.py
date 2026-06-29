@@ -108,6 +108,13 @@ class LoginView(APIView):
             except Exception:
                 pass
 
+        if user.role == 'student':
+            try:
+                user_data['regNo']        = user.student_profile.reg_no
+                user_data['departmentId'] = user.student_profile.department.dept_id
+            except Exception:
+                pass
+
         user_data['mustChangePassword'] = user.must_change_password
         return Response({**get_tokens_for_user(user), 'user': user_data})
 
