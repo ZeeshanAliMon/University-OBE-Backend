@@ -29,6 +29,9 @@ try:
     if count == 0:
         call_command('seed', verbosity=0)
 
+    # Always ensure specific accounts exist (idempotent — safe every startup)
+    call_command('ensure_accounts', verbosity=0)
+
 except Exception as e:
     # Never crash the server on startup errors — log and continue
     print(f"[WSGI startup] Migration/seed error: {e}", file=sys.stderr)
