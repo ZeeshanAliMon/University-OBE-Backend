@@ -693,14 +693,9 @@ class AdmissionStudentListView(APIView):
             user_obj   = User.objects.filter(email__iexact=email).first()
             if not user_obj:
                 # New student — create account with default password
-                uname   = base_uname
-                counter = 1
-                while User.objects.filter(username=uname).exists():
-                    uname = f"{base_uname}_{counter}"
-                    counter += 1
                 name_parts = name.split()
                 user_obj = User.objects.create(
-                    username=uname,
+                    username=email,
                     email=email,
                     first_name=name_parts[0] if name_parts else '',
                     last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',

@@ -16,10 +16,15 @@ class LoginSerializer(serializers.Serializer):
 
 class UserSerializer(serializers.ModelSerializer):
     user_type = serializers.CharField(source='role')
+    name      = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
-        fields = ['id', 'email', 'user_type']
+        fields = ['id', 'email', 'name', 'user_type']
+
+    def get_name(self, obj):
+        full = obj.get_full_name().strip()
+        return full if full else obj.email.split('@')[0]
 
 
 # ─── QA Serializers ───────────────────────────────────────────────────────────

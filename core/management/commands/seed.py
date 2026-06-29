@@ -333,14 +333,14 @@ class Command(BaseCommand):
             ('qa_business',  'Nadia', 'Ahmed', 'qa.business@iqra.edu.pk',  'business',  'QA-BIZ-001'),
             ('qa_engineering','Zara', 'Malik', 'qa.eng@iqra.edu.pk',       'engineering','QA-ENG-001'),
         ]:
-            u = User.objects.create(username=username, email=email,
+            u = User.objects.create(username=email, email=email,
                 first_name=first, last_name=last,
                 role='qa', password=make_password('qapass123'), is_active=True)
             QAProfile.objects.create(user=u, department=depts[dept_slug], employee_id=emp_id)
 
         # Admission Officer
         adm_user = User.objects.create(
-            username='admission', email='admission@iqra.edu.pk',
+            username='admission@iqra.edu.pk', email='admission@iqra.edu.pk',
             first_name='Admission', last_name='Officer',
             role='admission', password=make_password('admpass123'), is_active=True
         )
@@ -350,7 +350,7 @@ class Command(BaseCommand):
 
         # Zeeshan's admission account
         adm_zeeshan = User.objects.create(
-            username='zeeshan_admission', email='zeeshan@ali.com',
+            username='zeeshan@ali.com', email='zeeshan@ali.com',
             first_name='Zeeshan', last_name='Ali',
             role='admission', password=make_password('ijijijij'), is_active=True
         )
@@ -365,7 +365,7 @@ class Command(BaseCommand):
             ('admin_engineering','Hira',   'Baig',   'admin.engineering@iqra.edu.pk','engineering', 'DA-ENG-001'),
             ('zeeshan_dept',     'Zeeshan','Ali',    'ali@zeeshan.com',              'computing',   'DA-ZA-001'),
         ]:
-            u = User.objects.create(username=username, email=email,
+            u = User.objects.create(username=email, email=email,
                 first_name=first, last_name=last,
                 role='dept_admin', password=make_password('adminpass123'), is_active=True)
             DeptAdminProfile.objects.create(user=u, department=depts[dept_slug], employee_id=emp_id)
@@ -378,7 +378,7 @@ class Command(BaseCommand):
             ('dr_usman',  'Usman',  'Sheikh', 'usman.sheikh@iqra.edu.pk', 'business',    'INS-BIZ-001','Senior Lecturer'),
             ('dr_sara',   'Sara',   'Qadir',  'sara.qadir@iqra.edu.pk',   'engineering', 'INS-ENG-001','Lecturer'),
         ]:
-            u = User.objects.create(username=username, email=email,
+            u = User.objects.create(username=email, email=email,
                 first_name=first, last_name=last,
                 role='instructor', password=make_password('instpass123'), is_active=True)
             p = InstructorProfile.objects.create(
@@ -515,7 +515,7 @@ class Command(BaseCommand):
         ]
         for username, first, last, email, reg_no, prog, dept in student_logins:
             u = User.objects.create(
-                username=username, email=email,
+                username=email, email=email,
                 first_name=first, last_name=last,
                 role='student', password=make_password('stupass123'), is_active=True
             )
