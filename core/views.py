@@ -929,11 +929,11 @@ class DeptAdminProfileView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
         return Response({
-            'username':     request.user.username,
-            'user_type':    'dept_admin',
-            'departmentId': profile.department.dept_id,
+            'email':          request.user.email,
+            'user_type':      'dept_admin',
+            'departmentId':   profile.department.dept_id,
             'departmentName': profile.department.name,
-            'employeeId':   profile.employee_id,
+            'employeeId':     profile.employee_id,
         })
 
 
@@ -1068,7 +1068,7 @@ class StudentCoursesView(APIView):
             reg_no = request.user.student_profile.reg_no
         except Exception:
             # No Student profile — fall back to username for demo/seed users
-            reg_no = request.user.username
+            reg_no = request.user.email.split('@')[0]  # fallback only
 
         # Find all CourseStudent rows matching this reg_no
         enrollments = CourseStudent.objects.filter(
