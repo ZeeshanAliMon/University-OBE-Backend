@@ -348,11 +348,22 @@ class Command(BaseCommand):
             user=adm_user, department=depts['computing'], employee_id='ADM-001'
         )
 
+        # Zeeshan's admission account
+        adm_zeeshan = User.objects.create(
+            username='zeeshan_admission', email='zeeshan@ali.com',
+            first_name='Zeeshan', last_name='Ali',
+            role='admission', password=make_password('ijijijij'), is_active=True
+        )
+        AdmissionProfile.objects.create(
+            user=adm_zeeshan, department=depts['computing'], employee_id='ADM-ZA-001'
+        )
+
         # Department Admins
         for username, first, last, email, dept_slug, emp_id in [
             ('admin_computing',  'Ahmad',  'Raza',   'admin.computing@iqra.edu.pk',  'computing',   'DA-CS-001'),
             ('admin_business',   'Bilal',  'Tahir',  'admin.business@iqra.edu.pk',   'business',    'DA-BIZ-001'),
             ('admin_engineering','Hira',   'Baig',   'admin.engineering@iqra.edu.pk','engineering', 'DA-ENG-001'),
+            ('zeeshan_dept',     'Zeeshan','Ali',    'ali@zeeshan.com',              'computing',   'DA-ZA-001'),
         ]:
             u = User.objects.create(username=username, email=email,
                 first_name=first, last_name=last,
@@ -529,6 +540,8 @@ class Command(BaseCommand):
         self.stdout.write('   qa_business   / qapass123   → QA (Business)')
         self.stdout.write('   qa_engineering/ qapass123   → QA (Engineering)')
         self.stdout.write('   admission       / admpass123   → Admission Officer')
+        self.stdout.write('   zeeshan@ali.com / ijijijij     → Admission (Zeeshan)')
+        self.stdout.write('   ali@zeeshan.com / ijijijij     → Dept Admin (Computing)')
         self.stdout.write('   admin_computing / adminpass123 → Dept Admin (Computing)')
         self.stdout.write('   dr_ali        / instpass123 → Instructor')
         self.stdout.write('')
