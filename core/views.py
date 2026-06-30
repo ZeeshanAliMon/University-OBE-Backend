@@ -2654,6 +2654,50 @@ class FinalizeCourseView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # ── Validation gate ──────────────────────────────────────────────────
+        # Closing is irreversible via API — once FinalResult rows are written
+        # and the course is locked, there is no API path back. So we refuse
+        # to close (and write nothing) if the course's grading structure is
+        # internally inconsistent. The frontend enforces these same rules in
+        # its UI, but the backend must never trust that and must re-verify
+        # before permanently committing a grade.
+        validation_errors = []
+
+        categories = list(ic.categories.all())
+        if not categories:
+            validation_errors.append('Course has no marks categories defined.')
+        else:
+            cat_total = round(sum(c.percentage for c in categories), 2)
+            if cat_total != 100:
+                validation_errors.append(
+                    f'Category percentages sum to {cat_total}%, not 100%.'
+                )
+
+            for cat in categories:
+                units = list(cat.unit_items.all())
+                if cat.percentage > 0 and not units:
+                    validation_errors.append(
+                        f'Category "{cat.name}" has {cat.percentage}% weight but no units defined.'
+                    )
+                elif units:
+                    unit_total = round(sum(u.weightage for u in units), 2)
+                    if unit_total != 100:
+                        validation_errors.append(
+                            f'Category "{cat.name}" unit weightages sum to {unit_total}%, not 100%.'
+                        )
+
+        if not ic.students.exists():
+            validation_errors.append('Course has no enrolled students to finalize.')
+
+        if validation_errors:
+            return Response(
+                {
+                    'error': 'Course cannot be closed — grading structure is invalid.',
+                    'details': validation_errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         questions = list(ic.obe_questions.all())
         instructor_name = ic.instructor.user.get_full_name() or ic.instructor.user.email
 
