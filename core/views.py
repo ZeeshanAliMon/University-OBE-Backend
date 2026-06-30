@@ -1836,34 +1836,35 @@ class COAttainmentSummaryView(APIView):
 
         courses_data = []
         for ic in ic_qs:
+            # Build mark lookup once per course: { question_pk: [scores] }
+            all_questions = list(ic.obe_questions.all())
+            q_marks = {}
+            for m in OBEStudentMark.objects.filter(question__in=all_questions).select_related('question'):
+                q_marks.setdefault(m.question_id, []).append(m.score)
+
             clos_data = []
             for clo in ic.clos.select_related('mapped_ga').all():
-                # Find questions mapped to this CLO
-                questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
-                total_possible = 0
-                total_obtained  = 0
-                for q in questions:
-                    marks = OBEStudentMark.objects.filter(question=q)
-                    total_possible += q.max_marks * marks.count()
-                    total_obtained  += sum(m.score for m in marks)
+                questions = [q for q in all_questions if clo.code in (q.mapped_clos or [])]
+                total_possible = sum(q.max_marks * len(q_marks.get(q.pk, [])) for q in questions)
+                total_obtained = sum(sum(q_marks.get(q.pk, [])) for q in questions)
 
-                pct    = round((total_obtained / total_possible * 100), 1) if total_possible > 0 else 0
+                pct        = round((total_obtained / total_possible * 100), 1) if total_possible > 0 else 0
                 status_str = 'Met' if pct >= ATTAINMENT_THRESHOLD else 'Not Met'
 
                 clos_data.append({
-                    'code':               clo.code,
-                    'description':        clo.description,
-                    'mappedGA':           clo.mapped_ga.ga_id if clo.mapped_ga else None,
-                    'attainmentPercent':  pct,
-                    'status':             status_str,
+                    'code':              clo.code,
+                    'description':       clo.description,
+                    'mappedGA':          clo.mapped_ga.ga_id if clo.mapped_ga else None,
+                    'attainmentPercent': pct,
+                    'status':            status_str,
                 })
 
             courses_data.append({
-                'courseCode':  ic.code,
-                'courseTitle': ic.title,
-                'semester':    ic.semester,
-                'academicYear':ic.academic_year,
-                'clos':        clos_data,
+                'courseCode':   ic.code,
+                'courseTitle':  ic.title,
+                'semester':     ic.semester,
+                'academicYear': ic.academic_year,
+                'clos':         clos_data,
             })
 
         return Response({
@@ -1925,10 +1926,13 @@ class POAttainmentView(APIView):
                 clos_for_ga = ic.clos.filter(mapped_ga=ga)
                 for clo in clos_for_ga:
                     questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
+                    q_marks_po = {}
+                    for m in OBEStudentMark.objects.filter(question__in=questions).select_related('question'):
+                        q_marks_po.setdefault(m.question_id, []).append(m.score)
                     for q in questions:
-                        marks = OBEStudentMark.objects.filter(question=q)
-                        total_possible += q.max_marks * marks.count()
-                        total_obtained  += sum(m.score for m in marks)
+                        scores = q_marks_po.get(q.pk, [])
+                        total_possible += q.max_marks * len(scores)
+                        total_obtained  += sum(scores)
 
             ga_attainment[ga.ga_id] = round(
                 (total_obtained / total_possible * 100), 1
@@ -2004,14 +2008,15 @@ class InstructorPerformanceView(APIView):
             courses_data = []
             for ic in profile.instructor_courses.all():
                 clo_attainments = []
-                for clo in ic.clos.all():
-                    questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
-                    total_p = sum(q.max_marks * OBEStudentMark.objects.filter(question=q).count() for q in questions)
-                    total_o = sum(
-                        m.score
-                        for q in questions
-                        for m in OBEStudentMark.objects.filter(question=q)
-                    )
+                all_qs_cohort = list(ic.obe_questions.all())
+                clo_qs_cohort = ic.clos.filter(mapped_ga=ga) if ga else ic.clos.all()
+                q_marks_cohort = {}
+                for m in OBEStudentMark.objects.filter(question__in=all_qs_cohort).select_related('question'):
+                    q_marks_cohort.setdefault(m.question_id, []).append(m.score)
+                for clo in clo_qs_cohort:
+                    questions = [q for q in all_qs_cohort if clo.code in (q.mapped_clos or [])]
+                    total_p = sum(q.max_marks * len(q_marks_cohort.get(q.pk, [])) for q in questions)
+                    total_o = sum(sum(q_marks_cohort.get(q.pk, [])) for q in questions)
                     pct = round(total_o / total_p * 100, 1) if total_p > 0 else 0
                     clo_attainments.append(pct)
 
@@ -2085,10 +2090,13 @@ class CohortComparisonView(APIView):
             clo_qs = ic.clos.filter(mapped_ga=ga) if ga else ic.clos.all()
             for clo in clo_qs:
                 questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
+                q_marks_perf = {}
+                for m in OBEStudentMark.objects.filter(question__in=questions).select_related('question'):
+                    q_marks_perf.setdefault(m.question_id, []).append(m.score)
                 for q in questions:
-                    marks = OBEStudentMark.objects.filter(question=q)
-                    by_year[year]['total_possible'] += q.max_marks * marks.count()
-                    by_year[year]['total_obtained']  += sum(m.score for m in marks)
+                    scores = q_marks_perf.get(q.pk, [])
+                    by_year[year]['total_possible'] += q.max_marks * len(scores)
+                    by_year[year]['total_obtained']  += sum(scores)
 
         cohorts = []
         for year in sorted(by_year.keys()):
@@ -2222,11 +2230,15 @@ class GapAnalysisView(APIView):
             total_p = 0
             total_o = 0
             for clo in active_clos:
-                questions = clo.course.obe_questions.filter(pk__in=[q.pk for q in clo.course.obe_questions.all() if clo.code in (q.mapped_clos or [])])
+                all_qs_gap = list(clo.course.obe_questions.all())
+                questions  = [q for q in all_qs_gap if clo.code in (q.mapped_clos or [])]
+                q_marks_gap = {}
+                for m in OBEStudentMark.objects.filter(question__in=questions):
+                    q_marks_gap.setdefault(m.question_id, []).append(m.score)
                 for q in questions:
-                    marks = OBEStudentMark.objects.filter(question=q)
-                    total_p += q.max_marks * marks.count()
-                    total_o += sum(m.score for m in marks)
+                    scores   = q_marks_gap.get(q.pk, [])
+                    total_p += q.max_marks * len(scores)
+                    total_o += sum(scores)
 
             avg_att = round(total_o / total_p * 100, 1) if total_p > 0 else 0
             courses_count = mapped_courses.count()
