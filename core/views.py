@@ -898,6 +898,19 @@ class CourseAssignmentView(APIView):
         deleted, _ = qs.delete()
         if not deleted:
             return Response({'error': 'Assignment not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Clean up the auto-created InstructorCourse stub for this assignment.
+        # Only delete if it has NO student data — preserve any gradebook the
+        # instructor has already started filling in, even after unassignment.
+        prog_suffix = program_id.lower() if program_id else 'all'
+        frontend_id = f"course-assigned-{course_code}-{teacher_id}-{prog_suffix}"
+        try:
+            ic = InstructorCourse.objects.get(frontend_id=frontend_id)
+            if not ic.students.exists() and not ic.obe_questions.exists():
+                ic.delete()
+        except InstructorCourse.DoesNotExist:
+            pass
+
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
