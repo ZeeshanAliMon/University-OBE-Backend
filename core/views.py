@@ -2436,3 +2436,91 @@ class ChangePasswordView(APIView):
         user.save()
 
         return Response({'message': 'Password changed successfully'})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STUDENT ENROLLMENT (Dept Admin)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class StudentEnrollmentView(APIView):
+    """
+    POST /api/admin/enroll/
+    Dept Admin enrolls students into an instructor's course.
+
+    Payload:
+    {
+      "courseId": "course-assigned-CMC111-INCSLK3-bscs",  // InstructorCourse frontend_id
+      "students": [
+        { "regNo": "FA22-BSCS-0012", "name": "Ahmed Khan" },
+        ...
+      ]
+    }
+
+    Creates CourseStudent records for each student.
+    Idempotent — safe to call multiple times.
+
+    DELETE /api/admin/enroll/
+    Remove a student from a course.
+    Payload: { "courseId": "...", "regNo": "FA22-BSCS-0012" }
+    """
+    permission_classes = [IsDeptAdmin]
+
+    def post(self, request):
+        data      = request.data
+        course_id = data.get('courseId', '').strip()
+        students  = data.get('students', [])
+
+        if not course_id:
+            return Response({'error': 'courseId is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(students, list):
+            return Response({'error': 'students must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            ic = InstructorCourse.objects.get(frontend_id=course_id)
+        except InstructorCourse.DoesNotExist:
+            return Response(
+                {'error': f'Course "{course_id}" not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        enrolled, skipped = [], []
+        for s in students:
+            reg_no = s.get('regNo', '').strip().upper()
+            name   = s.get('name', '').strip()
+            if not reg_no:
+                continue
+
+            _, created = CourseStudent.objects.get_or_create(
+                course=ic, reg_no=reg_no,
+                defaults={'name': name or reg_no}
+            )
+            if created:
+                enrolled.append(reg_no)
+            else:
+                skipped.append(reg_no)
+
+        return Response({
+            'courseId': course_id,
+            'enrolled': enrolled,
+            'skipped':  skipped,
+            'message':  f'{len(enrolled)} students enrolled, {len(skipped)} already enrolled',
+        }, status=status.HTTP_201_CREATED)
+
+    def delete(self, request):
+        data      = request.data
+        course_id = data.get('courseId', '').strip()
+        reg_no    = data.get('regNo', '').strip().upper()
+
+        if not course_id or not reg_no:
+            return Response(
+                {'error': 'courseId and regNo are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        deleted, _ = CourseStudent.objects.filter(
+            course__frontend_id=course_id, reg_no=reg_no
+        ).delete()
+
+        if not deleted:
+            return Response({'error': 'Enrollment not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)

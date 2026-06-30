@@ -13,6 +13,7 @@ from .views import (
     TeacherOnboardingView,
     ChangePasswordView,
     CourseAssignmentView,
+    StudentEnrollmentView,
     SemesterPlanView,
     StudentCoursesView,
     AdmissionStudentListView, AdmissionStudentDetailView,
@@ -52,6 +53,7 @@ urlpatterns = [
     path('admin/teachers/<str:employee_id>/',  TeacherOnboardingView.as_view(),    name='teacher_delete'),
     path('auth/change-password/',              ChangePasswordView.as_view(),       name='change_password'),
     path('admin/course-assignments/', CourseAssignmentView.as_view(), name='course_assignments'),
+    path('admin/enroll/',             StudentEnrollmentView.as_view(), name='student_enrollment'),
     path('admin/semester-plans/',     SemesterPlanView.as_view(),     name='semester_plans'),
 
     path('student/courses/', StudentCoursesView.as_view(), name='student_courses'),
