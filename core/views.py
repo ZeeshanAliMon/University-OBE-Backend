@@ -389,6 +389,33 @@ class InstructorCourseView(APIView):
                 {'error': 'Instructor profile not found'},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # Auto-create InstructorCourse stubs for any CourseAssignment
+        # not yet in the instructor's course list
+        assignments = CourseAssignment.objects.filter(
+            instructor=profile
+        ).select_related('course', 'program')
+
+        for assignment in assignments:
+            course   = assignment.course
+            program  = assignment.program
+            # Unique ID for this assignment
+            prog_suffix = program.code.lower() if program else 'all'
+            frontend_id = f"course-assigned-{course.code}-{profile.employee_id}-{prog_suffix}"
+
+            InstructorCourse.objects.get_or_create(
+                instructor=profile,
+                frontend_id=frontend_id,
+                defaults=dict(
+                    code=course.code,
+                    title=course.title,
+                    course_type='Theory',
+                    department=course.department,
+                    program=program,
+                    credit_hours=course.credit_hours,
+                )
+            )
+
         qs = prefetch_instructor_course(
             InstructorCourse.objects.filter(instructor=profile).order_by('created_at')
         )
