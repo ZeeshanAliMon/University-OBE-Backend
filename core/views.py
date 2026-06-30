@@ -1,5 +1,6 @@
 from django.contrib.auth import authenticate
 from django.db import models
+from django.utils import timezone
 
 from rest_framework             import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -399,9 +400,24 @@ class InstructorCourseView(APIView):
         for assignment in assignments:
             course   = assignment.course
             program  = assignment.program
-            # Unique ID for this assignment
-            prog_suffix = program.code.lower() if program else 'all'
-            frontend_id = f"course-assigned-{course.code}-{profile.employee_id}-{prog_suffix}"
+            term     = assignment.academic_year  # e.g. 'Fall-2024', may be blank for legacy
+
+            # Unique ID for this assignment — includes term so the SAME
+            # teacher+course in a DIFFERENT semester is a separate record.
+            # This is what prevents a new term's offering from overwriting
+            # a previous term's marks when a teacher repeats a course.
+            prog_suffix  = program.code.lower() if program else 'all'
+            term_suffix  = f"-{term.lower().replace(' ', '')}" if term else ''
+            frontend_id  = f"course-assigned-{course.code}-{profile.employee_id}-{prog_suffix}{term_suffix}"
+
+            # Skip auto-create if a CLOSED InstructorCourse already exists for
+            # this exact assignment+term — closed courses are finalized and
+            # must never be silently reopened or duplicated.
+            existing_closed = InstructorCourse.objects.filter(
+                instructor=profile, frontend_id=frontend_id, status='closed'
+            ).exists()
+            if existing_closed:
+                continue
 
             InstructorCourse.objects.get_or_create(
                 instructor=profile,
@@ -413,6 +429,7 @@ class InstructorCourseView(APIView):
                     department=course.department,
                     program=program,
                     credit_hours=course.credit_hours,
+                    academic_year=term,
                 )
             )
 
@@ -442,6 +459,17 @@ class InstructorCourseView(APIView):
             frontend_id = c.get('id', '')
             dept_id     = c.get('departmentId', '')
             program_id  = c.get('programId')
+
+            # Closed courses are read-only — reject any edit attempt
+            existing = InstructorCourse.objects.filter(
+                instructor=profile, frontend_id=frontend_id
+            ).first()
+            if existing and existing.status == 'closed':
+                errors.append({
+                    'index': idx,
+                    'error': f'Course "{frontend_id}" is closed (finalized {existing.closed_at}) and cannot be edited.'
+                })
+                continue
 
             try:
                 department = Department.objects.get(dept_id=dept_id)
@@ -842,10 +870,11 @@ class CourseAssignmentView(APIView):
         return Response(data)
 
     def post(self, request):
-        data        = request.data
-        teacher_id  = data.get('teacherId', '').strip()
-        course_code = data.get('courseCode', '').strip().upper()
-        program_id  = data.get('programId', '').strip()
+        data          = request.data
+        teacher_id    = data.get('teacherId', '').strip()
+        course_code   = data.get('courseCode', '').strip().upper()
+        program_id    = data.get('programId', '').strip()
+        academic_year = data.get('academicYear', '').strip()  # e.g. 'Fall-2024'
 
         if not teacher_id or not course_code:
             return Response({'error': 'teacherId and courseCode are required'}, status=status.HTTP_400_BAD_REQUEST)
@@ -874,7 +903,7 @@ class CourseAssignmentView(APIView):
             pass
 
         assignment, created = CourseAssignment.objects.get_or_create(
-            instructor=instructor, course=course, program=program,
+            instructor=instructor, course=course, program=program, academic_year=academic_year,
             defaults={'assigned_by': dept_admin}
         )
         return Response({
@@ -2562,3 +2591,161 @@ class StudentEnrollmentView(APIView):
         if not deleted:
             return Response({'error': 'Enrollment not found'}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMESTER CLOSING / FINALIZATION
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Solves: "when a semester ends, results should be locked and a teacher
+# switching subjects should not wipe out the previous course's data."
+#
+# Flow:
+#   1. Dept Admin (or QA) reviews a course's marks at semester end
+#   2. POST /api/admin/finalize-course/ — snapshots final grades into
+#      FinalResult (permanent transcript table) and marks the
+#      InstructorCourse as 'closed'
+#   3. Closed courses become read-only — InstructorCourseView.post() will
+#      reject any further mark edits to a closed course
+#   4. If the same teacher is later assigned the same course again for a
+#      NEW term, a fresh InstructorCourse is created (frontend_id includes
+#      academic_year) — the closed one is never touched or reused
+# ───────────────────────────────────────────────────────────────────────────────
+
+from .models import FinalResult
+
+
+class FinalizeCourseView(APIView):
+    """
+    POST /api/admin/finalize-course/
+    Body: { "courseId": "course-assigned-CMC111-INS-CS-001-bscs-fall2024" }
+
+    Dept Admin or QA only. Permanently closes a course:
+      - Computes each student's final grade + CLO attainments
+      - Snapshots them into FinalResult (survives any future changes)
+      - Sets InstructorCourse.status = 'closed'
+      - Course becomes read-only — instructor can no longer edit marks
+
+    Cannot be undone via API (deliberately — closing is a final action).
+    If a genuine correction is needed, QA/admin must use Django admin directly.
+    """
+    def get_permissions(self):
+        return [IsDeptAdmin()] if self.request.method == 'POST' else [IsAuthenticated()]
+
+    def post(self, request):
+        course_id = request.data.get('courseId', '').strip()
+        if not course_id:
+            return Response({'error': 'courseId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            ic = InstructorCourse.objects.select_related(
+                'instructor__user', 'department', 'program'
+            ).prefetch_related(
+                'students__marks__unit_item__category',
+                'students__obe_marks__question',
+                'obe_questions',
+            ).get(frontend_id=course_id)
+        except InstructorCourse.DoesNotExist:
+            return Response({'error': f'Course "{course_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if ic.status == 'closed':
+            return Response(
+                {'error': 'This course is already closed', 'closedAt': ic.closed_at},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        questions = list(ic.obe_questions.all())
+        instructor_name = ic.instructor.user.get_full_name() or ic.instructor.user.email
+
+        results_created = []
+        for student in ic.students.all():
+            pct = _student_total_percentage(student)
+            grade_letter, grade_points = _get_grade(pct, ic)
+            clo_attainments = _clo_attainments_for_student(student, questions)
+
+            result, _ = FinalResult.objects.update_or_create(
+                student_reg_no=student.reg_no,
+                course_code=ic.code,
+                academic_year=ic.academic_year,
+                defaults=dict(
+                    student_name=student.name,
+                    course_title=ic.title,
+                    instructor_name=instructor_name,
+                    department=ic.department,
+                    program=ic.program,
+                    semester=ic.semester,
+                    credit_hours=ic.credit_hours,
+                    final_percentage=pct,
+                    grade_letter=grade_letter,
+                    grade_points=grade_points,
+                    clo_attainments=clo_attainments,
+                    source_course=ic,
+                )
+            )
+            results_created.append({
+                'regNo': student.reg_no, 'grade': grade_letter, 'percentage': pct
+            })
+
+        # Lock the course
+        ic.status    = 'closed'
+        ic.closed_at = timezone.now()
+        ic.closed_by = request.user
+        ic.save()
+
+        return Response({
+            'courseId':        course_id,
+            'courseCode':      ic.code,
+            'status':          'closed',
+            'closedAt':        ic.closed_at,
+            'studentsFinalized': len(results_created),
+            'results':         results_created,
+        })
+
+
+class FinalResultsView(APIView):
+    """
+    GET /api/reports/final-results/?regNo=FA22-BSCS-0012
+    GET /api/reports/final-results/?courseCode=CMC111&academicYear=Fall-2024
+
+    Read permanent transcript records. Used for official report cards
+    once a semester is closed — never affected by later teacher reassignments
+    or course edits.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        reg_no        = request.query_params.get('regNo', '').strip()
+        course_code   = request.query_params.get('courseCode', '').strip().upper()
+        academic_year = request.query_params.get('academicYear', '').strip()
+
+        qs = FinalResult.objects.all()
+        if reg_no:
+            qs = qs.filter(student_reg_no__iexact=reg_no)
+        if course_code:
+            qs = qs.filter(course_code__iexact=course_code)
+        if academic_year:
+            qs = qs.filter(academic_year__iexact=academic_year)
+
+        if not reg_no and not course_code:
+            return Response(
+                {'error': 'regNo or courseCode is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        results = [{
+            'regNo':           r.student_reg_no,
+            'studentName':     r.student_name,
+            'courseCode':      r.course_code,
+            'courseTitle':     r.course_title,
+            'instructorName':  r.instructor_name,
+            'academicYear':    r.academic_year,
+            'semester':        r.semester,
+            'creditHours':     r.credit_hours,
+            'finalPercentage': r.final_percentage,
+            'grade':           r.grade_letter,
+            'gradePoints':     r.grade_points,
+            'cloAttainments':  r.clo_attainments,
+            'finalizedAt':     r.finalized_at,
+        } for r in qs.order_by('-finalized_at')]
+
+        return Response({'results': results, 'count': len(results)})

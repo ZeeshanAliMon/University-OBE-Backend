@@ -324,17 +324,37 @@ class InstructorCourse(models.Model):
     academic_year           = models.CharField(
         max_length=20, blank=True
     )   # e.g. 'Fall-2024', 'Spring-2025'
+
+    # ── Semester lifecycle ────────────────────────────────────────────────────
+    STATUS_CHOICES = [
+        ('active', 'Active — editable'),
+        ('closed', 'Closed — finalized, read-only'),
+    ]
+    status      = models.CharField(max_length=10, choices=STATUS_CHOICES, default='active')
+    closed_at   = models.DateTimeField(null=True, blank=True)
+    closed_by   = models.ForeignKey(
+        'User', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='closed_courses'
+    )
+
     created_at              = models.DateTimeField(auto_now_add=True)
     updated_at              = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name        = 'Instructor Course'
         verbose_name_plural = 'Instructor Courses'
+        # frontend_id now bakes in academic_year — same teacher+course in a
+        # different term is a DIFFERENT row, never overwrites prior terms
         unique_together     = ('instructor', 'frontend_id')
         ordering            = ['-updated_at']
 
+    @property
+    def is_locked(self):
+        return self.status == 'closed'
+
     def __str__(self):
-        return f"{self.code} — {self.title} [{self.instructor.user.get_full_name() or self.instructor.user.username}]"
+        term = f" [{self.academic_year}]" if self.academic_year else ''
+        return f"{self.code} — {self.title}{term} [{self.instructor.user.get_full_name() or self.instructor.user.username}] ({self.status})"
 
 
 # ─── Grade Scale ─────────────────────────────────────────────────────────────
@@ -630,17 +650,22 @@ class CourseAssignment(models.Model):
         Program, on_delete=models.SET_NULL,
         related_name='course_assignments', null=True, blank=True
     )
-    assigned_by = models.ForeignKey(
+    assigned_by   = models.ForeignKey(
         DeptAdminProfile, on_delete=models.SET_NULL,
         related_name='assignments_made', null=True, blank=True
     )
-    created_at  = models.DateTimeField(auto_now_add=True)
-    updated_at  = models.DateTimeField(auto_now=True)
+    # Term this assignment is for — e.g. 'Fall-2024'. Blank = current/ongoing
+    # default assignment (legacy behavior, kept for backward compatibility).
+    academic_year = models.CharField(max_length=20, blank=True, default='')
+    created_at    = models.DateTimeField(auto_now_add=True)
+    updated_at    = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name        = 'Course Assignment'
         verbose_name_plural = 'Course Assignments'
-        unique_together     = ('instructor', 'course', 'program')
+        # Same teacher CAN teach the same course+program again in a new term —
+        # academic_year makes each term's assignment a distinct row.
+        unique_together     = ('instructor', 'course', 'program', 'academic_year')
         ordering            = ['course__code']
 
     def __str__(self):
@@ -676,3 +701,46 @@ class SemesterPlan(models.Model):
 
     def __str__(self):
         return f"{self.program.code} — Semester {self.semester} ({len(self.course_codes)} courses)"
+
+
+# ─── Final Result (Permanent Transcript Record) ─────────────────────────────
+#
+# Snapshot taken when a course is "closed" at semester end.
+# This is the permanent academic record — independent of the live gradebook.
+# If a teacher later changes subjects, gets reassigned, or the InstructorCourse
+# is archived, FinalResult rows are untouched. Transcripts always read from here
+# for closed terms.
+
+class FinalResult(models.Model):
+    student_reg_no   = models.CharField(max_length=60)
+    student_name     = models.CharField(max_length=200)
+    course_code      = models.CharField(max_length=30)
+    course_title      = models.CharField(max_length=200)
+    instructor_name  = models.CharField(max_length=200)   # snapshot — not FK, survives instructor reassignment
+    department       = models.ForeignKey(
+        Department, on_delete=models.PROTECT, related_name='final_results'
+    )
+    program          = models.ForeignKey(
+        Program, on_delete=models.PROTECT, null=True, blank=True, related_name='final_results'
+    )
+    academic_year    = models.CharField(max_length=20, blank=True)   # e.g. 'Fall-2024'
+    semester         = models.CharField(max_length=10, blank=True)
+    credit_hours     = models.IntegerField(default=3)
+    final_percentage = models.FloatField(default=0.0)
+    grade_letter     = models.CharField(max_length=5, blank=True)
+    grade_points     = models.FloatField(default=0.0)
+    clo_attainments  = models.JSONField(default=dict)   # snapshot: { "CLO-1": 78.5, ... }
+    source_course    = models.ForeignKey(
+        InstructorCourse, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='final_results'
+    )
+    finalized_at     = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = 'Final Result'
+        verbose_name_plural = 'Final Results'
+        unique_together     = ('student_reg_no', 'course_code', 'academic_year')
+        ordering            = ['-finalized_at']
+
+    def __str__(self):
+        return f"{self.student_reg_no} — {self.course_code} ({self.academic_year}): {self.grade_letter}"
