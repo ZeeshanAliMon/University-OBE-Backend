@@ -41,6 +41,18 @@ def get_instructor_profile(user):
         return None
 
 
+def get_admin_department(user):
+    """
+    Returns the Department a dept_admin user manages, or None.
+    Shared across every dept_admin-facing view so 'own department only'
+    enforcement is consistent and centralized in one place.
+    """
+    try:
+        return user.dept_admin_profile.department
+    except Exception:
+        return None
+
+
 
 def prefetch_instructor_course(qs):
     """Standard prefetch set for InstructorCourse querysets."""
@@ -851,14 +863,26 @@ class CourseAssignmentView(APIView):
     GET    /api/admin/course-assignments/
     POST   /api/admin/course-assignments/   { teacherId, courseCode, programId }
     DELETE /api/admin/course-assignments/   { teacherId, courseCode, programId }
+
     Dept admin assigns an instructor to a course+program combination.
+
+    Department scoping: a dept_admin may only view, create, or remove
+    assignments for COURSES in their own managed department. They may
+    however assign ANY instructor university-wide to those courses —
+    cross-department teaching is intentional and documented (e.g. a
+    Computing admin may assign a Humanities instructor to teach a
+    Computing course). Only the course side is locked to "own department".
     """
     permission_classes = [IsDeptAdmin]
 
     def get(self, request):
+        admin_dept = get_admin_department(request.user)
+        if not admin_dept:
+            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
         qs = CourseAssignment.objects.select_related(
             'instructor__user', 'course', 'program'
-        ).all()
+        ).filter(course__department=admin_dept)
         data = [{
             'teacherId':   a.instructor.employee_id,
             'teacherName': a.instructor.user.get_full_name() or a.instructor.user.username,
@@ -870,6 +894,10 @@ class CourseAssignmentView(APIView):
         return Response(data)
 
     def post(self, request):
+        admin_dept = get_admin_department(request.user)
+        if not admin_dept:
+            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
         data          = request.data
         teacher_id    = data.get('teacherId', '').strip()
         course_code   = data.get('courseCode', '').strip().upper()
@@ -889,6 +917,14 @@ class CourseAssignmentView(APIView):
         except Course.DoesNotExist:
             return Response({'error': f'Course "{course_code}" not found'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # The course must belong to the requesting admin's own department.
+        # The instructor can be from anywhere — only the course is locked.
+        if course.department_id != admin_dept.id:
+            return Response(
+                {'error': f'Course "{course_code}" does not belong to your department ({admin_dept.name}).'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         program = None
         if program_id:
             try:
@@ -896,11 +932,7 @@ class CourseAssignmentView(APIView):
             except Program.DoesNotExist:
                 return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
 
-        dept_admin = None
-        try:
-            dept_admin = request.user.dept_admin_profile
-        except Exception:
-            pass
+        dept_admin = request.user.dept_admin_profile
 
         assignment, created = CourseAssignment.objects.get_or_create(
             instructor=instructor, course=course, program=program, academic_year=academic_year,
@@ -913,6 +945,10 @@ class CourseAssignmentView(APIView):
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
     def delete(self, request):
+        admin_dept = get_admin_department(request.user)
+        if not admin_dept:
+            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
         data        = request.data
         teacher_id  = data.get('teacherId', '').strip()
         course_code = data.get('courseCode', '').strip().upper()
@@ -920,7 +956,8 @@ class CourseAssignmentView(APIView):
 
         qs = CourseAssignment.objects.filter(
             instructor__employee_id=teacher_id,
-            course__code__iexact=course_code
+            course__code__iexact=course_code,
+            course__department=admin_dept,   # scoped — can't delete other depts' assignments
         )
         if program_id:
             qs = qs.filter(program__code__iexact=program_id)
@@ -1017,15 +1054,9 @@ class SemesterPlanView(APIView):
     """
     permission_classes = [IsDeptAdmin]
 
-    def _get_admin_dept(self, user):
-        try:
-            return user.dept_admin_profile.department
-        except Exception:
-            return None
-
     def get(self, request):
         program_id = request.query_params.get('programId', '').strip()
-        dept = self._get_admin_dept(request.user)
+        dept = get_admin_department(request.user)
         if not dept:
             return Response({'error': 'Profile not found'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -1046,7 +1077,7 @@ class SemesterPlanView(APIView):
         return Response(data)
 
     def post(self, request):
-        dept = self._get_admin_dept(request.user)
+        dept = get_admin_department(request.user)
         if not dept:
             return Response({'error': 'Profile not found'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -1079,7 +1110,7 @@ class SemesterPlanView(APIView):
         })
 
     def delete(self, request):
-        dept = self._get_admin_dept(request.user)
+        dept = get_admin_department(request.user)
         if not dept:
             return Response({'error': 'Profile not found'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -2510,6 +2541,10 @@ class StudentEnrollmentView(APIView):
     permission_classes = [IsDeptAdmin]
 
     def post(self, request):
+        admin_dept = get_admin_department(request.user)
+        if not admin_dept:
+            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
         data      = request.data
         course_id = data.get('courseId', '').strip()
         students  = data.get('students', [])
@@ -2525,6 +2560,14 @@ class StudentEnrollmentView(APIView):
             return Response(
                 {'error': f'Course "{course_id}" not found'},
                 status=status.HTTP_404_NOT_FOUND
+            )
+
+        # A dept_admin may only enroll students into courses that belong
+        # to their own managed department.
+        if ic.department_id != admin_dept.id:
+            return Response(
+                {'error': f'You can only manage enrollment for courses in your own department ({admin_dept.name}).'},
+                status=status.HTTP_403_FORBIDDEN
             )
 
         # True sync / idempotent overwrite:
@@ -2574,6 +2617,10 @@ class StudentEnrollmentView(APIView):
         }, status=status.HTTP_200_OK)
 
     def delete(self, request):
+        admin_dept = get_admin_department(request.user)
+        if not admin_dept:
+            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
         data      = request.data
         course_id = data.get('courseId', '').strip()
         reg_no    = data.get('regNo', '').strip().upper()
@@ -2585,7 +2632,8 @@ class StudentEnrollmentView(APIView):
             )
 
         deleted, _ = CourseStudent.objects.filter(
-            course__frontend_id=course_id, reg_no=reg_no
+            course__frontend_id=course_id, reg_no=reg_no,
+            course__department=admin_dept,   # scoped — can't touch other depts
         ).delete()
 
         if not deleted:
@@ -2647,6 +2695,20 @@ class FinalizeCourseView(APIView):
             ).get(frontend_id=course_id)
         except InstructorCourse.DoesNotExist:
             return Response({'error': f'Course "{course_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Department scoping — a dept_admin may only close courses that
+        # belong to their own managed department. Without this check, any
+        # dept_admin could close (and permanently lock grades on) any
+        # course in any department in the entire university.
+        if request.user.role == 'dept_admin':
+            admin_dept = get_admin_department(request.user)
+            if not admin_dept:
+                return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
+            if ic.department_id != admin_dept.id:
+                return Response(
+                    {'error': f'You can only close courses in your own department ({admin_dept.name}).'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
         if ic.status == 'closed':
             return Response(
