@@ -716,7 +716,6 @@ class AdmissionStudentListView(APIView):
             # Auto-create or update the login User + Student profile
             from django.contrib.auth.hashers import make_password as _make_password
             import re as _re
-            base_uname = _re.sub(r'[^a-zA-Z0-9]', '_', reg_no.lower())[:20]
             user_obj   = User.objects.filter(email__iexact=email).first()
             if not user_obj:
                 # New student — create account with default password
@@ -2324,19 +2323,10 @@ class TeacherOnboardingView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Generate username from email prefix + random suffix to ensure uniqueness
-        import re
-        base_username = re.sub(r'[^a-zA-Z0-9]', '_', email.split('@')[0])[:20]
-        username      = base_username
-        counter       = 1
-        while User.objects.filter(username=username).exists():
-            username = f"{base_username}_{counter}"
-            counter += 1
-
-        # Default password = zeeshan123 — same for all new accounts
+        # Use email as username — email is unique so username is unique
         from django.contrib.auth.hashers import make_password
         user = User.objects.create(
-            username=username,
+            username=email,
             email=email,
             first_name=name.split()[0] if name else '',
             last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
