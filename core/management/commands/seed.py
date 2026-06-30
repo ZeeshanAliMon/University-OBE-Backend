@@ -6,7 +6,7 @@ from core.models import (
     Course, InstructorCourse, GradeScale, MarksCategory, UnitItem,
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
     AdmissionStudent, DeptAdminProfile, AdmissionProfile, CourseAssignment,
-    SemesterPlan,
+    SemesterPlan, FinalResult,
 )
 
 
@@ -18,6 +18,7 @@ class Command(BaseCommand):
 
         # ── Clean slate ───────────────────────────────────────────────────────
         for model in [
+            FinalResult,
             OBEStudentMark, StudentMark, CourseStudent, OBEQuestion, CLO,
             UnitItem, MarksCategory, GradeScale, InstructorCourse,
             POGAMapping, ProgramObjective, Course, GraduateAttribute,

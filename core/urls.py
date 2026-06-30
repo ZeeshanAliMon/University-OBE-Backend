@@ -14,6 +14,8 @@ from .views import (
     ChangePasswordView,
     CourseAssignmentView,
     StudentEnrollmentView,
+    FinalizeCourseView,
+    FinalResultsView,
     SemesterPlanView,
     StudentCoursesView,
     AdmissionStudentListView, AdmissionStudentDetailView,
@@ -54,6 +56,8 @@ urlpatterns = [
     path('auth/change-password/',              ChangePasswordView.as_view(),       name='change_password'),
     path('admin/course-assignments/', CourseAssignmentView.as_view(), name='course_assignments'),
     path('admin/enroll/',             StudentEnrollmentView.as_view(), name='student_enrollment'),
+    path('admin/finalize-course/',    FinalizeCourseView.as_view(),    name='finalize_course'),
+    path('reports/final-results/',    FinalResultsView.as_view(),      name='final_results'),
     path('admin/semester-plans/',     SemesterPlanView.as_view(),     name='semester_plans'),
 
     path('student/courses/', StudentCoursesView.as_view(), name='student_courses'),
