@@ -324,7 +324,15 @@ class Command(BaseCommand):
                                       program=progs['bba'], department=depts['business'], credit_hours=3)
             c.mapped_gas.set([all_gas[g] for g in ga_ids if g in all_gas])
 
-        self.stdout.write('  ✓ Courses (44 Computing + 12 Business)')
+        # Mon test course — Health department
+        mon_course = Course.objects.create(
+            code='MON101', title='Mon Course', type='core',
+            program=progs['bs_bt'], department=depts['health'], credit_hours=3
+        )
+        if 'GA-H1' in all_gas:
+            mon_course.mapped_gas.set([all_gas['GA-H1']])
+
+        self.stdout.write('  ✓ Courses (44 Computing + 12 Business + 1 Mon)')
 
         # ── Users ─────────────────────────────────────────────────────────────
         # QA Officers
@@ -358,12 +366,23 @@ class Command(BaseCommand):
             user=adm_zeeshan, department=depts['computing'], employee_id='ADM-ZA-001'
         )
 
+        # Mon admission account
+        mon_adm = User.objects.create(
+            username='mon@admission.com', email='mon@admission.com',
+            first_name='Zeeshan', last_name='Admission',
+            role='admission', password=make_password('ijijijij'), is_active=True
+        )
+        AdmissionProfile.objects.create(
+            user=mon_adm, department=depts['health'], employee_id='ADM-MON-001'
+        )
+
         # Department Admins
         for username, first, last, email, dept_slug, emp_id in [
             ('admin_computing',  'Ahmad',  'Raza',   'admin.computing@iqra.edu.pk',  'computing',   'DA-CS-001'),
             ('admin_business',   'Bilal',  'Tahir',  'admin.business@iqra.edu.pk',   'business',    'DA-BIZ-001'),
             ('admin_engineering','Hira',   'Baig',   'admin.engineering@iqra.edu.pk','engineering', 'DA-ENG-001'),
             ('zeeshan_dept',     'Zeeshan','Ali',    'ali@zeeshan.com',              'computing',   'DA-ZA-001'),
+
         ]:
             u = User.objects.create(username=email, email=email,
                 first_name=first, last_name=last,
@@ -387,6 +406,14 @@ class Command(BaseCommand):
             )
             instructor_profiles[username] = p
 
+        # Mon dept admin (health) — password ijijijij
+        mon_dadm = User.objects.create(
+            username='mon@admin.com', email='mon@admin.com',
+            first_name='Zeeshan', last_name='Admin',
+            role='dept_admin', password=make_password('ijijijij'), is_active=True
+        )
+        DeptAdminProfile.objects.create(user=mon_dadm, department=depts['health'], employee_id='DA-MON-001')
+
         self.stdout.write('  ✓ Users (3 QA, 3 Dept Admins, 1 Admission, 4 Instructors)')
 
         # ── Admission Students ────────────────────────────────────────────────
@@ -401,6 +428,7 @@ class Command(BaseCommand):
             ('FA22-BBA-0035',  'Amna Tariq',          'business',  'bba',  'Fall',   '6th'),
             ('FA23-BSAF-0008', 'Usman Raza',          'business',  'bsaf', 'Fall',   '4th'),
             ('FA24-BE-EE-001', 'Ahmed Khan',          'engineering','be_ee','Fall',   '2nd'),
+            ('MON-BSBT-001',   'Zeeshan Student',     'health',    'bs_bt','Fall',   '1st'),
         ]
         for reg_no, name, dept_slug, prog_slug, batch, semester in admission_data:
             AdmissionStudent.objects.create(
@@ -408,6 +436,17 @@ class Command(BaseCommand):
                 department=depts[dept_slug], program=progs[prog_slug],
                 batch=batch, semester=semester
             )
+        # Mon teacher (health) — password ijijijij
+        mon_teacher_user = User.objects.create(
+            username='mon@teacher.com', email='mon@teacher.com',
+            first_name='Zeeshan', last_name='Teacher',
+            role='instructor', password=make_password('ijijijij'), is_active=True
+        )
+        mon_teacher_profile = InstructorProfile.objects.create(
+            user=mon_teacher_user, department=depts['health'],
+            employee_id='INS-MON-001', designation='Lecturer'
+        )
+
         self.stdout.write('  ✓ Admission Students (10)')
 
         # ── Demo Instructor Course ────────────────────────────────────────────
@@ -512,6 +551,7 @@ class Command(BaseCommand):
             ('ahmed_cs',  'Ahmed',  'Raza',     'ahmed.raza@student.iqra.edu.pk',    'FA22-BSCS-0012', progs['bscs'], depts['computing']),
             ('zara_cs',   'Zara',   'Siddiqui', 'zara.siddiqui@student.iqra.edu.pk', 'FA22-BSCS-0045', progs['bscs'], depts['computing']),
             ('hamza_se',  'Hamza',  'Tariq',    'hamza.tariq@student.iqra.edu.pk',   'FA22-BSSE-0011', progs['bsse'], depts['computing']),
+            ('mon_student','Zeeshan','Student',  'mon@student.com',                    'MON-BSBT-001',   progs['bs_bt'],depts['health']),
         ]
         for username, first, last, email, reg_no, prog, dept in student_logins:
             u = User.objects.create(
@@ -523,7 +563,16 @@ class Command(BaseCommand):
                 user=u, reg_no=reg_no,
                 program=prog, department=dept
             )
-        self.stdout.write('  ✓ Student Users (ahmed_cs, zara_cs, hamza_se → stupass123)')
+        # Override mon student password to ijijijij
+        try:
+            mon_u = User.objects.get(email='mon@student.com')
+            from django.contrib.auth.hashers import make_password as _mp
+            mon_u.password = _mp('ijijijij')
+            mon_u.save()
+        except Exception:
+            pass
+
+        self.stdout.write('  ✓ Student Users (ahmed_cs, zara_cs, hamza_se → stupass123 | mon@student.com → ijijijij)')
 
 
         # ── Summary ───────────────────────────────────────────────────────────
@@ -541,6 +590,10 @@ class Command(BaseCommand):
         self.stdout.write('   qa.eng@iqra.edu.pk         / qapass123   → QA (Engineering)')
         self.stdout.write('   admission@iqra.edu.pk      / admpass123   → Admission Officer')
         self.stdout.write('   zeeshan@ali.com            / ijijijij     → Admission (Zeeshan)')
+        self.stdout.write('   mon@admission.com          / ijijijij     → Admission (Mon)')
+        self.stdout.write('   mon@admin.com              / ijijijij     → Dept Admin Health (Mon)')
+        self.stdout.write('   mon@teacher.com            / ijijijij     → Instructor Health (Mon)')
+        self.stdout.write('   mon@student.com            / ijijijij     → Student Health/Biotechnology (Mon)')
         self.stdout.write('   ali@zeeshan.com            / ijijijij     → Dept Admin (Computing)')
         self.stdout.write('   admin.computing@iqra.edu.pk/ adminpass123 → Dept Admin (Computing)')
         self.stdout.write('   ali.hassan@iqra.edu.pk     / instpass123  → Instructor')
