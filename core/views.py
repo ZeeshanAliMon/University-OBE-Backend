@@ -2710,6 +2710,15 @@ class FinalResultsView(APIView):
     Read permanent transcript records. Used for official report cards
     once a semester is closed — never affected by later teacher reassignments
     or course edits.
+
+    Students can ONLY read their own results. Their regNo is forced from
+    their own Student profile regardless of what was passed in the query
+    string — prevents one student from reading another student's transcript
+    by guessing or enumerating regNo values.
+
+    QA, instructor, dept_admin and admin roles may query any regNo or
+    courseCode freely, since they have legitimate institutional need to
+    view records outside their own.
     """
     permission_classes = [IsAuthenticated]
 
@@ -2717,6 +2726,20 @@ class FinalResultsView(APIView):
         reg_no        = request.query_params.get('regNo', '').strip()
         course_code   = request.query_params.get('courseCode', '').strip().upper()
         academic_year = request.query_params.get('academicYear', '').strip()
+
+        # Students can only ever see their own results — override whatever
+        # regNo was passed in, and ignore courseCode-only lookups entirely
+        # (those would expose a whole course's roster of grades).
+        if request.user.role == 'student':
+            try:
+                own_reg_no = request.user.student_profile.reg_no
+            except Exception:
+                return Response(
+                    {'error': 'Student profile not found'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            reg_no      = own_reg_no
+            course_code = ''   # force regNo-only lookup, never a full roster
 
         qs = FinalResult.objects.all()
         if reg_no:
