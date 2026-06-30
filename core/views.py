@@ -2009,7 +2009,7 @@ class InstructorPerformanceView(APIView):
             for ic in profile.instructor_courses.all():
                 clo_attainments = []
                 all_qs_cohort = list(ic.obe_questions.all())
-                clo_qs_cohort = ic.clos.filter(mapped_ga=ga) if ga else ic.clos.all()
+                clo_qs_cohort = ic.clos.all()
                 q_marks_cohort = {}
                 for m in OBEStudentMark.objects.filter(question__in=all_qs_cohort).select_related('question'):
                     q_marks_cohort.setdefault(m.question_id, []).append(m.score)
