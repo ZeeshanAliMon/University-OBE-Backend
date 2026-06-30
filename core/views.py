@@ -2473,28 +2473,51 @@ class StudentEnrollmentView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        enrolled, skipped = [], []
+        # True sync / idempotent overwrite:
+        # The incoming list IS the desired roster. Add new students, remove
+        # students no longer in the list (but preserve their marks data).
+        incoming_reg_nos = set()
+        for s in students:
+            reg_no = s.get('regNo', '').strip().upper()
+            if reg_no:
+                incoming_reg_nos.add(reg_no)
+
+        # Empty list = clear all enrollments (admin removed everyone)
+        if not incoming_reg_nos:
+            removed = CourseStudent.objects.filter(course=ic).delete()[0]
+            return Response({
+                'courseId': course_id,
+                'enrolled': [],
+                'removed':  removed,
+                'message':  'All students removed from course',
+            })
+
+        # Add new students
+        enrolled = []
         for s in students:
             reg_no = s.get('regNo', '').strip().upper()
             name   = s.get('name', '').strip()
             if not reg_no:
                 continue
-
             _, created = CourseStudent.objects.get_or_create(
                 course=ic, reg_no=reg_no,
                 defaults={'name': name or reg_no}
             )
             if created:
                 enrolled.append(reg_no)
-            else:
-                skipped.append(reg_no)
+
+        # Remove students no longer in the list (preserves marks for remaining)
+        removed_qs = CourseStudent.objects.filter(course=ic).exclude(reg_no__in=incoming_reg_nos)
+        removed    = list(removed_qs.values_list('reg_no', flat=True))
+        removed_qs.delete()
 
         return Response({
             'courseId': course_id,
             'enrolled': enrolled,
-            'skipped':  skipped,
-            'message':  f'{len(enrolled)} students enrolled, {len(skipped)} already enrolled',
-        }, status=status.HTTP_201_CREATED)
+            'removed':  removed,
+            'total':    len(incoming_reg_nos),
+            'message':  f'{len(enrolled)} added, {len(removed)} removed, {len(incoming_reg_nos)} total enrolled',
+        }, status=status.HTTP_200_OK)
 
     def delete(self, request):
         data      = request.data
