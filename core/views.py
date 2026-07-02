@@ -1,5 +1,6 @@
 from django.contrib.auth import authenticate
 from django.db import models
+from django.db import IntegrityError
 from django.utils import timezone
 
 from rest_framework             import status
@@ -744,50 +745,88 @@ class AdmissionStudentListView(APIView):
                 errors.append({'index': idx, 'regNo': reg_no, 'error': f'Program "{program_id}" not found'})
                 continue
 
-            student, _ = AdmissionStudent.objects.update_or_create(
-                reg_no=reg_no,
-                defaults=dict(
-                    name=name, email=email,
-                    department=department, program=program,
-                    batch=batch, semester=semester
+            try:
+                student, _ = AdmissionStudent.objects.update_or_create(
+                    reg_no=reg_no,
+                    defaults=dict(
+                        name=name, email=email,
+                        department=department, program=program,
+                        batch=batch, semester=semester
+                    )
                 )
-            )
 
-            # Auto-create or update the login User + Student profile
-            from django.contrib.auth.hashers import make_password as _make_password
-            from django.conf import settings as _settings
-            import re as _re
-            user_obj   = User.objects.filter(email__iexact=email).first()
-            if not user_obj:
-                # New student — create account with shared default password.
-                # must_change_password=True is the actual security boundary here
-                # (enforced server-side by PasswordChangeEnforcingJWTAuthentication) —
-                # previously this was False, which let bulk-imported students log in
-                # and use the app indefinitely on the known default password.
-                name_parts = name.split()
-                user_obj = User.objects.create(
-                    username=email,
-                    email=email,
-                    first_name=name_parts[0] if name_parts else '',
-                    last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
-                    role='student',
-                    password=_make_password(_settings.DEFAULT_TEMP_PASSWORD),
-                    must_change_password=True,
-                    is_active=True,
+                # Auto-create or update the login User + Student profile
+                from django.contrib.auth.hashers import make_password as _make_password
+                from django.conf import settings as _settings
+                from .models import Student as StudentProfile
+                import re as _re
+                user_obj   = User.objects.filter(email__iexact=email).first()
+                if not user_obj:
+                    # New student — create account with shared default password.
+                    # must_change_password=True is the actual security boundary here
+                    # (enforced server-side by PasswordChangeEnforcingJWTAuthentication) —
+                    # previously this was False, which let bulk-imported students log in
+                    # and use the app indefinitely on the known default password.
+                    name_parts = name.split()
+                    user_obj = User.objects.create(
+                        username=email,
+                        email=email,
+                        first_name=name_parts[0] if name_parts else '',
+                        last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
+                        role='student',
+                        password=_make_password(_settings.DEFAULT_TEMP_PASSWORD),
+                        must_change_password=True,
+                        is_active=True,
+                    )
+                else:
+                    # Guard against a real data-corruption bug: if this email
+                    # already belongs to a login account linked to a DIFFERENT
+                    # reg_no, silently reassigning that account's Student
+                    # profile to this row's reg_no would sever the earlier
+                    # student's login entirely while this AdmissionStudent
+                    # roster row still reports "created" successfully — two
+                    # roster entries end up sharing one login, and whichever
+                    # row is processed last silently wins. Reject instead.
+                    existing_profile = StudentProfile.objects.filter(user=user_obj).first()
+                    if existing_profile and existing_profile.reg_no != reg_no:
+                        errors.append({
+                            'index': idx, 'regNo': reg_no,
+                            'error': f'Email "{email}" is already linked to student '
+                                     f'{existing_profile.reg_no}\'s login account — each '
+                                     f'student needs a unique email. The admission record '
+                                     f'for {reg_no} was saved, but no login account could '
+                                     f'be created or linked for them yet. Fix the email and '
+                                     f're-submit this row to provision their login.',
+                        })
+                        continue
+                    # Update name if changed
+                    name_parts = name.split()
+                    user_obj.first_name = name_parts[0] if name_parts else ''
+                    user_obj.last_name  = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+                    user_obj.save()
+
+                # Link Student profile (reg_no is the bridge)
+                StudentProfile.objects.update_or_create(
+                    user=user_obj,
+                    defaults=dict(reg_no=reg_no, department=department, program=program)
                 )
-            else:
-                # Update name if changed
-                name_parts = name.split()
-                user_obj.first_name = name_parts[0] if name_parts else ''
-                user_obj.last_name  = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
-                user_obj.save()
-
-            # Link Student profile (reg_no is the bridge)
-            from .models import Student as StudentProfile
-            StudentProfile.objects.update_or_create(
-                user=user_obj,
-                defaults=dict(reg_no=reg_no, department=department, program=program)
-            )
+            except IntegrityError as e:
+                # Most likely cause: reg_no or email collides with a DIFFERENT
+                # existing record than the one this row is trying to update
+                # (e.g. the same email already belongs to another reg_no).
+                # Previously this was unhandled — one bad row in a bulk Excel
+                # import would 500 the entire batch and silently discard every
+                # row already processed earlier in the same request.
+                errors.append({
+                    'index': idx, 'regNo': reg_no,
+                    'error': f'Could not save this row — likely a duplicate reg_no or email already used by a different student ({e.__class__.__name__})',
+                })
+                continue
+            except Exception as e:
+                # Belt-and-suspenders: any other unexpected failure on this row
+                # skips just this row instead of taking down the whole batch.
+                errors.append({'index': idx, 'regNo': reg_no, 'error': f'Unexpected error saving this row: {e}'})
+                continue
 
             created.append(student)
 
