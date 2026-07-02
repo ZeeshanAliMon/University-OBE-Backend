@@ -755,10 +755,15 @@ class AdmissionStudentListView(APIView):
 
             # Auto-create or update the login User + Student profile
             from django.contrib.auth.hashers import make_password as _make_password
+            from django.conf import settings as _settings
             import re as _re
             user_obj   = User.objects.filter(email__iexact=email).first()
             if not user_obj:
-                # New student — create account with default password
+                # New student — create account with shared default password.
+                # must_change_password=True is the actual security boundary here
+                # (enforced server-side by PasswordChangeEnforcingJWTAuthentication) —
+                # previously this was False, which let bulk-imported students log in
+                # and use the app indefinitely on the known default password.
                 name_parts = name.split()
                 user_obj = User.objects.create(
                     username=email,
@@ -766,8 +771,8 @@ class AdmissionStudentListView(APIView):
                     first_name=name_parts[0] if name_parts else '',
                     last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
                     role='student',
-                    password=_make_password('zeeshan123'),
-                    must_change_password=False,
+                    password=_make_password(_settings.DEFAULT_TEMP_PASSWORD),
+                    must_change_password=True,
                     is_active=True,
                 )
             else:
@@ -2410,13 +2415,14 @@ class TeacherOnboardingView(APIView):
 
         # Use email as username — email is unique so username is unique
         from django.contrib.auth.hashers import make_password
+        from django.conf import settings as _settings
         user = User.objects.create(
             username=email,
             email=email,
             first_name=name.split()[0] if name else '',
             last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
             role='instructor',
-            password=make_password('zeeshan123'),
+            password=make_password(_settings.DEFAULT_TEMP_PASSWORD),
             must_change_password=True,
             is_active=True,
         )
@@ -2436,7 +2442,7 @@ class TeacherOnboardingView(APIView):
             'departmentId':       department.dept_id,
             'departmentName':     department.name,
             'mustChangePassword': True,
-            'message':            'Account created. Default password is: zeeshan123',
+            'message':            f'Account created. Default password is: {_settings.DEFAULT_TEMP_PASSWORD}',
         }, status=status.HTTP_201_CREATED)
 
     def delete(self, request, employee_id=None):

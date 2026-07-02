@@ -97,6 +97,14 @@ TEMPLATES = [
     },
 ]
 
+# ─── Account provisioning ──────────────────────────────────────────────────────
+# Shared temp password assigned to newly-provisioned accounts (students, instructors).
+# Override via env var in production so it isn't a static, guessable value forever.
+# Every account created with this password must also get must_change_password=True
+# (enforced server-side in core/authentication.py) — the temp password alone is not
+# a security boundary, the forced-rotation gate is.
+DEFAULT_TEMP_PASSWORD = os.environ.get('DEFAULT_TEMP_PASSWORD', 'IqraSecurePass2026!')
+
 AUTH_USER_MODEL = 'core.User'
 WSGI_APPLICATION = 'obe.wsgi.application'
 

@@ -1,5 +1,19 @@
 from django.urls import path
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework_simplejwt.views import TokenRefreshView
+
+
+@csrf_exempt
+def health_check(request):
+    """
+    GET /api/health/
+    Lightweight, unauthenticated liveness probe for frontend connectivity checks.
+    Deliberately does not touch the database — this needs to answer even if the
+    DB is having problems, so the frontend can distinguish "server is down" from
+    "server is up but degraded".
+    """
+    return JsonResponse({'status': 'ok'})
 
 from .views import (
     LoginView,
@@ -29,6 +43,8 @@ from .views import (
 )
 
 urlpatterns = [
+    path('health/', health_check, name='health_check'),
+
     path('auth/login/',         LoginView.as_view(),        name='login'),
     path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 
