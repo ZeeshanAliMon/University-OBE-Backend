@@ -4,10 +4,29 @@ import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-q(r5cb59^oj(27g8&#d68c5!l!!h+r7s+2*#m-mfkq9toc6k1k'
+# SECRET_KEY: previously a literal committed to git history — anyone with repo
+# access (or who found this in the public GitHub repo) has always been able to
+# read it. Now sourced from env var; the literal below is kept ONLY as a local-
+# dev fallback so `manage.py runserver` still works without extra setup.
+# ACTION NEEDED: set DJANGO_SECRET_KEY in the PythonAnywhere env config, and
+# rotate this value (generate a fresh one) since the old one is permanently
+# compromised by having been in git history.
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-q(r5cb59^oj(27g8&#d68c5!l!!h+r7s+2*#m-mfkq9toc6k1k',
+)
 
-DEBUG = True
+# DEBUG: was hardcoded True, meaning any unhandled 500 (a bad request, a bug in
+# a new endpoint, anything) rendered Django's debug page — full stack trace,
+# local variable values, installed apps, and settings — to whoever triggered it,
+# no login required. Defaults to False now. If PythonAnywhere breaks after this
+# deploy and you need debug output temporarily, set DJANGO_DEBUG=True in the env
+# config rather than editing this file again.
+DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
 
+# Kept as a wildcard since the actual PythonAnywhere hostname isn't known here —
+# narrowing this blindly could break the live deployment. Recommend replacing
+# "*" with the real hostname (e.g. "yourapp.pythonanywhere.com") once confirmed.
 ALLOWED_HOSTS = ["*"]
 
 INSTALLED_APPS = [
@@ -62,12 +81,29 @@ SIMPLE_JWT = {
 }
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
+# CORS_ALLOWED_ORIGINS previously did nothing — CORS_ALLOW_ALL_ORIGINS=True below
+# it overrode the allowlist entirely, so ANY origin could make authenticated
+# cross-origin requests (cookies aside, this still meant any website could hit
+# the API using a token it stole via other means, or ride on a user's browser
+# session for token-based flows). Flipped to a real allowlist.
+#
+# Included the same origins already trusted for CSRF further up (the
+# trycloudflare/ngrok tunnel domains) since those are evidently in active use
+# for some deployment/demo flow. If the production frontend is served from a
+# domain not listed here, requests from it will start failing CORS after this
+# deploy — add that origin below, or temporarily set CORS_ALLOW_ALL_ORIGINS=True
+# in the PythonAnywhere env config while confirming the right domain.
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
 ]
-CORS_ALLOW_ALL_ORIGINS = True   # flip to False and use CORS_ALLOWED_ORIGINS in production
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://.*\.trycloudflare\.com$",
+]
+CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False') == 'True'
 
 # ─── Static files ─────────────────────────────────────────────────────────────
 STATIC_URL = '/assets/'

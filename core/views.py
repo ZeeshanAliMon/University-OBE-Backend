@@ -1550,9 +1550,7 @@ class CourseAttainmentView(APIView):
             course_title = ic.title
             if not prog_id_out and ic.program:
                 prog_id_out = ic.program.code.lower()
-            all_students.extend(
-                list(ic.students.prefetch_related('obe_marks__question', 'marks__unit_item__category').all())
-            )
+            all_students.extend(list(ic.students.all()))
             all_questions.extend(list(ic.obe_questions.all()))
 
         class_size = len(all_students)
@@ -1594,10 +1592,11 @@ class CourseAttainmentView(APIView):
                     if clo_code not in clo_to_ga and ga_list:
                         clo_to_ga[clo_code] = ga_list[0].ga_id
 
-        # Build CLO description map from DB
+        # Build CLO description map from DB (reuses db_clos above instead of
+        # re-running the same CLO.objects.filter(course__in=qs) query twice)
         clo_description_map = {
             c.code: c.description
-            for c in CLO.objects.filter(course__in=qs)
+            for c in db_clos
             if c.description
         }
 
@@ -1988,29 +1987,47 @@ class POAttainmentView(APIView):
         except Program.DoesNotExist:
             return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Compute GA attainment for this program
-        gas = GraduateAttribute.objects.filter(department=program.department)
-        ga_attainment = {}   # ga_id → percent
+        gas = list(GraduateAttribute.objects.filter(department=program.department))
 
-        for ga in gas:
-            courses = InstructorCourse.objects.filter(
+        # Perf fix: previously this ran one InstructorCourse query per GA, then
+        # inside that a .filter() call on a prefetched relation (which silently
+        # discards the prefetch cache and re-hits the DB), then an OBEStudentMark
+        # query per (GA, course, CLO) triple — for a department with, say, 8 GAs,
+        # 20 courses, and 3 CLOs each, that's roughly 8 + 8*20*3 = ~488 queries.
+        # Fetch every relevant course once, with CLOs and questions prefetched...
+        courses = list(
+            InstructorCourse.objects.filter(
                 program=program,
-                clos__mapped_ga=ga
-            ).prefetch_related('clos', 'students__obe_marks__question', 'obe_questions').distinct()
+                clos__mapped_ga__in=gas,
+            )
+            .prefetch_related('clos', 'obe_questions')
+            .distinct()
+        )
 
+        # ...and every OBE mark for any question in any of those courses, once.
+        all_question_ids = [q.pk for ic in courses for q in ic.obe_questions.all()]
+        marks_by_question = {}
+        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids):
+            marks_by_question.setdefault(m.question_id, []).append(m.score)
+
+        # Everything below this point is in-memory — no more queries.
+        ga_attainment = {}   # ga_id → percent
+        for ga in gas:
             total_possible = 0
             total_obtained  = 0
             for ic in courses:
-                clos_for_ga = ic.clos.filter(mapped_ga=ga)
-                for clo in clos_for_ga:
-                    questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
-                    q_marks_po = {}
-                    for m in OBEStudentMark.objects.filter(question__in=questions).select_related('question'):
-                        q_marks_po.setdefault(m.question_id, []).append(m.score)
-                    for q in questions:
-                        scores = q_marks_po.get(q.pk, [])
-                        total_possible += q.max_marks * len(scores)
-                        total_obtained  += sum(scores)
+                clos_for_ga = [c for c in ic.clos.all() if c.mapped_ga_id == ga.id]
+                if not clos_for_ga:
+                    continue
+                clo_codes = {c.code for c in clos_for_ga}
+                questions = [
+                    q for q in ic.obe_questions.all()
+                    if clo_codes & set(q.mapped_clos or [])
+                ]
+                for q in questions:
+                    scores = marks_by_question.get(q.pk, [])
+                    total_possible += q.max_marks * len(scores)
+                    total_obtained  += sum(scores)
 
             ga_attainment[ga.ga_id] = round(
                 (total_obtained / total_possible * 100), 1
@@ -2074,12 +2091,29 @@ class InstructorPerformanceView(APIView):
         except Department.DoesNotExist:
             return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        instructors = InstructorProfile.objects.filter(
-            department=department
-        ).select_related('user').prefetch_related(
-            'instructor_courses__clos',
-            'instructor_courses__obe_questions',
+        instructors = list(
+            InstructorProfile.objects.filter(
+                department=department
+            ).select_related('user').prefetch_related(
+                'instructor_courses__clos',
+                'instructor_courses__obe_questions',
+            )
         )
+
+        # Perf fix: this previously ran one OBEStudentMark query per course,
+        # inside a loop over every instructor — for a department with 15
+        # instructors averaging 3 courses each, that's 45+ queries just for
+        # marks. Batch-fetch every mark for every question across every
+        # instructor's courses in this department in a single query instead.
+        all_question_ids = [
+            q.pk
+            for profile in instructors
+            for ic in profile.instructor_courses.all()
+            for q in ic.obe_questions.all()
+        ]
+        marks_by_question = {}
+        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids):
+            marks_by_question.setdefault(m.question_id, []).append(m.score)
 
         result = []
         for profile in instructors:
@@ -2088,13 +2122,10 @@ class InstructorPerformanceView(APIView):
                 clo_attainments = []
                 all_qs_cohort = list(ic.obe_questions.all())
                 clo_qs_cohort = ic.clos.all()
-                q_marks_cohort = {}
-                for m in OBEStudentMark.objects.filter(question__in=all_qs_cohort).select_related('question'):
-                    q_marks_cohort.setdefault(m.question_id, []).append(m.score)
                 for clo in clo_qs_cohort:
                     questions = [q for q in all_qs_cohort if clo.code in (q.mapped_clos or [])]
-                    total_p = sum(q.max_marks * len(q_marks_cohort.get(q.pk, [])) for q in questions)
-                    total_o = sum(sum(q_marks_cohort.get(q.pk, [])) for q in questions)
+                    total_p = sum(q.max_marks * len(marks_by_question.get(q.pk, [])) for q in questions)
+                    total_o = sum(sum(marks_by_question.get(q.pk, [])) for q in questions)
                     pct = round(total_o / total_p * 100, 1) if total_p > 0 else 0
                     clo_attainments.append(pct)
 
@@ -2158,6 +2189,15 @@ class CohortComparisonView(APIView):
                 program=program
             ).prefetch_related('clos', 'obe_questions')
 
+        courses = list(courses)
+
+        # Perf fix: same pattern as POAttainmentView/InstructorPerformanceView —
+        # was one OBEStudentMark query per (course, CLO) pair. Batch once.
+        all_question_ids = [q.pk for ic in courses for q in ic.obe_questions.all()]
+        marks_by_question = {}
+        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids):
+            marks_by_question.setdefault(m.question_id, []).append(m.score)
+
         # Group by academic_year
         by_year = {}
         for ic in courses:
@@ -2165,14 +2205,11 @@ class CohortComparisonView(APIView):
             if year not in by_year:
                 by_year[year] = {'total_possible': 0, 'total_obtained': 0}
 
-            clo_qs = ic.clos.filter(mapped_ga=ga) if ga else ic.clos.all()
+            clo_qs = [c for c in ic.clos.all() if (c.mapped_ga_id == ga.id if ga else True)]
             for clo in clo_qs:
-                questions = ic.obe_questions.filter(pk__in=[q.pk for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])])
-                q_marks_perf = {}
-                for m in OBEStudentMark.objects.filter(question__in=questions).select_related('question'):
-                    q_marks_perf.setdefault(m.question_id, []).append(m.score)
+                questions = [q for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])]
                 for q in questions:
-                    scores = q_marks_perf.get(q.pk, [])
+                    scores = marks_by_question.get(q.pk, [])
                     by_year[year]['total_possible'] += q.max_marks * len(scores)
                     by_year[year]['total_obtained']  += sum(scores)
 
@@ -2295,32 +2332,49 @@ class GapAnalysisView(APIView):
         except Program.DoesNotExist:
             return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        gas = GraduateAttribute.objects.filter(department=program.department)
+        gas = list(GraduateAttribute.objects.filter(department=program.department))
         result = []
+
+        # Perf fix: was 2 queries per GA (mapped_courses, active_clos) plus an
+        # OBEStudentMark query per CLO inside — for a department with several
+        # GAs this added up fast on a report page QA is likely to load often.
+        # Fetch every relevant CLO across all GAs once, with its course's
+        # questions prefetched, then batch every OBEStudentMark query into one.
+        all_active_clos = list(
+            CLO.objects.filter(course__program=program, mapped_ga__in=gas)
+            .select_related('mapped_ga')
+            .prefetch_related('course__obe_questions')
+        )
+        clos_by_ga = {}
+        for clo in all_active_clos:
+            clos_by_ga.setdefault(clo.mapped_ga_id, []).append(clo)
+
+        questions_by_clo = {}
+        all_question_ids = set()
+        for clo in all_active_clos:
+            matched = [q for q in clo.course.obe_questions.all() if clo.code in (q.mapped_clos or [])]
+            questions_by_clo[clo.id] = matched
+            all_question_ids.update(q.pk for q in matched)
+
+        marks_by_question = {}
+        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids):
+            marks_by_question.setdefault(m.question_id, []).append(m.score)
 
         for ga in gas:
             mapped_courses = Course.objects.filter(program=program, mapped_gas=ga)
-            active_clos    = CLO.objects.filter(
-                course__program=program,
-                mapped_ga=ga
-            )
+            active_clos    = clos_by_ga.get(ga.id, [])
 
             total_p = 0
             total_o = 0
             for clo in active_clos:
-                all_qs_gap = list(clo.course.obe_questions.all())
-                questions  = [q for q in all_qs_gap if clo.code in (q.mapped_clos or [])]
-                q_marks_gap = {}
-                for m in OBEStudentMark.objects.filter(question__in=questions):
-                    q_marks_gap.setdefault(m.question_id, []).append(m.score)
-                for q in questions:
-                    scores   = q_marks_gap.get(q.pk, [])
+                for q in questions_by_clo.get(clo.id, []):
+                    scores   = marks_by_question.get(q.pk, [])
                     total_p += q.max_marks * len(scores)
                     total_o += sum(scores)
 
             avg_att = round(total_o / total_p * 100, 1) if total_p > 0 else 0
             courses_count = mapped_courses.count()
-            clos_count    = active_clos.count()
+            clos_count    = len(active_clos)
 
             if courses_count == 0:
                 gap_status = 'No Coverage'
