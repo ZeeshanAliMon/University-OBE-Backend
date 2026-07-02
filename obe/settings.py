@@ -107,7 +107,12 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False') == 'True'
 
 # ─── Static files ─────────────────────────────────────────────────────────────
-STATIC_URL = '/assets/'
+# STATIC_URL must stay '/static/' — Django admin templates hardcode this path
+# and there is no supported override. The previous '/assets/' setting caused
+# all admin CSS/JS to 404, rendering the admin panel as unstyled HTML.
+STATIC_URL = '/static/'
+# Frontend build assets (Vite outputs to dist/assets) are included here if
+# the build directory exists. collectstatic pulls them into STATIC_ROOT too.
 STATICFILES_DIRS = [
     os.path.join(BASE_DIR, 'dist', 'assets'),
 ] if os.path.exists(os.path.join(BASE_DIR, 'dist', 'assets')) else []
