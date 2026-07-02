@@ -49,3 +49,20 @@ class IsDeptAdmin(BasePermission):
             request.user.is_authenticated and
             request.user.role in ('dept_admin', 'admin')
         )
+
+
+class IsDeptAdminOrQA(BasePermission):
+    """
+    Dept admins, QA officers, and superadmins.
+
+    Used for actions that are primarily a dept_admin responsibility but
+    where QA needs university-wide oversight access — e.g. finalizing a
+    course. Views using this class must still apply their own dept-scoping
+    logic for the dept_admin case (see FinalizeCourseView).
+    """
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ('dept_admin', 'qa', 'admin')
+        )

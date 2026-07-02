@@ -28,7 +28,7 @@ from .serializers import (
     CourseWriteSerializer, CLOWriteSerializer,
     TeacherWriteSerializer, StudentWriteSerializer,
 )
-from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin
+from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin, IsDeptAdminOrQA
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2771,7 +2771,7 @@ class FinalizeCourseView(APIView):
     If a genuine correction is needed, QA/admin must use Django admin directly.
     """
     def get_permissions(self):
-        return [IsDeptAdmin()] if self.request.method == 'POST' else [IsAuthenticated()]
+        return [IsDeptAdminOrQA()] if self.request.method == 'POST' else [IsAuthenticated()]
 
     def post(self, request):
         course_id = request.data.get('courseId', '').strip()
