@@ -40,6 +40,12 @@ from .views import (
     StudentGAAttainmentView,
     CourseAttainmentView,
     StudentSummaryView,
+    COAttainmentSummaryView,
+    POAttainmentView,
+    InstructorPerformanceView,
+    CohortComparisonView,
+    AtRiskStudentsView,
+    GapAnalysisView,
 )
 
 urlpatterns = [
@@ -88,6 +94,14 @@ urlpatterns = [
     path('reports/student-ga-attainment/', StudentGAAttainmentView.as_view(),  name='report_student_ga'),
     path('reports/course-attainment/',     CourseAttainmentView.as_view(),     name='report_course'),
     path('reports/student-summary/',       StudentSummaryView.as_view(),       name='report_student_summary'),
+    # These 6 report views were fully implemented in views.py but never routed
+    # here — every request to them from the frontend was silently 404ing.
+    path('reports/co-attainment-summary/', COAttainmentSummaryView.as_view(),  name='report_co_summary'),
+    path('reports/po-attainment/',         POAttainmentView.as_view(),         name='report_po_attainment'),
+    path('reports/instructor-performance/', InstructorPerformanceView.as_view(), name='report_instructor_performance'),
+    path('reports/cohort-comparison/',     CohortComparisonView.as_view(),     name='report_cohort_comparison'),
+    path('reports/at-risk-students/',      AtRiskStudentsView.as_view(),       name='report_at_risk_students'),
+    path('reports/gap-analysis/',          GapAnalysisView.as_view(),          name='report_gap_analysis'),
 ]
 
 
