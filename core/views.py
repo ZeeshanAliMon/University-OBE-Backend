@@ -24,6 +24,9 @@ from .serializers import (
     DepartmentSerializer, ProgramSerializer,
     GraduateAttributeSerializer, CLOSerializer, CourseSerializer,
     InstructorCourseSerializer, AdmissionStudentSerializer,
+    ProgramWriteSerializer, GraduateAttributeWriteSerializer,
+    CourseWriteSerializer, CLOWriteSerializer,
+    TeacherWriteSerializer, StudentWriteSerializer,
 )
 from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin
 
@@ -183,16 +186,12 @@ class ProgramListView(APIView):
         return Response(ProgramSerializer(qs, many=True).data)
 
     def post(self, request):
-        data    = request.data
-        name    = data.get('name', '').strip()
-        code    = data.get('code', '').strip()
-        dept_id = data.get('departmentId', '').strip()
+        ws = ProgramWriteSerializer(data=request.data)
+        if not ws.is_valid():
+            return Response(ws.errors, status=status.HTTP_400_BAD_REQUEST)
+        d       = ws.validated_data
+        dept_id = d['departmentId']
 
-        if not name or not code or not dept_id:
-            return Response(
-                {'error': 'name, code and departmentId are required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         try:
             department = Department.objects.get(dept_id=dept_id)
         except Department.DoesNotExist:
@@ -200,18 +199,18 @@ class ProgramListView(APIView):
                 {'error': f'Department "{dept_id}" not found'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if Program.objects.filter(code__iexact=code).exists():
+        if Program.objects.filter(code__iexact=d['code']).exists():
             return Response(
-                {'error': f'Program with code "{code}" already exists'},
+                {'error': f'Program with code "{d["code"]}" already exists'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         program = Program.objects.create(
-            name=name, code=code, department=department,
-            vision=data.get('vision', ''), mission=data.get('mission', '')
+            name=d['name'], code=d['code'], department=department,
+            vision=d.get('vision', ''), mission=d.get('mission', '')
         )
         # Also process POs if sent on creation
-        pos_data = data.get('pos', [])
+        pos_data = request.data.get('pos', [])
         if pos_data:
             ProgramSerializer()._sync_pos(program, pos_data)
 
@@ -267,13 +266,14 @@ class GraduateAttributeListView(APIView):
         return Response(GraduateAttributeSerializer(qs, many=True).data)
 
     def post(self, request):
-        data    = request.data
-        ga_id   = data.get('id', '').strip()
-        name    = data.get('name', '').strip()
-        dept_id = data.get('departmentId', '').strip()
-        prog_id = data.get('programId', '')
-        if not ga_id or not name or not dept_id:
-            return Response({'error': 'id, name and departmentId are required'}, status=status.HTTP_400_BAD_REQUEST)
+        ws = GraduateAttributeWriteSerializer(data=request.data)
+        if not ws.is_valid():
+            return Response(ws.errors, status=status.HTTP_400_BAD_REQUEST)
+        d       = ws.validated_data
+        ga_id   = d['id']
+        dept_id = d['departmentId']
+        prog_id = d.get('programId', '')
+
         if GraduateAttribute.objects.filter(ga_id=ga_id).exists():
             ga = GraduateAttribute.objects.get(ga_id=ga_id)
             return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_200_OK)
@@ -288,8 +288,8 @@ class GraduateAttributeListView(APIView):
             except Program.DoesNotExist:
                 pass
         ga = GraduateAttribute.objects.create(
-            ga_id=ga_id, name=name,
-            description=data.get('description', ''),
+            ga_id=ga_id, name=d['name'],
+            description=d.get('description', ''),
             department=department, program=program
         )
         return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_201_CREATED)
@@ -307,18 +307,14 @@ class CourseListView(APIView):
         return Response(CourseSerializer(qs, many=True).data)
 
     def post(self, request):
-        data       = request.data
-        code       = data.get('code', '').strip()
-        title      = data.get('title', '').strip()
-        dept_id    = data.get('departmentId', '').strip()
-        program_id = data.get('programId', '')
-        mapped_gas = data.get('mappedGAs', [])
+        ws = CourseWriteSerializer(data=request.data)
+        if not ws.is_valid():
+            return Response(ws.errors, status=status.HTTP_400_BAD_REQUEST)
+        d          = ws.validated_data
+        dept_id    = d['departmentId']
+        program_id = d.get('programId', '')
+        mapped_gas = d.get('mappedGAs', [])
 
-        if not code or not title or not dept_id:
-            return Response(
-                {'error': 'code, title and departmentId are required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         try:
             department = Department.objects.get(dept_id=dept_id)
         except Department.DoesNotExist:
@@ -335,10 +331,10 @@ class CourseListView(APIView):
                 pass
 
         course = Course.objects.create(
-            code=code, title=title,
-            type=data.get('type', 'core'),
+            code=d['code'], title=d['title'],
+            type=d.get('type', 'core'),
             department=department, program=program,
-            credit_hours=data.get('credit_hours', 3)
+            credit_hours=d.get('creditHours', 3)
         )
         if mapped_gas:
             course.mapped_gas.set(GraduateAttribute.objects.filter(ga_id__in=mapped_gas))
@@ -720,20 +716,23 @@ class AdmissionStudentListView(APIView):
         created, errors = [], []
 
         for idx, data in enumerate(records):
-            reg_no     = data.get('regNo', '').strip().upper()
-            name       = data.get('name', '').strip()
-            dept_id    = data.get('departmentId', '').strip()
-            program_id = data.get('programId', '').strip()
-            batch      = data.get('batch', 'Fall')
-            semester   = data.get('semester', '1st')
+            # Validate field types/lengths/choices before touching the DB
+            row_ws = StudentWriteSerializer(data=data)
+            if not row_ws.is_valid():
+                errors.append({'index': idx, 'regNo': data.get('regNo', ''), 'error': row_ws.errors})
+                continue
+            vd         = row_ws.validated_data
+            reg_no     = vd['regNo'].upper()
+            name       = vd['name']
+            dept_id    = vd['departmentId']
+            program_id = vd['programId']
+            batch      = vd.get('batch', 'Fall')
+            semester   = vd.get('semester', '1st')
 
             # Email: use provided or auto-generate from reg_no
-            raw_email = data.get('email', '').strip().lower()
+            raw_email = vd.get('email', '').strip().lower()
             email = raw_email if raw_email else f"{reg_no.lower().replace(' ', '')}@iqra.edu.pk"
 
-            if not reg_no or not name or not dept_id or not program_id:
-                errors.append({'index': idx, 'regNo': reg_no, 'error': 'regNo, name, departmentId and programId are required'})
-                continue
             try:
                 department = Department.objects.get(dept_id=dept_id)
             except Department.DoesNotExist:
@@ -1806,14 +1805,12 @@ class CLOListView(APIView):
         if not course:
             return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        data        = request.data
-        code        = data.get('code', '').strip()
-        description = data.get('description', '').strip()
-        ga_id       = data.get('mappedGA', '')
-        order       = data.get('order', 1)
-
-        if not code:
-            return Response({'error': 'code is required'}, status=status.HTTP_400_BAD_REQUEST)
+        ws = CLOWriteSerializer(data=request.data)
+        if not ws.is_valid():
+            return Response(ws.errors, status=status.HTTP_400_BAD_REQUEST)
+        d     = ws.validated_data
+        code  = d['code']
+        ga_id = d.get('mappedGA') or ''
 
         if CLO.objects.filter(course=course, code=code).exists():
             return Response(
@@ -1833,7 +1830,7 @@ class CLOListView(APIView):
 
         clo = CLO.objects.create(
             course=course, code=code,
-            description=description, mapped_ga=ga, order=order
+            description=d.get('description', ''), mapped_ga=ga, order=d.get('order', 0)
         )
         return Response(CLOSerializer(clo).data, status=status.HTTP_201_CREATED)
 
@@ -2473,18 +2470,15 @@ class TeacherOnboardingView(APIView):
     permission_classes = [IsDeptAdmin]
 
     def post(self, request):
-        data        = request.data
-        name        = data.get('name', '').strip()
-        email       = data.get('email', '').strip().lower()
-        employee_id = data.get('employeeId', '').strip()
-        designation = data.get('designation', '').strip()
-        dept_id     = data.get('departmentId', '').strip()
-
-        if not name or not email or not employee_id or not dept_id:
-            return Response(
-                {'error': 'name, email, employeeId and departmentId are required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        ws = TeacherWriteSerializer(data=request.data)
+        if not ws.is_valid():
+            return Response(ws.errors, status=status.HTTP_400_BAD_REQUEST)
+        d           = ws.validated_data
+        name        = d['name']
+        email       = d['email'].lower()
+        employee_id = d['employeeId']
+        designation = d.get('designation', '')
+        dept_id     = d['departmentId']
 
         if User.objects.filter(email__iexact=email).exists():
             return Response(

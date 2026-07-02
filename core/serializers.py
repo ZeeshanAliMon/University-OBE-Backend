@@ -330,6 +330,71 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
         return result
 
 
+
+
+# ─── Write Serializers (validation for raw-create endpoints) ─────────────────
+# These are used on POST/PATCH paths where views previously called
+# objects.create() / objects.save() directly, skipping model-level validation
+# (max_length, choices, blank constraints).  They reject bad data at the API
+# boundary with a clear 400 before anything touches the database.
+
+class ProgramWriteSerializer(serializers.Serializer):
+    name         = serializers.CharField(max_length=200)
+    code         = serializers.CharField(max_length=20)
+    vision       = serializers.CharField(required=False, allow_blank=True, default='')
+    mission      = serializers.CharField(required=False, allow_blank=True, default='')
+    departmentId = serializers.CharField()
+
+
+class GraduateAttributeWriteSerializer(serializers.Serializer):
+    id           = serializers.CharField(max_length=30)   # ga_id
+    name         = serializers.CharField(max_length=200)
+    description  = serializers.CharField(required=False, allow_blank=True, default='')
+    departmentId = serializers.CharField()
+    programId    = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class CourseWriteSerializer(serializers.Serializer):
+    COURSE_TYPE_CHOICES = ['core', 'elective']
+
+    code         = serializers.CharField(max_length=30)
+    title        = serializers.CharField(max_length=200)
+    type         = serializers.ChoiceField(choices=COURSE_TYPE_CHOICES, default='core')
+    departmentId = serializers.CharField()
+    programId    = serializers.CharField(required=False, allow_blank=True, default='')
+    creditHours  = serializers.IntegerField(required=False, default=3, min_value=0, max_value=20)
+    mappedGAs    = serializers.ListField(
+        child=serializers.CharField(), required=False, default=list
+    )
+
+
+class CLOWriteSerializer(serializers.Serializer):
+    code        = serializers.CharField(max_length=20)
+    description = serializers.CharField(allow_blank=True, default='')
+    mappedGA    = serializers.CharField(required=False, allow_null=True, default=None)
+    order       = serializers.IntegerField(required=False, default=0)
+
+
+class TeacherWriteSerializer(serializers.Serializer):
+    name         = serializers.CharField(max_length=200)
+    email        = serializers.EmailField()
+    employeeId   = serializers.CharField(max_length=50)
+    designation  = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    departmentId = serializers.CharField()
+
+
+class StudentWriteSerializer(serializers.Serializer):
+    BATCH_CHOICES    = ['Fall', 'Spring', 'Summer']
+    SEMESTER_CHOICES = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th']
+
+    regNo        = serializers.CharField(max_length=60)
+    name         = serializers.CharField(max_length=200)
+    email        = serializers.EmailField(required=False, allow_blank=True, default='')
+    departmentId = serializers.CharField()
+    programId    = serializers.CharField()
+    batch        = serializers.ChoiceField(choices=BATCH_CHOICES, default='Fall')
+    semester     = serializers.ChoiceField(choices=SEMESTER_CHOICES, default='1st')
+
 # ─── Admission Student ────────────────────────────────────────────────────────
 
 class AdmissionStudentSerializer(serializers.ModelSerializer):
