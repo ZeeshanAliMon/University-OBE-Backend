@@ -2725,6 +2725,21 @@ class StudentEnrollmentView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
+        # A closed/finalized course's roster must never change — FinalResult
+        # snapshots were already taken for exactly the students enrolled at
+        # close time. Reproduced before fixing: this endpoint let an admin
+        # both add a brand-new student AND remove 3 already-graded students
+        # from a closed course's live roster in one call — the removed
+        # students' FinalResult rows (their permanent transcript) stayed
+        # intact and orphaned, while the live CourseStudent roster silently
+        # stopped reflecting who was actually graded. Same guard
+        # InstructorCourseView.post() already applies to mark edits.
+        if ic.status == 'closed':
+            return Response(
+                {'error': f'Course "{course_id}" is closed (finalized {ic.closed_at}) — enrollment cannot be changed.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # True sync / idempotent overwrite:
         # The incoming list IS the desired roster. Add new students, remove
         # students no longer in the list (but preserve their marks data).
@@ -2786,9 +2801,19 @@ class StudentEnrollmentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        try:
+            ic = InstructorCourse.objects.get(frontend_id=course_id, department=admin_dept)
+        except InstructorCourse.DoesNotExist:
+            return Response({'error': f'Course "{course_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if ic.status == 'closed':
+            return Response(
+                {'error': f'Course "{course_id}" is closed (finalized {ic.closed_at}) — enrollment cannot be changed.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         deleted, _ = CourseStudent.objects.filter(
-            course__frontend_id=course_id, reg_no=reg_no,
-            course__department=admin_dept,   # scoped — can't touch other depts
+            course=ic, reg_no=reg_no,
         ).delete()
 
         if not deleted:
