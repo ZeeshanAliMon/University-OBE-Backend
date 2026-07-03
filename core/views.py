@@ -182,7 +182,14 @@ class DepartmentDetailView(APIView):
 # ─── Programs ─────────────────────────────────────────────────────────────────
 
 class ProgramListView(APIView):
-    permission_classes = [IsAuthenticated]
+    # Was a blanket IsAuthenticated covering POST too — any logged-in user,
+    # including a student, could create a new Program. ProgramDetailView
+    # right below correctly splits GET (anyone) vs PATCH (QA only) via
+    # get_permissions() — this view just never got the same treatment.
+    # Reproduced before fixing: a student successfully created a program via
+    # POST /api/programs/ with only their own login.
+    def get_permissions(self):
+        return [IsAuthenticated()] if self.request.method == 'GET' else [IsQA()]
 
     def get(self, request):
         qs = Program.objects.select_related('department').prefetch_related(
@@ -303,7 +310,10 @@ class GraduateAttributeListView(APIView):
 # ─── Courses ──────────────────────────────────────────────────────────────────
 
 class CourseListView(APIView):
-    permission_classes = [IsAuthenticated]
+    # Same bug and same fix as ProgramListView above — was IsAuthenticated
+    # for POST too. CourseDetailView already correctly splits GET vs write.
+    def get_permissions(self):
+        return [IsAuthenticated()] if self.request.method == 'GET' else [IsQA()]
 
     def get(self, request):
         qs = Course.objects.select_related(
@@ -1070,7 +1080,14 @@ class TeacherListView(APIView):
     Used by dept_admin when assigning teachers to courses
     (can assign teachers from any department to their courses).
     """
-    permission_classes = [IsAuthenticated]
+    # Was IsAuthenticated — any logged-in user, including students, could
+    # pull every instructor's name/email/employeeId university-wide, despite
+    # the docstring saying this is a dept_admin tool. Checked the frontend:
+    # only DeptAdminDashboard.tsx calls this endpoint, so tightening it here
+    # doesn't remove any legitimate access. Also modest defense-in-depth for
+    # the employee_id exposure specifically, since employee_id feeds directly
+    # into InstructorCourse.frontend_id (see the CLO authorization fix).
+    permission_classes = [IsDeptAdmin]
 
     def get(self, request):
         profiles = InstructorProfile.objects.select_related(
