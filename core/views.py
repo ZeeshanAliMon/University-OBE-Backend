@@ -992,10 +992,11 @@ class CourseAssignmentView(APIView):
         if not admin_dept:
             return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
 
-        data        = request.data
-        teacher_id  = data.get('teacherId', '').strip()
-        course_code = data.get('courseCode', '').strip().upper()
-        program_id  = data.get('programId', '').strip()
+        data          = request.data
+        teacher_id    = data.get('teacherId', '').strip()
+        course_code   = data.get('courseCode', '').strip().upper()
+        program_id    = data.get('programId', '').strip()
+        academic_year = data.get('academicYear', '').strip()
 
         qs = CourseAssignment.objects.filter(
             instructor__employee_id=teacher_id,
@@ -1011,8 +1012,20 @@ class CourseAssignmentView(APIView):
         # Clean up the auto-created InstructorCourse stub for this assignment.
         # Only delete if it has NO student data — preserve any gradebook the
         # instructor has already started filling in, even after unassignment.
+        #
+        # BUG FIX: this frontend_id was previously built WITHOUT the term
+        # suffix, but InstructorCourseView.get() (where the stub is actually
+        # created) always includes it when academic_year is set — see the
+        # term_suffix logic there. That mismatch meant the lookup below never
+        # matched a real stub for any assignment with an academic_year set
+        # (the realistic case), so this cleanup silently no-op'd every time,
+        # leaving an orphaned empty InstructorCourse row behind on every
+        # delete. Reproduced and confirmed via a live create→auto-create→
+        # delete cycle before fixing. Now builds the id the same way both
+        # places do.
         prog_suffix = program_id.lower() if program_id else 'all'
-        frontend_id = f"course-assigned-{course_code}-{teacher_id}-{prog_suffix}"
+        term_suffix = f"-{academic_year.lower().replace(' ', '')}" if academic_year else ''
+        frontend_id = f"course-assigned-{course_code}-{teacher_id}-{prog_suffix}{term_suffix}"
         try:
             ic = InstructorCourse.objects.get(frontend_id=frontend_id)
             if not ic.students.exists() and not ic.obe_questions.exists():
