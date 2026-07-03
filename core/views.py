@@ -776,61 +776,72 @@ class AdmissionStudentListView(APIView):
                     )
                 )
 
-                # Auto-create or update the login User + Student profile
+                # Auto-create or update the login User + Student profile.
+                # Wrapped in atomic so that if StudentProfile.update_or_create
+                # fails after User.create succeeds, the orphaned User is rolled
+                # back automatically — otherwise the email is permanently taken
+                # and every retry attempt errors with "account already exists".
                 from django.contrib.auth.hashers import make_password as _make_password
                 from django.conf import settings as _settings
                 from .models import Student as StudentProfile
-                import re as _re
-                user_obj   = User.objects.filter(email__iexact=email).first()
-                if not user_obj:
-                    # New student — create account with shared default password.
-                    # must_change_password=True is the actual security boundary here
-                    # (enforced server-side by PasswordChangeEnforcingJWTAuthentication) —
-                    # previously this was False, which let bulk-imported students log in
-                    # and use the app indefinitely on the known default password.
-                    name_parts = name.split()
-                    user_obj = User.objects.create(
-                        username=email,
-                        email=email,
-                        first_name=name_parts[0] if name_parts else '',
-                        last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
-                        role='student',
-                        password=_make_password(_settings.DEFAULT_TEMP_PASSWORD),
-                        must_change_password=True,
-                        is_active=True,
-                    )
-                else:
-                    # Guard against a real data-corruption bug: if this email
-                    # already belongs to a login account linked to a DIFFERENT
-                    # reg_no, silently reassigning that account's Student
-                    # profile to this row's reg_no would sever the earlier
-                    # student's login entirely while this AdmissionStudent
-                    # roster row still reports "created" successfully — two
-                    # roster entries end up sharing one login, and whichever
-                    # row is processed last silently wins. Reject instead.
-                    existing_profile = StudentProfile.objects.filter(user=user_obj).first()
-                    if existing_profile and existing_profile.reg_no != reg_no:
-                        errors.append({
-                            'index': idx, 'regNo': reg_no,
-                            'error': f'Email "{email}" is already linked to student '
-                                     f'{existing_profile.reg_no}\'s login account — each '
-                                     f'student needs a unique email. The admission record '
-                                     f'for {reg_no} was saved, but no login account could '
-                                     f'be created or linked for them yet. Fix the email and '
-                                     f're-submit this row to provision their login.',
-                        })
-                        continue
-                    # Update name if changed
-                    name_parts = name.split()
-                    user_obj.first_name = name_parts[0] if name_parts else ''
-                    user_obj.last_name  = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
-                    user_obj.save()
+                _email_conflict = False
+                with transaction.atomic():
+                    user_obj = User.objects.filter(email__iexact=email).first()
+                    if not user_obj:
+                        # New student — create account with shared default password.
+                        # must_change_password=True is the actual security boundary here
+                        # (enforced server-side by PasswordChangeEnforcingJWTAuthentication) —
+                        # previously this was False, which let bulk-imported students log in
+                        # and use the app indefinitely on the known default password.
+                        name_parts = name.split()
+                        user_obj = User.objects.create(
+                            username=email,
+                            email=email,
+                            first_name=name_parts[0] if name_parts else '',
+                            last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
+                            role='student',
+                            password=_make_password(_settings.DEFAULT_TEMP_PASSWORD),
+                            must_change_password=True,
+                            is_active=True,
+                        )
+                    else:
+                        # Guard against a real data-corruption bug: if this email
+                        # already belongs to a login account linked to a DIFFERENT
+                        # reg_no, silently reassigning that account's Student
+                        # profile to this row's reg_no would sever the earlier
+                        # student's login entirely while this AdmissionStudent
+                        # roster row still reports "created" successfully — two
+                        # roster entries end up sharing one login, and whichever
+                        # row is processed last silently wins. Reject instead.
+                        existing_profile = StudentProfile.objects.filter(user=user_obj).first()
+                        if existing_profile and existing_profile.reg_no != reg_no:
+                            errors.append({
+                                'index': idx, 'regNo': reg_no,
+                                'error': f'Email "{email}" is already linked to student '
+                                         f'{existing_profile.reg_no}\'s login account — each '
+                                         f'student needs a unique email. The admission record '
+                                         f'for {reg_no} was saved, but no login account could '
+                                         f'be created or linked for them yet. Fix the email and '
+                                         f're-submit this row to provision their login.',
+                            })
+                            _email_conflict = True
+                        else:
+                            # Update name if changed
+                            name_parts = name.split()
+                            user_obj.first_name = name_parts[0] if name_parts else ''
+                            user_obj.last_name  = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+                            user_obj.save()
 
-                # Link Student profile (reg_no is the bridge)
-                StudentProfile.objects.update_or_create(
-                    user=user_obj,
-                    defaults=dict(reg_no=reg_no, department=department, program=program)
-                )
+                    if not _email_conflict:
+                        # Link Student profile (reg_no is the bridge)
+                        StudentProfile.objects.update_or_create(
+                            user=user_obj,
+                            defaults=dict(reg_no=reg_no, department=department, program=program)
+                        )
+
+                if _email_conflict:
+                    continue
+
             except IntegrityError as e:
                 # Most likely cause: reg_no or email collides with a DIFFERENT
                 # existing record than the one this row is trying to update
@@ -2565,23 +2576,28 @@ class TeacherOnboardingView(APIView):
         # Use email as username — email is unique so username is unique
         from django.contrib.auth.hashers import make_password
         from django.conf import settings as _settings
-        user = User.objects.create(
-            username=email,
-            email=email,
-            first_name=name.split()[0] if name else '',
-            last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
-            role='instructor',
-            password=make_password(_settings.DEFAULT_TEMP_PASSWORD),
-            must_change_password=True,
-            is_active=True,
-        )
+        # Wrap User + InstructorProfile in atomic — if profile creation fails
+        # after User is saved, the orphaned User rolls back automatically.
+        # Without this, a crash here leaves a User with no profile and a taken
+        # email that blocks any retry.
+        with transaction.atomic():
+            user = User.objects.create(
+                username=email,
+                email=email,
+                first_name=name.split()[0] if name else '',
+                last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
+                role='instructor',
+                password=make_password(_settings.DEFAULT_TEMP_PASSWORD),
+                must_change_password=True,
+                is_active=True,
+            )
 
-        profile = InstructorProfile.objects.create(
-            user=user,
-            employee_id=employee_id,
-            designation=designation,
-            department=department,
-        )
+            profile = InstructorProfile.objects.create(
+                user=user,
+                employee_id=employee_id,
+                designation=designation,
+                department=department,
+            )
 
         return Response({
             'employeeId':         profile.employee_id,
