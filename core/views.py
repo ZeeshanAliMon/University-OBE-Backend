@@ -1141,10 +1141,16 @@ class SemesterPlanView(APIView):
             return Response({'error': 'Profile not found'}, status=status.HTTP_403_FORBIDDEN)
 
         qs = SemesterPlan.objects.select_related('program')
+        # SECURITY FIX: previously, when programId was provided, this skipped
+        # department scoping entirely — any dept_admin could pass ANY other
+        # department's program code and read that department's semester plan.
+        # Reproduced before fixing: a Business dept admin successfully read
+        # Computing's semester plan by requesting ?programId=BSCS directly.
+        # Every dept_admin request must be scoped to their own department
+        # regardless of which query params are supplied.
+        qs = qs.filter(program__department=dept)
         if program_id:
             qs = qs.filter(program__code__iexact=program_id)
-        else:
-            qs = qs.filter(program__department=dept)
 
         data = [
             {
