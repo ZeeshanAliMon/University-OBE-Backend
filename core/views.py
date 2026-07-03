@@ -1830,21 +1830,30 @@ class CLOListView(APIView):
     """
     permission_classes = [IsInstructor]
 
-    def _get_course(self, frontend_id):
+    def _get_course(self, request, frontend_id):
+        # SECURITY FIX: this previously looked up the course by frontend_id
+        # alone, with no check that it belongs to the requesting instructor.
+        # Any authenticated instructor could read AND write CLOs on any other
+        # instructor's course by knowing/guessing its frontend_id. Reproduced
+        # before fixing: logged in as one instructor, read and successfully
+        # injected a CLO into a different instructor's seeded demo course.
+        profile = get_instructor_profile(request.user)
+        if not profile:
+            return None
         try:
-            return InstructorCourse.objects.get(frontend_id=frontend_id)
+            return InstructorCourse.objects.get(frontend_id=frontend_id, instructor=profile)
         except InstructorCourse.DoesNotExist:
             return None
 
     def get(self, request, frontend_id):
-        course = self._get_course(frontend_id)
+        course = self._get_course(request, frontend_id)
         if not course:
             return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
         clos = course.clos.select_related('mapped_ga').all()
         return Response(CLOSerializer(clos, many=True).data)
 
     def post(self, request, frontend_id):
-        course = self._get_course(frontend_id)
+        course = self._get_course(request, frontend_id)
         if not course:
             return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1887,22 +1896,28 @@ class CLODetailView(APIView):
     """
     permission_classes = [IsInstructor]
 
-    def _get(self, frontend_id, clo_id):
+    def _get(self, request, frontend_id, clo_id):
+        # Same fix as CLOListView._get_course — was missing the ownership
+        # check entirely, letting any instructor read/edit/delete any other
+        # instructor's CLOs by frontend_id + clo_id alone.
+        profile = get_instructor_profile(request.user)
+        if not profile:
+            return None
         try:
             return CLO.objects.select_related('mapped_ga', 'course').get(
-                pk=clo_id, course__frontend_id=frontend_id
+                pk=clo_id, course__frontend_id=frontend_id, course__instructor=profile
             )
         except CLO.DoesNotExist:
             return None
 
     def get(self, request, frontend_id, clo_id):
-        clo = self._get(frontend_id, clo_id)
+        clo = self._get(request, frontend_id, clo_id)
         if not clo:
             return Response({'error': 'CLO not found'}, status=status.HTTP_404_NOT_FOUND)
         return Response(CLOSerializer(clo).data)
 
     def patch(self, request, frontend_id, clo_id):
-        clo = self._get(frontend_id, clo_id)
+        clo = self._get(request, frontend_id, clo_id)
         if not clo:
             return Response({'error': 'CLO not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1927,7 +1942,7 @@ class CLODetailView(APIView):
         return Response(CLOSerializer(clo).data)
 
     def delete(self, request, frontend_id, clo_id):
-        clo = self._get(frontend_id, clo_id)
+        clo = self._get(request, frontend_id, clo_id)
         if not clo:
             return Response({'error': 'CLO not found'}, status=status.HTTP_404_NOT_FOUND)
         clo.delete()
