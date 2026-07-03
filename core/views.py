@@ -310,10 +310,18 @@ class GraduateAttributeListView(APIView):
 # ─── Courses ──────────────────────────────────────────────────────────────────
 
 class CourseListView(APIView):
-    # Same bug and same fix as ProgramListView above — was IsAuthenticated
-    # for POST too. CourseDetailView already correctly splits GET vs write.
+    # CORRECTION to my earlier fix: I'd restricted POST to IsQA based on the
+    # original handoff doc categorizing /api/courses/ under "QA" endpoints.
+    # That was wrong — DeptAdminDashboard.tsx also legitimately calls
+    # createCourse(), and this broke that in production (dept_admin got a
+    # real 403 trying to add a course, reported as "course doesn't show up
+    # in backend" since the frontend didn't surface the error). Checked the
+    # frontend properly this time before fixing: createCourse is called from
+    # both QADashboard.tsx and DeptAdminDashboard.tsx. createProgram, by
+    # contrast, actually is QA-only (only QADashboard.tsx calls it) — that
+    # one wasn't affected and doesn't need the same fix.
     def get_permissions(self):
-        return [IsAuthenticated()] if self.request.method == 'GET' else [IsQA()]
+        return [IsAuthenticated()] if self.request.method == 'GET' else [IsDeptAdminOrQA()]
 
     def get(self, request):
         qs = Course.objects.select_related(
