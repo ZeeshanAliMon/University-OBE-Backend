@@ -73,6 +73,10 @@ def prefetch_instructor_course(qs):
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    # Previously unlimited — anyone could brute-force a password against any
+    # known email with no rate limit, no lockout, no delay at all. 10/min
+    # per IP via DEFAULT_THROTTLE_RATES in settings.py.
+    throttle_scope = 'login'
 
     def post(self, request):
         s = LoginSerializer(data=request.data)
@@ -2589,6 +2593,10 @@ class ChangePasswordView(APIView):
     On success, clears must_change_password flag.
     """
     permission_classes = [IsAuthenticated]
+    # Requires a valid access token already, so the attack surface is smaller
+    # than login, but still guards against brute-forcing currentPassword with
+    # a stolen/leaked token. 10/min per IP.
+    throttle_scope = 'change_password'
 
     def post(self, request):
         data             = request.data

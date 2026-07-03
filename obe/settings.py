@@ -72,6 +72,17 @@ REST_FRAMEWORK = {
     # Fix 2: Pagination — prevents huge unfiltered dumps as data grows
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 100,   # 100 is safe for now; lower to 50 when course list grows beyond 200
+    # Rate limiting on credential-guessing endpoints. LoginView had zero
+    # protection against brute-forcing a password — unlimited attempts, no
+    # lockout, no delay. Scoped (not global) so it only affects the specific
+    # views that opt in via throttle_scope, not every anonymous request.
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'login': '10/min',            # per IP — generous for real typos, blocks brute force
+        'change_password': '10/min',
+    },
 }
 
 # ─── JWT Token Lifetimes ──────────────────────────────────────────────────────
