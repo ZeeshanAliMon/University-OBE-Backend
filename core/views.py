@@ -1140,15 +1140,13 @@ class SemesterPlanView(APIView):
         if not dept:
             return Response({'error': 'Profile not found'}, status=status.HTTP_403_FORBIDDEN)
 
-        qs = SemesterPlan.objects.select_related('program')
-        # SECURITY FIX: previously, when programId was provided, this skipped
-        # department scoping entirely — any dept_admin could pass ANY other
-        # department's program code and read that department's semester plan.
-        # Reproduced before fixing: a Business dept admin successfully read
-        # Computing's semester plan by requesting ?programId=BSCS directly.
-        # Every dept_admin request must be scoped to their own department
-        # regardless of which query params are supplied.
-        qs = qs.filter(program__department=dept)
+        # SECURITY FIX (Zeeshan): previously, when programId was provided, this
+        # skipped department scoping — any dept_admin could read another dept's
+        # semester plan by guessing a programId. Reproduced before fixing.
+        # Always scope to own department regardless of query params supplied.
+        qs = SemesterPlan.objects.select_related('program').filter(
+            program__department=dept
+        )
         if program_id:
             qs = qs.filter(program__code__iexact=program_id)
 
@@ -1250,12 +1248,16 @@ class StudentCoursesView(APIView):
             # No Student profile — fall back to username for demo/seed users
             reg_no = request.user.email.split('@')[0]  # fallback only
 
-        # Find all CourseStudent rows matching this reg_no
+        # Find all CourseStudent rows matching this reg_no.
+        # select_related covers every FK traversal in the response loop below
+        # so no per-course DB hits occur. Previously instructor was missing,
+        # causing one extra query per enrolled course for employee_id.
         enrollments = CourseStudent.objects.filter(
             reg_no=reg_no
         ).select_related(
             'course__department',
             'course__program',
+            'course__instructor',   # needed for frontend_id construction
         ).prefetch_related(
             'marks__unit_item__category',
             'course__categories',
@@ -1264,20 +1266,22 @@ class StudentCoursesView(APIView):
         result = []
         for enrollment in enrollments:
             ic = enrollment.course
-            # Build student-specific marks dict
+            # Build student-specific marks dict (marks already prefetched)
             student_marks = {
                 f"{m.unit_item.category.name}-{m.unit_item.unit_no}": m.score
-                for m in enrollment.marks.select_related('unit_item__category').all()
+                for m in enrollment.marks.all()
             }
-            # Build categories list
+            # Build categories list (already prefetched)
             categories = [
                 {'name': c.name, 'percentage': c.percentage, 'units': c.units}
                 for c in ic.categories.order_by('order').all()
             ]
+            instructor_id = ic.instructor.employee_id if ic.instructor else 'unknown'
+            program_code  = ic.program.code if ic.program else ''
             result.append({
-                'id':           f"course-{ic.code}-{ic.instructor.employee_id}-{ic.program.code.lower() if ic.program else 'all'}",
+                'id':           f"course-{ic.code}-{instructor_id}-{program_code.lower() or 'all'}",
                 'code':         ic.code,
-                'title':        f"{ic.title} ({ic.program.code if ic.program else ''})",
+                'title':        f"{ic.title} ({program_code})" if program_code else ic.title,
                 'creditHours':  ic.credit_hours,
                 'categories':   categories,
                 'studentMarks': student_marks,
