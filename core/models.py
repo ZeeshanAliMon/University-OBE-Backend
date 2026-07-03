@@ -293,7 +293,7 @@ class InstructorCourse(models.Model):
     instructor              = models.ForeignKey(
         InstructorProfile, on_delete=models.CASCADE, related_name='instructor_courses'
     )
-    frontend_id             = models.CharField(max_length=100)
+    frontend_id             = models.CharField(max_length=100, db_index=True)
     course_type             = models.CharField(
         max_length=10,
         choices=[('Theory', 'Theory'), ('Lab', 'Lab')],
@@ -483,7 +483,7 @@ class CourseStudent(models.Model):
     course = models.ForeignKey(
         InstructorCourse, on_delete=models.CASCADE, related_name='students'
     )
-    reg_no = models.CharField(max_length=60)
+    reg_no = models.CharField(max_length=60, db_index=True)
     name   = models.CharField(max_length=200, blank=True)
 
     class Meta:
@@ -712,9 +712,9 @@ class SemesterPlan(models.Model):
 # for closed terms.
 
 class FinalResult(models.Model):
-    student_reg_no   = models.CharField(max_length=60)
+    student_reg_no   = models.CharField(max_length=60, db_index=True)
     student_name     = models.CharField(max_length=200)
-    course_code      = models.CharField(max_length=30)
+    course_code      = models.CharField(max_length=30, db_index=True)
     course_title      = models.CharField(max_length=200)
     instructor_name  = models.CharField(max_length=200)   # snapshot — not FK, survives instructor reassignment
     department       = models.ForeignKey(
