@@ -871,7 +871,8 @@ class AdmissionStudentDetailView(APIView):
 
         if 'departmentId' in data:
             try:
-                student.department = Department.objects.get(slug=data['departmentId'])
+                # slug field was removed — use dept_id (the canonical identifier)
+                student.department = Department.objects.get(dept_id=data['departmentId'])
             except Department.DoesNotExist:
                 return Response(
                     {'error': f'Department "{data["departmentId"]}" not found'},
@@ -880,7 +881,8 @@ class AdmissionStudentDetailView(APIView):
 
         if 'programId' in data:
             try:
-                student.program = Program.objects.get(slug=data['programId'])
+                # slug field was removed — use code__iexact (the canonical identifier)
+                student.program = Program.objects.get(code__iexact=data['programId'])
             except Program.DoesNotExist:
                 return Response(
                     {'error': f'Program "{data["programId"]}" not found'},

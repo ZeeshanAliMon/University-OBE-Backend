@@ -78,7 +78,13 @@ REST_FRAMEWORK = {
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME':  timedelta(hours=8),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'ROTATE_REFRESH_TOKENS':  True,
+    'ROTATE_REFRESH_TOKENS':       True,
+    # BLACKLIST_AFTER_ROTATION must be True whenever ROTATE_REFRESH_TOKENS
+    # is True. Without it, rotation issues a new refresh token but never
+    # invalidates the old one — a stolen refresh token stays usable forever
+    # regardless of how many times the legitimate user rotates it.
+    # token_blacklist app was added in commit 7192e62; this activates it.
+    'BLACKLIST_AFTER_ROTATION':    True,
 }
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -107,7 +113,12 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False') == 'True'
 
 # ─── Static files ─────────────────────────────────────────────────────────────
-STATIC_URL = '/assets/'
+# STATIC_URL must stay '/static/' — Django admin templates hardcode this path
+# and there is no supported override. The previous '/assets/' setting caused
+# all admin CSS/JS to 404, rendering the admin panel as unstyled HTML.
+STATIC_URL = '/static/'
+# Frontend build assets (Vite outputs to dist/assets) are included here if
+# the build directory exists. collectstatic pulls them into STATIC_ROOT too.
 STATICFILES_DIRS = [
     os.path.join(BASE_DIR, 'dist', 'assets'),
 ] if os.path.exists(os.path.join(BASE_DIR, 'dist', 'assets')) else []
