@@ -2963,40 +2963,52 @@ class FinalizeCourseView(APIView):
         questions = list(ic.obe_questions.all())
         instructor_name = ic.instructor.user.get_full_name() or ic.instructor.user.email
 
+        # Wrap the entire finalization in a single atomic transaction.
+        # Without this, a crash or DB error partway through the student loop
+        # leaves some FinalResult rows written and others not — but the course
+        # remains 'active', so instructors can keep editing marks that are now
+        # out of sync with the already-committed transcript rows.
+        # More critically: if the loop completes but ic.save() fails, ALL
+        # FinalResult rows exist permanently but the course is never locked —
+        # instructors can keep editing marks forever against a transcript that
+        # already exists. Atomic makes it all-or-nothing: either every
+        # FinalResult is written AND the course is locked, or none of it is.
         results_created = []
-        for student in ic.students.all():
-            pct = _student_total_percentage(student)
-            grade_letter, grade_points = _get_grade(pct, ic)
-            clo_attainments = _clo_attainments_for_student(student, questions)
+        with transaction.atomic():
+            for student in ic.students.all():
+                pct = _student_total_percentage(student)
+                grade_letter, grade_points = _get_grade(pct, ic)
+                clo_attainments = _clo_attainments_for_student(student, questions)
 
-            result, _ = FinalResult.objects.update_or_create(
-                student_reg_no=student.reg_no,
-                course_code=ic.code,
-                academic_year=ic.academic_year,
-                defaults=dict(
-                    student_name=student.name,
-                    course_title=ic.title,
-                    instructor_name=instructor_name,
-                    department=ic.department,
-                    program=ic.program,
-                    semester=ic.semester,
-                    credit_hours=ic.credit_hours,
-                    final_percentage=pct,
-                    grade_letter=grade_letter,
-                    grade_points=grade_points,
-                    clo_attainments=clo_attainments,
-                    source_course=ic,
+                result, _ = FinalResult.objects.update_or_create(
+                    student_reg_no=student.reg_no,
+                    course_code=ic.code,
+                    academic_year=ic.academic_year,
+                    defaults=dict(
+                        student_name=student.name,
+                        course_title=ic.title,
+                        instructor_name=instructor_name,
+                        department=ic.department,
+                        program=ic.program,
+                        semester=ic.semester,
+                        credit_hours=ic.credit_hours,
+                        final_percentage=pct,
+                        grade_letter=grade_letter,
+                        grade_points=grade_points,
+                        clo_attainments=clo_attainments,
+                        source_course=ic,
+                    )
                 )
-            )
-            results_created.append({
-                'regNo': student.reg_no, 'grade': grade_letter, 'percentage': pct
-            })
+                results_created.append({
+                    'regNo': student.reg_no, 'grade': grade_letter, 'percentage': pct
+                })
 
-        # Lock the course
-        ic.status    = 'closed'
-        ic.closed_at = timezone.now()
-        ic.closed_by = request.user
-        ic.save()
+            # Lock the course — inside atomic so this and FinalResult rows
+            # either all commit together or all roll back together.
+            ic.status    = 'closed'
+            ic.closed_at = timezone.now()
+            ic.closed_by = request.user
+            ic.save()
 
         return Response({
             'courseId':        course_id,
