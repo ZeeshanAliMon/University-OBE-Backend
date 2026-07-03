@@ -121,7 +121,16 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.trycloudflare\.com$",
 ]
-CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False') == 'True'
+CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'True') == 'True'
+# TEMPORARY: defaulting back to True (the original pre-hardening behavior)
+# because flipping this to False by default broke the live PythonAnywhere
+# deployment — the real frontend origin was never added to
+# CORS_ALLOWED_ORIGINS above before this shipped, so every request from the
+# actual deployed frontend got silently blocked at the browser level, which
+# looked like "can't reach the server" even though the backend was fine.
+# REVERT THIS once the real frontend origin is confirmed and added to
+# CORS_ALLOWED_ORIGINS above — this line defeats the whole point of that
+# allowlist while it's set to True.
 
 # ─── Static files ─────────────────────────────────────────────────────────────
 # STATIC_URL must stay '/static/' — Django admin templates hardcode this path
