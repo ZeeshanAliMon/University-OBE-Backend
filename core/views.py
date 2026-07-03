@@ -786,61 +786,72 @@ class AdmissionStudentListView(APIView):
                     )
                 )
 
-                # Auto-create or update the login User + Student profile
+                # Auto-create or update the login User + Student profile.
+                # Wrapped in atomic so that if StudentProfile.update_or_create
+                # fails after User.create succeeds, the orphaned User is rolled
+                # back automatically — otherwise the email is permanently taken
+                # and every retry attempt errors with "account already exists".
                 from django.contrib.auth.hashers import make_password as _make_password
                 from django.conf import settings as _settings
                 from .models import Student as StudentProfile
-                import re as _re
-                user_obj   = User.objects.filter(email__iexact=email).first()
-                if not user_obj:
-                    # New student — create account with shared default password.
-                    # must_change_password=True is the actual security boundary here
-                    # (enforced server-side by PasswordChangeEnforcingJWTAuthentication) —
-                    # previously this was False, which let bulk-imported students log in
-                    # and use the app indefinitely on the known default password.
-                    name_parts = name.split()
-                    user_obj = User.objects.create(
-                        username=email,
-                        email=email,
-                        first_name=name_parts[0] if name_parts else '',
-                        last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
-                        role='student',
-                        password=_make_password(_settings.DEFAULT_TEMP_PASSWORD),
-                        must_change_password=True,
-                        is_active=True,
-                    )
-                else:
-                    # Guard against a real data-corruption bug: if this email
-                    # already belongs to a login account linked to a DIFFERENT
-                    # reg_no, silently reassigning that account's Student
-                    # profile to this row's reg_no would sever the earlier
-                    # student's login entirely while this AdmissionStudent
-                    # roster row still reports "created" successfully — two
-                    # roster entries end up sharing one login, and whichever
-                    # row is processed last silently wins. Reject instead.
-                    existing_profile = StudentProfile.objects.filter(user=user_obj).first()
-                    if existing_profile and existing_profile.reg_no != reg_no:
-                        errors.append({
-                            'index': idx, 'regNo': reg_no,
-                            'error': f'Email "{email}" is already linked to student '
-                                     f'{existing_profile.reg_no}\'s login account — each '
-                                     f'student needs a unique email. The admission record '
-                                     f'for {reg_no} was saved, but no login account could '
-                                     f'be created or linked for them yet. Fix the email and '
-                                     f're-submit this row to provision their login.',
-                        })
-                        continue
-                    # Update name if changed
-                    name_parts = name.split()
-                    user_obj.first_name = name_parts[0] if name_parts else ''
-                    user_obj.last_name  = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
-                    user_obj.save()
+                _email_conflict = False
+                with transaction.atomic():
+                    user_obj = User.objects.filter(email__iexact=email).first()
+                    if not user_obj:
+                        # New student — create account with shared default password.
+                        # must_change_password=True is the actual security boundary here
+                        # (enforced server-side by PasswordChangeEnforcingJWTAuthentication) —
+                        # previously this was False, which let bulk-imported students log in
+                        # and use the app indefinitely on the known default password.
+                        name_parts = name.split()
+                        user_obj = User.objects.create(
+                            username=email,
+                            email=email,
+                            first_name=name_parts[0] if name_parts else '',
+                            last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
+                            role='student',
+                            password=_make_password(_settings.DEFAULT_TEMP_PASSWORD),
+                            must_change_password=True,
+                            is_active=True,
+                        )
+                    else:
+                        # Guard against a real data-corruption bug: if this email
+                        # already belongs to a login account linked to a DIFFERENT
+                        # reg_no, silently reassigning that account's Student
+                        # profile to this row's reg_no would sever the earlier
+                        # student's login entirely while this AdmissionStudent
+                        # roster row still reports "created" successfully — two
+                        # roster entries end up sharing one login, and whichever
+                        # row is processed last silently wins. Reject instead.
+                        existing_profile = StudentProfile.objects.filter(user=user_obj).first()
+                        if existing_profile and existing_profile.reg_no != reg_no:
+                            errors.append({
+                                'index': idx, 'regNo': reg_no,
+                                'error': f'Email "{email}" is already linked to student '
+                                         f'{existing_profile.reg_no}\'s login account — each '
+                                         f'student needs a unique email. The admission record '
+                                         f'for {reg_no} was saved, but no login account could '
+                                         f'be created or linked for them yet. Fix the email and '
+                                         f're-submit this row to provision their login.',
+                            })
+                            _email_conflict = True
+                        else:
+                            # Update name if changed
+                            name_parts = name.split()
+                            user_obj.first_name = name_parts[0] if name_parts else ''
+                            user_obj.last_name  = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+                            user_obj.save()
 
-                # Link Student profile (reg_no is the bridge)
-                StudentProfile.objects.update_or_create(
-                    user=user_obj,
-                    defaults=dict(reg_no=reg_no, department=department, program=program)
-                )
+                    if not _email_conflict:
+                        # Link Student profile (reg_no is the bridge)
+                        StudentProfile.objects.update_or_create(
+                            user=user_obj,
+                            defaults=dict(reg_no=reg_no, department=department, program=program)
+                        )
+
+                if _email_conflict:
+                    continue
+
             except IntegrityError as e:
                 # Most likely cause: reg_no or email collides with a DIFFERENT
                 # existing record than the one this row is trying to update
@@ -1157,15 +1168,13 @@ class SemesterPlanView(APIView):
         if not dept:
             return Response({'error': 'Profile not found'}, status=status.HTTP_403_FORBIDDEN)
 
-        qs = SemesterPlan.objects.select_related('program')
-        # SECURITY FIX: previously, when programId was provided, this skipped
-        # department scoping entirely — any dept_admin could pass ANY other
-        # department's program code and read that department's semester plan.
-        # Reproduced before fixing: a Business dept admin successfully read
-        # Computing's semester plan by requesting ?programId=BSCS directly.
-        # Every dept_admin request must be scoped to their own department
-        # regardless of which query params are supplied.
-        qs = qs.filter(program__department=dept)
+        # SECURITY FIX (Zeeshan): previously, when programId was provided, this
+        # skipped department scoping — any dept_admin could read another dept's
+        # semester plan by guessing a programId. Reproduced before fixing.
+        # Always scope to own department regardless of query params supplied.
+        qs = SemesterPlan.objects.select_related('program').filter(
+            program__department=dept
+        )
         if program_id:
             qs = qs.filter(program__code__iexact=program_id)
 
@@ -1267,12 +1276,16 @@ class StudentCoursesView(APIView):
             # No Student profile — fall back to username for demo/seed users
             reg_no = request.user.email.split('@')[0]  # fallback only
 
-        # Find all CourseStudent rows matching this reg_no
+        # Find all CourseStudent rows matching this reg_no.
+        # select_related covers every FK traversal in the response loop below
+        # so no per-course DB hits occur. Previously instructor was missing,
+        # causing one extra query per enrolled course for employee_id.
         enrollments = CourseStudent.objects.filter(
             reg_no=reg_no
         ).select_related(
             'course__department',
             'course__program',
+            'course__instructor',   # needed for frontend_id construction
         ).prefetch_related(
             'marks__unit_item__category',
             'course__categories',
@@ -1281,20 +1294,22 @@ class StudentCoursesView(APIView):
         result = []
         for enrollment in enrollments:
             ic = enrollment.course
-            # Build student-specific marks dict
+            # Build student-specific marks dict (marks already prefetched)
             student_marks = {
                 f"{m.unit_item.category.name}-{m.unit_item.unit_no}": m.score
-                for m in enrollment.marks.select_related('unit_item__category').all()
+                for m in enrollment.marks.all()
             }
-            # Build categories list
+            # Build categories list (already prefetched)
             categories = [
                 {'name': c.name, 'percentage': c.percentage, 'units': c.units}
                 for c in ic.categories.order_by('order').all()
             ]
+            instructor_id = ic.instructor.employee_id if ic.instructor else 'unknown'
+            program_code  = ic.program.code if ic.program else ''
             result.append({
-                'id':           f"course-{ic.code}-{ic.instructor.employee_id}-{ic.program.code.lower() if ic.program else 'all'}",
+                'id':           f"course-{ic.code}-{instructor_id}-{program_code.lower() or 'all'}",
                 'code':         ic.code,
-                'title':        f"{ic.title} ({ic.program.code if ic.program else ''})",
+                'title':        f"{ic.title} ({program_code})" if program_code else ic.title,
                 'creditHours':  ic.credit_hours,
                 'categories':   categories,
                 'studentMarks': student_marks,
@@ -2578,23 +2593,28 @@ class TeacherOnboardingView(APIView):
         # Use email as username — email is unique so username is unique
         from django.contrib.auth.hashers import make_password
         from django.conf import settings as _settings
-        user = User.objects.create(
-            username=email,
-            email=email,
-            first_name=name.split()[0] if name else '',
-            last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
-            role='instructor',
-            password=make_password(_settings.DEFAULT_TEMP_PASSWORD),
-            must_change_password=True,
-            is_active=True,
-        )
+        # Wrap User + InstructorProfile in atomic — if profile creation fails
+        # after User is saved, the orphaned User rolls back automatically.
+        # Without this, a crash here leaves a User with no profile and a taken
+        # email that blocks any retry.
+        with transaction.atomic():
+            user = User.objects.create(
+                username=email,
+                email=email,
+                first_name=name.split()[0] if name else '',
+                last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
+                role='instructor',
+                password=make_password(_settings.DEFAULT_TEMP_PASSWORD),
+                must_change_password=True,
+                is_active=True,
+            )
 
-        profile = InstructorProfile.objects.create(
-            user=user,
-            employee_id=employee_id,
-            designation=designation,
-            department=department,
-        )
+            profile = InstructorProfile.objects.create(
+                user=user,
+                employee_id=employee_id,
+                designation=designation,
+                department=department,
+            )
 
         return Response({
             'employeeId':         profile.employee_id,
@@ -2960,40 +2980,52 @@ class FinalizeCourseView(APIView):
         questions = list(ic.obe_questions.all())
         instructor_name = ic.instructor.user.get_full_name() or ic.instructor.user.email
 
+        # Wrap the entire finalization in a single atomic transaction.
+        # Without this, a crash or DB error partway through the student loop
+        # leaves some FinalResult rows written and others not — but the course
+        # remains 'active', so instructors can keep editing marks that are now
+        # out of sync with the already-committed transcript rows.
+        # More critically: if the loop completes but ic.save() fails, ALL
+        # FinalResult rows exist permanently but the course is never locked —
+        # instructors can keep editing marks forever against a transcript that
+        # already exists. Atomic makes it all-or-nothing: either every
+        # FinalResult is written AND the course is locked, or none of it is.
         results_created = []
-        for student in ic.students.all():
-            pct = _student_total_percentage(student)
-            grade_letter, grade_points = _get_grade(pct, ic)
-            clo_attainments = _clo_attainments_for_student(student, questions)
+        with transaction.atomic():
+            for student in ic.students.all():
+                pct = _student_total_percentage(student)
+                grade_letter, grade_points = _get_grade(pct, ic)
+                clo_attainments = _clo_attainments_for_student(student, questions)
 
-            result, _ = FinalResult.objects.update_or_create(
-                student_reg_no=student.reg_no,
-                course_code=ic.code,
-                academic_year=ic.academic_year,
-                defaults=dict(
-                    student_name=student.name,
-                    course_title=ic.title,
-                    instructor_name=instructor_name,
-                    department=ic.department,
-                    program=ic.program,
-                    semester=ic.semester,
-                    credit_hours=ic.credit_hours,
-                    final_percentage=pct,
-                    grade_letter=grade_letter,
-                    grade_points=grade_points,
-                    clo_attainments=clo_attainments,
-                    source_course=ic,
+                result, _ = FinalResult.objects.update_or_create(
+                    student_reg_no=student.reg_no,
+                    course_code=ic.code,
+                    academic_year=ic.academic_year,
+                    defaults=dict(
+                        student_name=student.name,
+                        course_title=ic.title,
+                        instructor_name=instructor_name,
+                        department=ic.department,
+                        program=ic.program,
+                        semester=ic.semester,
+                        credit_hours=ic.credit_hours,
+                        final_percentage=pct,
+                        grade_letter=grade_letter,
+                        grade_points=grade_points,
+                        clo_attainments=clo_attainments,
+                        source_course=ic,
+                    )
                 )
-            )
-            results_created.append({
-                'regNo': student.reg_no, 'grade': grade_letter, 'percentage': pct
-            })
+                results_created.append({
+                    'regNo': student.reg_no, 'grade': grade_letter, 'percentage': pct
+                })
 
-        # Lock the course
-        ic.status    = 'closed'
-        ic.closed_at = timezone.now()
-        ic.closed_by = request.user
-        ic.save()
+            # Lock the course — inside atomic so this and FinalResult rows
+            # either all commit together or all roll back together.
+            ic.status    = 'closed'
+            ic.closed_at = timezone.now()
+            ic.closed_by = request.user
+            ic.save()
 
         return Response({
             'courseId':        course_id,
