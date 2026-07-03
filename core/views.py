@@ -1,6 +1,7 @@
 from django.contrib.auth import authenticate
 from django.db import models
 from django.db import IntegrityError
+from django.db import transaction
 from django.utils import timezone
 
 from rest_framework             import status
@@ -490,167 +491,184 @@ class InstructorCourseView(APIView):
                 errors.append({'index': idx, 'error': f'Department "{dept_id}" not found'})
                 continue
 
-            program = None
-            if program_id:
-                try:
-                    program = Program.objects.get(code__iexact=program_id)
-                except Program.DoesNotExist:
-                    pass
+            try:
+                with transaction.atomic():
+                    program = None
+                    if program_id:
+                        try:
+                            program = Program.objects.get(code__iexact=program_id)
+                        except Program.DoesNotExist:
+                            pass
 
-            # ── Upsert course header ──────────────────────────────────────────
-            course, _ = InstructorCourse.objects.update_or_create(
-                instructor=profile,
-                frontend_id=frontend_id,
-                defaults=dict(
-                    code                    = c.get('code', ''),
-                    title                   = c.get('title', ''),
-                    course_type             = c.get('courseType', 'Theory'),
-                    department              = department,
-                    program                 = program,
-                    credit_hours            = c.get('creditHours', 3),
-                    clo_count               = c.get('cloCount', 4),
-                    selected_grading_system = c.get('selectedGradingSystem', 'ready1'),
-                )
-            )
-
-            # ── Sync GradeScale ───────────────────────────────────────────────
-            custom_grading = c.get('customGradingSystem', [])
-            course.grade_scale.all().delete()
-            for order, entry in enumerate(custom_grading):
-                try:
-                    GradeScale.objects.create(
-                        course         = course,
-                        grade          = entry.get('grade', ''),
-                        min_percentage = float(entry.get('percentage', 0)),
-                        points         = float(entry.get('points', 0)),
-                        order          = order,
+                    # ── Upsert course header ──────────────────────────────────────────
+                    course, _ = InstructorCourse.objects.update_or_create(
+                        instructor=profile,
+                        frontend_id=frontend_id,
+                        defaults=dict(
+                            code                    = c.get('code', ''),
+                            title                   = c.get('title', ''),
+                            course_type             = c.get('courseType', 'Theory'),
+                            department              = department,
+                            program                 = program,
+                            credit_hours            = c.get('creditHours', 3),
+                            clo_count               = c.get('cloCount', 4),
+                            selected_grading_system = c.get('selectedGradingSystem', 'ready1'),
+                        )
                     )
-                except (ValueError, TypeError):
-                    pass
 
-            # ── Sync Categories + UnitItems ───────────────────────────────────
-            incoming_categories = c.get('categories', [])
-            incoming_units_data = c.get('unitsData', {})
-            incoming_cat_names  = [cat['name'] for cat in incoming_categories]
+                    # ── Sync GradeScale ───────────────────────────────────────────────
+                    custom_grading = c.get('customGradingSystem', [])
+                    course.grade_scale.all().delete()
+                    for order, entry in enumerate(custom_grading):
+                        try:
+                            GradeScale.objects.create(
+                                course         = course,
+                                grade          = entry.get('grade', ''),
+                                min_percentage = float(entry.get('percentage', 0)),
+                                points         = float(entry.get('points', 0)),
+                                order          = order,
+                            )
+                        except (ValueError, TypeError):
+                            pass
 
-            course.categories.exclude(name__in=incoming_cat_names).delete()
+                    # ── Sync Categories + UnitItems ───────────────────────────────────
+                    incoming_categories = c.get('categories', [])
+                    incoming_units_data = c.get('unitsData', {})
+                    incoming_cat_names  = [cat['name'] for cat in incoming_categories]
 
-            cat_obj_map  = {}   # cat_name -> MarksCategory instance
-            unit_obj_map = {}   # (cat_name, unit_no) -> UnitItem instance
+                    course.categories.exclude(name__in=incoming_cat_names).delete()
 
-            for order, cat_data in enumerate(incoming_categories):
-                cat_name = cat_data['name']
-                cat_obj, _ = MarksCategory.objects.update_or_create(
-                    course=course, name=cat_name,
-                    defaults={
-                        'percentage': cat_data.get('percentage', 0),
-                        'units':      cat_data.get('units', 0),
-                        'order':      order,
-                    }
-                )
-                cat_obj_map[cat_name] = cat_obj
+                    cat_obj_map  = {}   # cat_name -> MarksCategory instance
+                    unit_obj_map = {}   # (cat_name, unit_no) -> UnitItem instance
 
-                incoming_units    = incoming_units_data.get(cat_name, [])
-                incoming_unit_nos = [u['unitNo'] for u in incoming_units]
-                cat_obj.unit_items.exclude(unit_no__in=incoming_unit_nos).delete()
+                    for order, cat_data in enumerate(incoming_categories):
+                        cat_name = cat_data['name']
+                        cat_obj, _ = MarksCategory.objects.update_or_create(
+                            course=course, name=cat_name,
+                            defaults={
+                                'percentage': cat_data.get('percentage', 0),
+                                'units':      cat_data.get('units', 0),
+                                'order':      order,
+                            }
+                        )
+                        cat_obj_map[cat_name] = cat_obj
 
-                for unit_data in incoming_units:
-                    unit_no  = unit_data['unitNo']
-                    unit_obj, _ = UnitItem.objects.update_or_create(
-                        category=cat_obj,
-                        unit_no=unit_no,
-                        defaults={
-                            'passing':     unit_data.get('passing', 5),
-                            'total_marks': unit_data.get('totalMarks', 10),
-                            'weightage':   unit_data.get('weightage', 0),
-                            'mapped_clos': unit_data.get('mappedCLOs', []),
-                        }
-                    )
-                    unit_obj_map[(cat_name, unit_no)] = unit_obj
+                        incoming_units    = incoming_units_data.get(cat_name, [])
+                        incoming_unit_nos = [u['unitNo'] for u in incoming_units]
+                        cat_obj.unit_items.exclude(unit_no__in=incoming_unit_nos).delete()
 
-            # ── Sync OBE Questions ────────────────────────────────────────────
-            incoming_questions = c.get('obeQuestions', [])
-            incoming_q_ids     = [q['id'] for q in incoming_questions]
-            course.obe_questions.exclude(frontend_id__in=incoming_q_ids).delete()
+                        for unit_data in incoming_units:
+                            unit_no  = unit_data['unitNo']
+                            unit_obj, _ = UnitItem.objects.update_or_create(
+                                category=cat_obj,
+                                unit_no=unit_no,
+                                defaults={
+                                    'passing':     unit_data.get('passing', 5),
+                                    'total_marks': unit_data.get('totalMarks', 10),
+                                    'weightage':   unit_data.get('weightage', 0),
+                                    'mapped_clos': unit_data.get('mappedCLOs', []),
+                                }
+                            )
+                            unit_obj_map[(cat_name, unit_no)] = unit_obj
 
-            q_obj_map = {}   # frontend_id -> OBEQuestion
-            for order, q_data in enumerate(incoming_questions):
-                cat_name = q_data.get('categoryName', '')
-                unit_no  = q_data.get('unitNo', 0)
-                unit_obj = unit_obj_map.get((cat_name, unit_no))
+                    # ── Sync OBE Questions ────────────────────────────────────────────
+                    incoming_questions = c.get('obeQuestions', [])
+                    incoming_q_ids     = [q['id'] for q in incoming_questions]
+                    course.obe_questions.exclude(frontend_id__in=incoming_q_ids).delete()
 
-                q_obj, _ = OBEQuestion.objects.update_or_create(
-                    course=course,
-                    frontend_id=q_data['id'],
-                    defaults={
-                        'unit_item':     unit_obj,
-                        'category_name': cat_name,
-                        'unit_no':       unit_no,
-                        'question_name': q_data.get('questionName', ''),
-                        'max_marks':     q_data.get('maxMarks', 0),
-                        'mapped_clos':   q_data.get('mappedCLOs', []),
-                        'order':         order,
-                    }
-                )
-                q_obj_map[q_data['id']] = q_obj
-
-            # ── Sync Students ─────────────────────────────────────────────────
-            incoming_students = c.get('students', [])
-            incoming_reg_nos  = [s['regNo'] for s in incoming_students]
-            course.students.exclude(reg_no__in=incoming_reg_nos).delete()
-
-            for s_data in incoming_students:
-                reg_no     = s_data['regNo']
-                student, _ = CourseStudent.objects.update_or_create(
-                    course=course, reg_no=reg_no,
-                    defaults={'name': s_data.get('name', '')}
-                )
-
-                # ── Sync StudentMarks (now FK to UnitItem) ────────────────────
-                incoming_marks = s_data.get('marks', {})
-
-                # Build set of incoming unit_item PKs
-                incoming_unit_pks = set()
-                mark_rows = []
-
-                for key, score in incoming_marks.items():
-                    # key = '{categoryName}-{unitNo}'
-                    last_dash = key.rfind('-')
-                    try:
-                        cat_name = key[:last_dash]
-                        unit_no  = int(key[last_dash + 1:])
+                    q_obj_map = {}   # frontend_id -> OBEQuestion
+                    for order, q_data in enumerate(incoming_questions):
+                        cat_name = q_data.get('categoryName', '')
+                        unit_no  = q_data.get('unitNo', 0)
                         unit_obj = unit_obj_map.get((cat_name, unit_no))
-                        if unit_obj:
-                            incoming_unit_pks.add(unit_obj.pk)
-                            mark_rows.append((unit_obj, score))
-                    except (ValueError, IndexError):
-                        pass
 
-                # Delete marks for units no longer in payload
-                student.marks.exclude(unit_item__in=incoming_unit_pks).delete()
+                        q_obj, _ = OBEQuestion.objects.update_or_create(
+                            course=course,
+                            frontend_id=q_data['id'],
+                            defaults={
+                                'unit_item':     unit_obj,
+                                'category_name': cat_name,
+                                'unit_no':       unit_no,
+                                'question_name': q_data.get('questionName', ''),
+                                'max_marks':     q_data.get('maxMarks', 0),
+                                'mapped_clos':   q_data.get('mappedCLOs', []),
+                                'order':         order,
+                            }
+                        )
+                        q_obj_map[q_data['id']] = q_obj
 
-                for unit_obj, score in mark_rows:
-                    StudentMark.objects.update_or_create(
-                        student=student, unit_item=unit_obj,
-                        defaults={'score': score}
-                    )
+                    # ── Sync Students ─────────────────────────────────────────────────
+                    incoming_students = c.get('students', [])
+                    incoming_reg_nos  = [s['regNo'] for s in incoming_students]
+                    course.students.exclude(reg_no__in=incoming_reg_nos).delete()
 
-                # ── Sync OBE Marks ────────────────────────────────────────────
-            incoming_obe_marks = c.get('obeMarks', {})
-            for reg_no, q_marks in incoming_obe_marks.items():
-                try:
-                    student = CourseStudent.objects.get(course=course, reg_no=reg_no)
-                except CourseStudent.DoesNotExist:
-                    continue
-                for q_frontend_id, score in q_marks.items():
-                    q_obj = q_obj_map.get(q_frontend_id)
-                    if q_obj:
-                        OBEStudentMark.objects.update_or_create(
-                            student=student, question=q_obj,
-                            defaults={'score': score}
+                    for s_data in incoming_students:
+                        reg_no     = s_data['regNo']
+                        student, _ = CourseStudent.objects.update_or_create(
+                            course=course, reg_no=reg_no,
+                            defaults={'name': s_data.get('name', '')}
                         )
 
-            saved.append(course)
+                        # ── Sync StudentMarks (now FK to UnitItem) ────────────────────
+                        incoming_marks = s_data.get('marks', {})
+
+                        # Build set of incoming unit_item PKs
+                        incoming_unit_pks = set()
+                        mark_rows = []
+
+                        for key, score in incoming_marks.items():
+                            # key = '{categoryName}-{unitNo}'
+                            last_dash = key.rfind('-')
+                            try:
+                                cat_name = key[:last_dash]
+                                unit_no  = int(key[last_dash + 1:])
+                                unit_obj = unit_obj_map.get((cat_name, unit_no))
+                                if unit_obj:
+                                    incoming_unit_pks.add(unit_obj.pk)
+                                    mark_rows.append((unit_obj, score))
+                            except (ValueError, IndexError):
+                                pass
+
+                        # Delete marks for units no longer in payload
+                        student.marks.exclude(unit_item__in=incoming_unit_pks).delete()
+
+                        for unit_obj, score in mark_rows:
+                            StudentMark.objects.update_or_create(
+                                student=student, unit_item=unit_obj,
+                                defaults={'score': score}
+                            )
+
+                        # ── Sync OBE Marks ────────────────────────────────────────────
+                    incoming_obe_marks = c.get('obeMarks', {})
+                    for reg_no, q_marks in incoming_obe_marks.items():
+                        try:
+                            student = CourseStudent.objects.get(course=course, reg_no=reg_no)
+                        except CourseStudent.DoesNotExist:
+                            continue
+                        for q_frontend_id, score in q_marks.items():
+                            q_obj = q_obj_map.get(q_frontend_id)
+                            if q_obj:
+                                OBEStudentMark.objects.update_or_create(
+                                    student=student, question=q_obj,
+                                    defaults={'score': score}
+                                )
+
+                    saved.append(course)
+            except (KeyError, ValueError, TypeError) as e:
+                # Previously unhandled — a malformed entry anywhere in
+                # this course (missing required key, wrong type) crashed
+                # the ENTIRE batch save with a raw 500, silently discarding
+                # every other course already processed in the same request
+                # (including ones already committed to the DB before the
+                # crash point) with no useful error returned to the frontend.
+                # Reproduced before fixing: a second course missing a
+                # category's "name" key 500'd the whole request even though
+                # the first course in the same batch was well-formed.
+                errors.append({
+                    'index': idx,
+                    'error': f'Could not save course "{frontend_id}" — malformed data ({e.__class__.__name__}: {e})',
+                })
+                continue
 
         if errors and not saved:
             return Response({'errors': errors}, status=status.HTTP_400_BAD_REQUEST)
