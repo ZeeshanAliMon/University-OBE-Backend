@@ -131,8 +131,8 @@ class Command(BaseCommand):
                     defaults=dict(
                         email=email, first_name=first, last_name=last,
                         role='instructor',
-                        password=make_password(django_settings.DEFAULT_TEMP_PASSWORD),
-                        must_change_password=True, is_active=True,
+                        password=make_password('instpass123'),
+                        must_change_password=False, is_active=True,
                     )
                 )
                 profile, _ = InstructorProfile.objects.get_or_create(
@@ -350,7 +350,7 @@ class Command(BaseCommand):
    StudentMark rows        : {StudentMark.objects.count()}
    OBEStudentMark rows     : {OBEStudentMark.objects.count()}
 
-Instructor logins (password: {django_settings.DEFAULT_TEMP_PASSWORD}):
+Instructor logins (password: instpass123):
    ali.hassan@iqra.edu.pk    → INS-CS-001  (Computing)
    fatima.malik@iqra.edu.pk  → INS-CS-002  (Computing)
    hina.yousaf@iqra.edu.pk   → INS-CS-003  (Computing)  ← new
