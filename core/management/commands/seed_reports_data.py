@@ -2,6 +2,7 @@ import random
 
 from django.core.management.base import BaseCommand
 from django.contrib.auth.hashers import make_password
+from django.conf import settings as django_settings
 
 from core.models import (
     User, Department, Program, GraduateAttribute, Course,
@@ -97,7 +98,8 @@ class Command(BaseCommand):
                 username=email,
                 defaults=dict(
                     email=email, first_name=first, last_name=last, role='instructor',
-                    password=make_password('instpass123'), is_active=True,
+                    password=make_password(django_settings.DEFAULT_TEMP_PASSWORD),
+                    must_change_password=True, is_active=True,
                 )
             )
             profile, _ = InstructorProfile.objects.get_or_create(
@@ -254,7 +256,7 @@ class Command(BaseCommand):
         self.stdout.write(f'   StudentMark rows   : {StudentMark.objects.count()}')
         self.stdout.write(f'   OBEStudentMark rows: {OBEStudentMark.objects.count()}')
         self.stdout.write('\n  New instructor logins (password: instpass123):')
-        self.stdout.write('   hina.yousaf@iqra.edu.pk')
-        self.stdout.write('   omar.farooq@iqra.edu.pk')
+        self.stdout.write(f'   hina.yousaf@iqra.edu.pk  (password: {django_settings.DEFAULT_TEMP_PASSWORD})')
+        self.stdout.write(f'   omar.farooq@iqra.edu.pk   (password: {django_settings.DEFAULT_TEMP_PASSWORD})')
         self.stdout.write('\n  Try the reports now as qa.computing@iqra.edu.pk / qapass123')
         self.stdout.write('  or qa.business@iqra.edu.pk / qapass123 — programId=BSCS, BSAI, BSSE, BBA, BSAF')

@@ -2693,9 +2693,9 @@ class ChangePasswordView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if len(new_password) < 6:
+        if len(new_password) < 8:
             return Response(
-                {'error': 'New password must be at least 6 characters'},
+                {'error': 'New password must be at least 8 characters'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -2703,6 +2703,12 @@ class ChangePasswordView(APIView):
         if not user.check_password(current_password):
             return Response(
                 {'error': 'Current password is incorrect'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if current_password == new_password:
+            return Response(
+                {'error': 'New password must be different from current password'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
