@@ -1,262 +1,363 @@
-import random
+"""
+seed_reports_data — layers a full realistic university semester on top of `seed`.
 
+Run `python manage.py seed` first, then this command.
+Safe to re-run — fully idempotent (get_or_create everywhere).
+
+What this creates:
+  - 3 extra instructors (Computing x2, Business x1)
+  - 13 InstructorCourse records across Computing + Business
+  - 4 CLOs per course, mapped to department GAs
+  - Full marks structure: Assignments(3), Quizzes(3), Mid Term(1), Final(1)
+  - 25-30 students per course with realistic marks (ability-based spread)
+  - OBE question marks for CLO attainment reports
+  - All frontend_ids match InstructorCourseView formula exactly
+"""
+import random
 from django.core.management.base import BaseCommand
 from django.contrib.auth.hashers import make_password
 from django.conf import settings as django_settings
-
 from core.models import (
-    User, Department, Program, GraduateAttribute, Course,
-    InstructorProfile, CourseAssignment, InstructorCourse, CLO,
-    MarksCategory, UnitItem, OBEQuestion, AdmissionStudent,
-    CourseStudent, StudentMark, OBEStudentMark,
+    User, Department, Program, GraduateAttribute,
+    Course, InstructorProfile, CourseAssignment,
+    InstructorCourse, CLO, MarksCategory, UnitItem,
+    OBEQuestion, AdmissionStudent, CourseStudent,
+    StudentMark, OBEStudentMark, GradeScale,
 )
 
-# Fixed seed — reproducible data. Re-running this command produces the exact
-# same numbers, so reports look the same across resets instead of shifting
-# randomly every time someone runs `seed_reports_data` again.
 random.seed(42)
 
 FIRST_NAMES = [
-    'Ahmed', 'Ali', 'Hamza', 'Bilal', 'Usman', 'Zain', 'Hassan', 'Hussain',
-    'Omar', 'Faisal', 'Tariq', 'Imran', 'Kashif', 'Waqas', 'Adeel', 'Asad',
-    'Fatima', 'Ayesha', 'Zainab', 'Sana', 'Mahnoor', 'Hira', 'Iqra', 'Amna',
-    'Sadia', 'Rabia', 'Mariam', 'Nadia', 'Sana', 'Komal', 'Anum', 'Sidra',
-    'Zoya', 'Areeba', 'Eman', 'Laiba', 'Mishal', 'Noor', 'Rimsha', 'Sara',
+    'Ahmed','Ali','Hamza','Bilal','Usman','Zain','Hassan','Omar','Faisal',
+    'Tariq','Imran','Kashif','Waqas','Adeel','Asad','Kamran','Farhan','Talha',
+    'Fatima','Ayesha','Zainab','Sana','Mahnoor','Hira','Iqra','Amna','Sadia',
+    'Rabia','Mariam','Nadia','Anum','Sidra','Zoya','Areeba','Eman','Laiba',
+    'Mishal','Noor','Rimsha','Sara','Mehwish','Khadija','Hafsa','Maryam',
 ]
 LAST_NAMES = [
-    'Khan', 'Ali', 'Ahmed', 'Malik', 'Hussain', 'Raza', 'Tariq', 'Sheikh',
-    'Qureshi', 'Baig', 'Siddiqui', 'Farooq', 'Chaudhry', 'Abbasi', 'Butt',
-    'Awan', 'Javed', 'Iqbal', 'Rashid', 'Saeed', 'Aslam', 'Akhtar', 'Yousaf',
+    'Khan','Ali','Ahmed','Malik','Hussain','Raza','Tariq','Sheikh','Qureshi',
+    'Baig','Siddiqui','Farooq','Chaudhry','Abbasi','Butt','Awan','Javed',
+    'Iqbal','Rashid','Saeed','Aslam','Akhtar','Yousaf','Mirza','Hashmi',
 ]
 
-# (course_code, program_slug, dept_slug, instructor_employee_id, semester)
-COURSES_TO_ACTIVATE = [
-    ('CMC111', 'bscs', 'computing', 'INS-CS-001',  '1st'),
-    ('CMC112', 'bscs', 'computing', 'INS-CS-001',  '2nd'),
-    ('CMC251', 'bscs', 'computing', 'INS-CS-002',  '3rd'),
-    ('CMC331', 'bscs', 'computing', 'INS-CS-002',  '5th'),
-    ('CMC362', 'bscs', 'computing', 'INS-CS-003',  '6th'),
-    ('CMC381', 'bsai', 'computing', 'INS-CS-003',  '6th'),
-    ('CSC479', 'bsai', 'computing', 'INS-CS-001',  '7th'),
-    ('CMC241', 'bsse', 'computing', 'INS-CS-002',  '4th'),
+ACADEMIC_YEAR = 'Fall-2024'
+
+# (course_code, prog_slug, dept_slug, instructor_emp_id, semester)
+COURSES_TO_RUN = [
+    # Computing — Dr Ali (INS-CS-001)
+    ('CMC111', 'bscs', 'computing', 'INS-CS-001', '1st'),
+    ('CMC112', 'bscs', 'computing', 'INS-CS-001', '2nd'),
+    ('CMC251', 'bscs', 'computing', 'INS-CS-001', '3rd'),
+    # Computing — Dr Fatima (INS-CS-002)
+    ('CMC331', 'bscs', 'computing', 'INS-CS-002', '5th'),
+    ('CMC362', 'bscs', 'computing', 'INS-CS-002', '6th'),
+    ('CMC241', 'bsse', 'computing', 'INS-CS-002', '4th'),
+    # Computing — Dr Hina (INS-CS-003) — new instructor
+    ('CMC381', 'bsai', 'computing', 'INS-CS-003', '6th'),
+    ('CSC479', 'bsai', 'computing', 'INS-CS-003', '7th'),
+    ('CMC371', 'bscs', 'computing', 'INS-CS-003', '5th'),
+    # Business — Dr Usman (INS-BIZ-001)
     ('BUS101', 'bba',  'business',  'INS-BIZ-001', '1st'),
-    ('MKT111', 'bba',  'business',  'INS-BIZ-001', '2nd'),
+    ('MGT331', 'bba',  'business',  'INS-BIZ-001', '6th'),
+    # Business — Dr Omar (INS-BIZ-002) — new instructor
     ('ACC121', 'bba',  'business',  'INS-BIZ-002', '2nd'),
-    ('MGT331', 'bba',  'business',  'INS-BIZ-002', '6th'),
-    ('FIN311', 'bsaf', 'business',  'INS-BIZ-001', '5th'),
+    ('FIN311', 'bsaf', 'business',  'INS-BIZ-002', '5th'),
 ]
 
 NEW_INSTRUCTORS = [
-    # username, first, last, email, dept_slug, employee_id, designation
-    ('dr_hina', 'Hina', 'Yousaf', 'hina.yousaf@iqra.edu.pk', 'computing', 'INS-CS-003', 'Assistant Professor'),
-    ('dr_omar', 'Omar', 'Farooq', 'omar.farooq@iqra.edu.pk', 'business',  'INS-BIZ-002', 'Lecturer'),
+    # email, first, last, dept_slug, emp_id, designation
+    ('hina.yousaf@iqra.edu.pk',  'Hina', 'Yousaf', 'computing', 'INS-CS-003',  'Assistant Professor'),
+    ('omar.farooq@iqra.edu.pk',  'Omar', 'Farooq', 'business',  'INS-BIZ-002', 'Lecturer'),
 ]
 
-ACADEMIC_YEARS = ['Fall-2024', 'Spring-2025', 'Fall-2025']
-
 CATEGORY_DEFS = [
-    # name, percentage, units, max_marks_per_unit
-    ('Quizzes',     15, 3, 10),
+    # (name, percentage, units, total_marks_each)
     ('Assignments', 20, 3, 10),
+    ('Quizzes',     15, 3, 10),
     ('Mid Term',    25, 1, 30),
     ('Final',       40, 1, 50),
 ]
 
+# Students per program pool — each entry is (reg_no_prefix, dept_slug)
+PROGRAM_POOLS = {
+    'bscs': ('FA24-BSCS', 'computing'),
+    'bsse': ('FA24-BSSE', 'computing'),
+    'bsai': ('FA24-BSAI', 'computing'),
+    'bba':  ('FA24-BBA',  'business'),
+    'bsaf': ('FA24-BSAF', 'business'),
+}
+
+
+def _name():
+    return f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
+
+
+def _ability():
+    """Returns a float 0-1 skewed toward 0.6-0.85 (realistic university spread)."""
+    return min(1.0, max(0.1, random.betavariate(5, 2)))
+
 
 class Command(BaseCommand):
     help = (
-        'Layers realistic bulk data on top of `seed`: many more instructor '
-        'courses, CLOs, students, and marks, so PO/GA attainment, cohort '
-        'comparison, instructor performance, and gap analysis reports have '
-        'enough real data to look meaningful instead of flat/trivial. '
-        'Idempotent — safe to re-run; run `seed` first.'
+        'Layers a full realistic semester on top of `seed`. '
+        'Creates instructors, courses, 25-30 students each with '
+        'complete marks and OBE data. Run `seed` first. Idempotent.'
     )
 
     def handle(self, *args, **kwargs):
         if not Department.objects.exists():
             self.stdout.write(self.style.ERROR(
-                'No departments found — run `python manage.py seed` first.'
+                'No departments — run `python manage.py seed` first.'
             ))
             return
 
-        self.stdout.write('🌱  Adding realistic report data...')
+        self.stdout.write('🌱  Seeding realistic report data...\n')
 
-        depts = {d.dept_id: d for d in Department.objects.all()}
-        progs = {p.code.lower(): p for p in Program.objects.all()}
-        gas_by_dept = {}
+        depts    = {d.dept_id: d for d in Department.objects.all()}
+        progs    = {p.code.lower(): p for p in Program.objects.all()}
+        courses  = {c.code: c for c in Course.objects.all()}
+        gas_dept = {}
         for ga in GraduateAttribute.objects.select_related('department'):
-            gas_by_dept.setdefault(ga.department.dept_id, []).append(ga)
+            gas_dept.setdefault(ga.department.dept_id, []).append(ga)
 
-        # ── Extra instructors ────────────────────────────────────────────────
-        # Keyed by employee_id, not username — seed.py sets username=email,
-        # not a friendly handle, so that's the only reliable stable key here.
-        instructors = {}
-        for p in InstructorProfile.objects.select_related('user'):
-            instructors[p.employee_id] = p
-        for username, first, last, email, dept_slug, emp_id, designation in NEW_INSTRUCTORS:
-            user, created = User.objects.get_or_create(
-                username=email,
-                defaults=dict(
-                    email=email, first_name=first, last_name=last, role='instructor',
-                    password=make_password(django_settings.DEFAULT_TEMP_PASSWORD),
-                    must_change_password=True, is_active=True,
-                )
-            )
-            profile, _ = InstructorProfile.objects.get_or_create(
-                user=user,
-                defaults=dict(department=depts[dept_slug], employee_id=emp_id, designation=designation)
-            )
-            instructors[emp_id] = profile
-        self.stdout.write(f'  ✓ Instructors ({len(instructors)} total, {len(NEW_INSTRUCTORS)} new)')
+        # ── Ensure instructors exist ──────────────────────────────────────────
+        instructors = {p.employee_id: p
+                       for p in InstructorProfile.objects.select_related('user')}
 
-        # ── Bulk admission students, spread across programs ─────────────────
-        # Generous pool per program so each activated course can enroll a
-        # realistic class size (20-30) without reusing the same few names
-        # everywhere.
-        students_by_program = {}
-        reg_counter = 1000  # starts well above the base seed's reg_nos
-        for code, prog_slug, dept_slug, _instr, _sem in COURSES_TO_ACTIVATE:
-            if prog_slug in students_by_program:
-                continue
-            prog = progs.get(prog_slug)
-            if not prog:
-                continue
-            batch_students = []
-            for _ in range(35):
-                reg_counter += 1
-                name = f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
-                reg_no = f"BLK-{prog_slug.upper()}-{reg_counter:04d}"
-                admission, _ = AdmissionStudent.objects.get_or_create(
-                    reg_no=reg_no,
+        for email, first, last, dept_slug, emp_id, designation in NEW_INSTRUCTORS:
+            if emp_id not in instructors:
+                user, _ = User.objects.get_or_create(
+                    username=email,
                     defaults=dict(
-                        name=name, department=depts[dept_slug], program=prog,
-                        batch=random.choice(['Fall', 'Spring']),
-                        semester=random.choice(['1st', '2nd', '3rd', '4th', '5th', '6th']),
+                        email=email, first_name=first, last_name=last,
+                        role='instructor',
+                        password=make_password(django_settings.DEFAULT_TEMP_PASSWORD),
+                        must_change_password=True, is_active=True,
                     )
                 )
-                # Per-student "ability" — drives every mark they get across
-                # every course, so reports show a believable spread (some
-                # consistently strong, some weak, most in the middle) instead
-                # of pure random noise with no underlying signal.
-                ability = random.betavariate(5, 2)  # skews toward 0.6-0.9, long tail down
-                batch_students.append((reg_no, name, ability))
-            students_by_program[prog_slug] = batch_students
-        total_students = sum(len(v) for v in students_by_program.values())
-        self.stdout.write(f'  ✓ Admission Students (+{total_students} across {len(students_by_program)} programs)')
+                profile, _ = InstructorProfile.objects.get_or_create(
+                    user=user,
+                    defaults=dict(
+                        department=depts[dept_slug],
+                        employee_id=emp_id,
+                        designation=designation,
+                    )
+                )
+                instructors[emp_id] = profile
+                self.stdout.write(f'  + Instructor: {first} {last} ({emp_id})')
 
-        # ── Activate courses ─────────────────────────────────────────────────
+        self.stdout.write(f'  ✓ Instructors ready ({len(instructors)} total)\n')
+
+        # ── Build student pools per program ───────────────────────────────────
+        # 35 students per program — enough to give every course a different
+        # 25-30 student subset so rosters look distinct.
+        student_pools = {}
+        reg_counter   = 2000
+        for prog_slug, (prefix, dept_slug) in PROGRAM_POOLS.items():
+            if prog_slug in student_pools:
+                continue
+            pool = []
+            prog = progs.get(prog_slug)
+            dept = depts.get(dept_slug)
+            if not prog or not dept:
+                continue
+            for _ in range(35):
+                reg_counter += 1
+                reg_no = f"{prefix}-{reg_counter:04d}"
+                name   = _name()
+                AdmissionStudent.objects.get_or_create(
+                    reg_no=reg_no,
+                    defaults=dict(
+                        name=name, department=dept, program=prog,
+                        batch=random.choice(['Fall', 'Spring']),
+                        semester=random.choice(['1st','2nd','3rd','4th','5th','6th']),
+                    )
+                )
+                pool.append((reg_no, name, _ability()))
+            student_pools[prog_slug] = pool
+
+        total_students = sum(len(v) for v in student_pools.values())
+        self.stdout.write(f'  ✓ Student pools: {total_students} admission students across '
+                          f'{len(student_pools)} programs\n')
+
+        # ── Create InstructorCourses ──────────────────────────────────────────
         courses_created = 0
-        marks_created = 0
-        for code, prog_slug, dept_slug, instr_key, semester in COURSES_TO_ACTIVATE:
-            course = Course.objects.filter(code=code).first()
-            program = progs.get(prog_slug)
-            profile = instructors.get(instr_key)
-            if not (course and program and profile):
+        students_enrolled = 0
+        marks_written = 0
+
+        for course_code, prog_slug, dept_slug, emp_id, semester in COURSES_TO_RUN:
+            course   = courses.get(course_code)
+            program  = progs.get(prog_slug)
+            profile  = instructors.get(emp_id)
+            dept     = depts.get(dept_slug)
+
+            if not all([course, program, profile, dept]):
                 self.stdout.write(self.style.WARNING(
-                    f'  ⚠ skipping {code} — missing course/program/instructor'
+                    f'  ⚠ Skipping {course_code} — missing '
+                    f'course={bool(course)} prog={bool(program)} '
+                    f'instructor={bool(profile)}'
                 ))
                 continue
 
-            academic_year = random.choice(ACADEMIC_YEARS)
-            dept = depts[dept_slug]
+            # frontend_id must match InstructorCourseView formula exactly
+            prog_suffix = program.code.lower()
+            term_suffix = f"-{ACADEMIC_YEAR.lower().replace(' ', '')}"
+            frontend_id = (
+                f"course-assigned-{course_code}-{emp_id}"
+                f"-{prog_suffix}{term_suffix}"
+            )
 
             CourseAssignment.objects.get_or_create(
-                instructor=profile, course=course, program=program,
-                academic_year=academic_year,
+                instructor=profile, course=course,
+                program=program, academic_year=ACADEMIC_YEAR,
             )
-
-            prog_suffix = program.code.lower()
-            term_suffix = f"-{academic_year.lower().replace(' ', '')}"
-            frontend_id = f"course-assigned-{code}-{profile.employee_id}-{prog_suffix}{term_suffix}"
 
             ic, ic_created = InstructorCourse.objects.get_or_create(
-                instructor=profile, frontend_id=frontend_id,
+                instructor=profile,
+                frontend_id=frontend_id,
                 defaults=dict(
-                    code=code, title=course.title, course_type='Theory',
-                    department=dept, program=program, credit_hours=course.credit_hours or 3,
-                    clo_count=4, selected_grading_system='ready1',
-                    semester=semester, academic_year=academic_year,
+                    code=course_code,
+                    title=course.title,
+                    course_type='Theory',
+                    department=dept,
+                    program=program,
+                    credit_hours=course.credit_hours or 3,
+                    clo_count=4,
+                    selected_grading_system='ready1',
+                    semester=semester,
+                    academic_year=ACADEMIC_YEAR,
                 )
             )
+
             if not ic_created:
-                continue  # already generated in a previous run — skip cleanly
+                self.stdout.write(f'  → {course_code} ({emp_id}) already exists, skipping')
+                continue
+
             courses_created += 1
 
-            # ── CLOs, mapped to this department's GAs ────────────────────────
-            dept_gas = gas_by_dept.get(dept_slug, [])
+            # ── Grade scale ───────────────────────────────────────────────────
+            for order, (grade, min_pct, pts) in enumerate([
+                ('A',90,4.0),('A-',85,3.7),('B+',80,3.3),('B',75,3.0),
+                ('B-',70,2.7),('C+',65,2.3),('C',60,2.0),('C-',55,1.7),
+                ('D',50,1.0),('F',0,0.0),
+            ]):
+                GradeScale.objects.create(
+                    course=ic, grade=grade,
+                    min_percentage=min_pct, points=pts, order=order,
+                )
+
+            # ── CLOs ──────────────────────────────────────────────────────────
+            dept_gas = gas_dept.get(dept_slug, [])
             chosen_gas = random.sample(dept_gas, min(4, len(dept_gas))) if dept_gas else []
             clos = []
-            for i, ga in enumerate(chosen_gas, start=1):
+            clo_descriptions = [
+                f'Understand and explain core concepts of {course.title}.',
+                f'Apply principles of {course.title} to solve practical problems.',
+                f'Analyse complex scenarios in the context of {course.title}.',
+                f'Evaluate and synthesize solutions using {course.title} techniques.',
+            ]
+            for i, ga in enumerate(chosen_gas[:4], start=1):
                 clo = CLO.objects.create(
-                    course=ic, code=f'CLO-{i}',
-                    description=f'Apply core concepts of {course.title} relevant to {ga.name.lower()}.',
-                    mapped_ga=ga, order=i,
+                    course=ic,
+                    code=f'CLO-{i}',
+                    description=clo_descriptions[i - 1],
+                    mapped_ga=ga,
+                    order=i,
                 )
                 clos.append(clo)
-            clo_codes = [c.code for c in clos] or ['CLO-1']
 
-            # ── Categories, units, questions ─────────────────────────────────
-            unit_map = {}
-            question_defs = []  # (category, unit_no, max_marks, mapped_clos)
-            for order, (cat_name, pct, units, max_marks) in enumerate(CATEGORY_DEFS):
-                cat = MarksCategory.objects.create(course=ic, name=cat_name, percentage=pct, units=units, order=order)
-                for unit_no in range(1, units + 1):
+            clo_codes = [c.code for c in clos] if clos else ['CLO-1']
+
+            # ── Marks categories + unit items ─────────────────────────────────
+            unit_map = {}   # (cat_name, unit_no) → UnitItem
+            q_map    = {}   # (cat_name, unit_no) → OBEQuestion
+
+            for cat_order, (cat_name, pct, n_units, max_per_unit) in enumerate(CATEGORY_DEFS):
+                cat = MarksCategory.objects.create(
+                    course=ic, name=cat_name,
+                    percentage=pct, units=n_units, order=cat_order,
+                )
+                unit_weight = round(100.0 / n_units, 1) if n_units else 100.0
+                for unit_no in range(1, n_units + 1):
                     mapped = random.sample(clo_codes, k=min(2, len(clo_codes)))
-                    u = UnitItem.objects.create(
-                        category=cat, unit_no=unit_no, total_marks=max_marks,
-                        passing=max_marks // 2, weightage=round(100 / units, 1),
+                    ui = UnitItem.objects.create(
+                        category=cat,
+                        unit_no=unit_no,
+                        total_marks=max_per_unit,
+                        passing=max_per_unit // 2,
+                        weightage=unit_weight,
                         mapped_clos=mapped,
                     )
-                    unit_map[(cat_name, unit_no)] = u
-                    question_defs.append((cat_name, unit_no, max_marks, mapped))
+                    unit_map[(cat_name, unit_no)] = ui
 
-            q_map = {}
-            for i, (cat_name, unit_no, max_marks, mapped) in enumerate(question_defs):
-                q = OBEQuestion.objects.create(
-                    course=ic, frontend_id=f'{frontend_id}-q{i}',
-                    unit_item=unit_map[(cat_name, unit_no)],
-                    category_name=cat_name, unit_no=unit_no,
-                    question_name=f'{cat_name} {unit_no}', max_marks=max_marks,
-                    mapped_clos=mapped, order=i,
-                )
-                q_map[(cat_name, unit_no)] = q
+                    # One OBE question per unit item
+                    q = OBEQuestion.objects.create(
+                        course=ic,
+                        frontend_id=f'{frontend_id}-{cat_name.lower().replace(" ","_")}-u{unit_no}',
+                        unit_item=ui,
+                        category_name=cat_name,
+                        unit_no=unit_no,
+                        question_name=f'{cat_name} Unit {unit_no}',
+                        max_marks=max_per_unit,
+                        mapped_clos=mapped,
+                        order=cat_order * 10 + unit_no,
+                    )
+                    q_map[(cat_name, unit_no)] = q
 
-            # ── Enroll students and generate marks ───────────────────────────
-            pool = students_by_program.get(prog_slug, [])
-            class_size = min(random.randint(20, 30), len(pool))
-            roster = random.sample(pool, class_size) if pool else []
+            # ── Enroll students and write marks ───────────────────────────────
+            pool      = student_pools.get(prog_slug, [])
+            class_sz  = min(random.randint(25, 30), len(pool))
+            roster    = random.sample(pool, class_sz) if pool else []
+
             for reg_no, name, ability in roster:
-                cs = CourseStudent.objects.create(course=ic, reg_no=reg_no, name=name)
-                for (cat_name, unit_no), unit in unit_map.items():
-                    # Score = student's ability × max marks, plus per-item
-                    # noise, clipped to a valid range — this is what gives
-                    # attainment reports a realistic non-uniform spread
-                    # instead of every student scoring identically.
-                    noise = random.uniform(-0.15, 0.1)
-                    frac = max(0.05, min(1.0, ability + noise))
-                    score = round(unit.total_marks * frac, 1)
-                    StudentMark.objects.create(student=cs, unit_item=unit, score=score)
-                    marks_created += 1
+                cs = CourseStudent.objects.create(
+                    course=ic, reg_no=reg_no, name=name,
+                )
+                students_enrolled += 1
 
-                    q = q_map.get((cat_name, unit_no))
-                    if q:
-                        q_noise = random.uniform(-0.15, 0.1)
-                        q_frac = max(0.05, min(1.0, ability + q_noise))
-                        q_score = round(q.max_marks * q_frac, 1)
-                        OBEStudentMark.objects.create(student=cs, question=q, score=q_score)
-                        marks_created += 1
+                for (cat_name, unit_no), ui in unit_map.items():
+                    noise = random.uniform(-0.12, 0.08)
+                    frac  = max(0.05, min(1.0, ability + noise))
+                    score = round(ui.total_marks * frac, 1)
+                    StudentMark.objects.create(
+                        student=cs, unit_item=ui, score=score,
+                    )
+                    marks_written += 1
 
-        self.stdout.write(f'  ✓ Instructor Courses activated (+{courses_created})')
-        self.stdout.write(f'  ✓ Marks generated (+{marks_created} rows)')
+                for (cat_name, unit_no), q in q_map.items():
+                    noise  = random.uniform(-0.12, 0.08)
+                    frac   = max(0.05, min(1.0, ability + noise))
+                    q_score = round(q.max_marks * frac, 1)
+                    OBEStudentMark.objects.create(
+                        student=cs, question=q, score=q_score,
+                    )
+                    marks_written += 1
 
-        self.stdout.write(self.style.SUCCESS('\n✅  Report data ready!'))
-        self.stdout.write(f'   Instructor Courses : {InstructorCourse.objects.count()}')
-        self.stdout.write(f'   Admission Students : {AdmissionStudent.objects.count()}')
-        self.stdout.write(f'   CourseStudent rows : {CourseStudent.objects.count()}')
-        self.stdout.write(f'   StudentMark rows   : {StudentMark.objects.count()}')
-        self.stdout.write(f'   OBEStudentMark rows: {OBEStudentMark.objects.count()}')
-        self.stdout.write('\n  New instructor logins (password: instpass123):')
-        self.stdout.write(f'   hina.yousaf@iqra.edu.pk  (password: {django_settings.DEFAULT_TEMP_PASSWORD})')
-        self.stdout.write(f'   omar.farooq@iqra.edu.pk   (password: {django_settings.DEFAULT_TEMP_PASSWORD})')
-        self.stdout.write('\n  Try the reports now as qa.computing@iqra.edu.pk / qapass123')
-        self.stdout.write('  or qa.business@iqra.edu.pk / qapass123 — programId=BSCS, BSAI, BSSE, BBA, BSAF')
+            self.stdout.write(
+                f'  ✓ {course_code:<10} instructor={emp_id:<12} '
+                f'students={len(roster):>2}  marks={len(roster) * (len(unit_map) + len(q_map))}'
+            )
+
+        self.stdout.write(self.style.SUCCESS(f'''
+✅  Done!
+   New InstructorCourses : {courses_created}
+   Students enrolled     : {students_enrolled}
+   Mark rows written     : {marks_written}
+
+   InstructorCourses total : {InstructorCourse.objects.count()}
+   AdmissionStudents total : {AdmissionStudent.objects.count()}
+   CourseStudent rows      : {CourseStudent.objects.count()}
+   StudentMark rows        : {StudentMark.objects.count()}
+   OBEStudentMark rows     : {OBEStudentMark.objects.count()}
+
+Instructor logins (password: {django_settings.DEFAULT_TEMP_PASSWORD}):
+   ali.hassan@iqra.edu.pk    → INS-CS-001  (Computing)
+   fatima.malik@iqra.edu.pk  → INS-CS-002  (Computing)
+   hina.yousaf@iqra.edu.pk   → INS-CS-003  (Computing)  ← new
+   usman.sheikh@iqra.edu.pk  → INS-BIZ-001 (Business)
+   omar.farooq@iqra.edu.pk   → INS-BIZ-002 (Business)  ← new
+
+QA reports:
+   qa.computing@iqra.edu.pk / qapass123  → programId=bscs, bsse, bsai
+   qa.business@iqra.edu.pk  / qapass123  → programId=bba, bsaf
+'''))
