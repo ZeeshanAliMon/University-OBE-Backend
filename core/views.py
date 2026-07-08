@@ -373,7 +373,15 @@ class CourseListView(APIView):
 
 class CourseDetailView(APIView):
     def get_permissions(self):
-        return [IsAuthenticated()] if self.request.method == 'GET' else [IsQA()]
+        if self.request.method == 'GET':
+            return [IsAuthenticated()]
+        if self.request.method == 'DELETE':
+            # Dept admin can delete courses from their own department.
+            # Frontend (DeptAdminDashboard) already calls deleteCourse() —
+            # this was the only thing blocking it from working.
+            # PATCH (editing course title/mappedGAs etc.) stays QA-only.
+            return [IsDeptAdminOrQA()]
+        return [IsQA()]
 
     def _get(self, slug):
         try:
@@ -406,6 +414,17 @@ class CourseDetailView(APIView):
         obj = self._get(slug)
         if not obj:
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Dept admin can only delete courses belonging to their own department.
+        # QA (and admin role) can delete any course.
+        if request.user.role == 'dept_admin':
+            admin_dept = get_admin_department(request.user)
+            if not admin_dept or obj.department_id != admin_dept.id:
+                return Response(
+                    {'error': 'You can only delete courses in your own department.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         obj.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
