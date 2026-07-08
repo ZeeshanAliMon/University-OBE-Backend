@@ -67,6 +67,7 @@ urlpatterns = [
 
     path('instructor/profile/', InstructorProfileView.as_view(), name='instructor_profile'),
     path('instructor/courses/', InstructorCourseView.as_view(),  name='instructor_courses'),
+    path('instructor/courses/<str:frontend_id>/', InstructorCourseView.as_view(), name='instructor_course_detail'),
 
     # CLO management per instructor course
     path('instructor/courses/<str:frontend_id>/clos/',           CLOListView.as_view(),   name='clo_list'),
