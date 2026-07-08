@@ -947,6 +947,18 @@ class AdmissionStudentDetailView(APIView):
         student = self._get(reg_no)
         if not student:
             return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # AdmissionStudent has no FK to User — they're linked only by the
+        # reg_no string. Without this extra step, deleting the AdmissionStudent
+        # row leaves the User account and Student login profile intact, meaning
+        # the student can still log in after being "deleted" from the registry.
+        # Deleting the User cascades to Student automatically (Student.user is
+        # OneToOneField with on_delete=CASCADE), so we only need to delete User.
+        from .models import Student as StudentProfile
+        linked = StudentProfile.objects.filter(reg_no=reg_no).select_related('user').first()
+        if linked:
+            linked.user.delete()  # cascades → Student profile deleted automatically
+
         student.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
