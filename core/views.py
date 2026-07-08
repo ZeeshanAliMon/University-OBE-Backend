@@ -721,9 +721,44 @@ class InstructorCourseView(APIView):
             return Response({'courses': result, 'errors': errors}, status=status.HTTP_207_MULTI_STATUS)
         return Response(result, status=status.HTTP_200_OK)
 
+    def delete(self, request, frontend_id=None):
+        """
+        DELETE /api/instructor/courses/<frontend_id>/
+        Instructor removes one of their own courses (only if it has no
+        students enrolled and no marks entered — if it does, dept admin
+        must unassign the course instead, which preserves gradebook data).
+        """
+        if not frontend_id:
+            return Response({'error': 'frontend_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        profile = get_instructor_profile(request.user)
+        if not profile:
+            return Response({'error': 'Instructor profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            ic = InstructorCourse.objects.get(frontend_id=frontend_id, instructor=profile)
+        except InstructorCourse.DoesNotExist:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if ic.status == 'closed':
+            return Response(
+                {'error': 'Cannot delete a closed/finalized course.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Don't delete courses that have real marks data — preserves
+        # gradebook integrity even if the instructor wants to remove it.
+        if ic.students.exists():
+            return Response(
+                {'error': 'Cannot delete a course with enrolled students. Ask your dept admin to unassign it instead.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        ic.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-# ─── Instructor Profile
+# ─── Instructor Profile ────────────────────────────────────────────────────────
 class InstructorProfileView(APIView):
     """
     GET /api/instructor/profile/
