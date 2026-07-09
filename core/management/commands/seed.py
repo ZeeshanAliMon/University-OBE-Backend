@@ -316,19 +316,23 @@ class Command(BaseCommand):
         ]
 
         for slug, code, title, ctype, ga_ids in cs_courses:
-            c = Course.objects.create(code=code, title=title, type=ctype,
-                                      program=progs['bscs'], department=depts['computing'], credit_hours=3)
+            c, _ = Course.objects.get_or_create(
+                code=code, program=progs['bscs'], department=depts['computing'],
+                defaults=dict(title=title, type=ctype, credit_hours=3)
+            )
             c.mapped_gas.set([all_gas[g] for g in ga_ids if g in all_gas])
 
         for slug, code, title, ctype, ga_ids in biz_courses:
-            c = Course.objects.create(code=code, title=title, type=ctype,
-                                      program=progs['bba'], department=depts['business'], credit_hours=3)
+            c, _ = Course.objects.get_or_create(
+                code=code, program=progs['bba'], department=depts['business'],
+                defaults=dict(title=title, type=ctype, credit_hours=3)
+            )
             c.mapped_gas.set([all_gas[g] for g in ga_ids if g in all_gas])
 
         # Mon test course — Health department
-        mon_course = Course.objects.create(
-            code='MON101', title='Mon Course', type='core',
-            program=progs['bs_bt'], department=depts['health'], credit_hours=3
+        mon_course, _ = Course.objects.get_or_create(
+            code='MON101', program=progs['bs_bt'], department=depts['health'],
+            defaults=dict(title='Mon Course', type='core', credit_hours=3)
         )
         if 'GA-H1' in all_gas:
             mon_course.mapped_gas.set([all_gas['GA-H1']])
