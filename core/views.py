@@ -2827,7 +2827,7 @@ class StudentEnrollmentView(APIView):
             return Response({'error': 'students must be a list'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            ic = InstructorCourse.objects.get(frontend_id=course_id)
+            ic = InstructorCourse.objects.get(frontend_id__iexact=course_id)
         except InstructorCourse.DoesNotExist:
             return Response(
                 {'error': f'Course "{course_id}" not found'},
