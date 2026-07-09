@@ -213,7 +213,13 @@ class Student(models.Model):
 class Course(models.Model):
     COURSE_TYPE_CHOICES = [('core', 'Core'), ('elective', 'Elective')]
 
-    code         = models.CharField(max_length=30, unique=True)
+    # unique=True removed — same course code can exist across multiple programs
+    # within a department (e.g. CMC371 taught in both BSCS and BSSE).
+    # Uniqueness is now enforced at the (code, department) level via
+    # unique_together below — you can't add the same code twice in the same
+    # department, but the same code can appear in different programs of that
+    # same department as separate catalog entries.
+    code         = models.CharField(max_length=30)
     title        = models.CharField(max_length=200)
     type         = models.CharField(max_length=10, choices=COURSE_TYPE_CHOICES, default='core')
     department   = models.ForeignKey(
@@ -234,6 +240,7 @@ class Course(models.Model):
         verbose_name        = 'Course'
         verbose_name_plural = 'Courses'
         ordering            = ['code']
+        unique_together     = [('code', 'department', 'program')]
 
     def __str__(self):
         return f"{self.code} — {self.title}"
