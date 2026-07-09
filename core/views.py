@@ -1100,10 +1100,38 @@ class CourseAssignmentView(APIView):
             instructor=instructor, course=course, program=program, academic_year=academic_year,
             defaults={'assigned_by': dept_admin}
         )
+
+        # Eagerly create the InstructorCourse stub right now so enrollment
+        # can fire immediately after assignment without waiting for the
+        # instructor to log in (which is when the stub was previously created
+        # lazily). Without this, enrollment 404s in the same request cycle.
+        prog_suffix = program.code.lower() if program else 'all'
+        term_suffix = f'-{academic_year.lower().replace(" ", "")}' if academic_year else ''
+        frontend_id = f'course-assigned-{course.code}-{instructor.employee_id}-{prog_suffix}{term_suffix}'
+
+        InstructorCourse.objects.get_or_create(
+            instructor=instructor,
+            frontend_id=frontend_id,
+            defaults=dict(
+                code=course.code,
+                title=course.title,
+                course_type='Theory',
+                department=course.department,
+                program=program,
+                credit_hours=course.credit_hours or 3,
+                clo_count=0,
+                selected_grading_system='ready1',
+                semester='',
+                academic_year=academic_year,
+            )
+        )
+
         return Response({
-            'teacherId':  assignment.instructor.employee_id,
-            'courseCode': assignment.course.code,
-            'programId':  assignment.program.code.lower() if assignment.program else None,
+            'teacherId':    assignment.instructor.employee_id,
+            'courseCode':   assignment.course.code,
+            'programId':    assignment.program.code.lower() if assignment.program else None,
+            'academicYear': academic_year,
+            'courseId':     frontend_id,
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
     def delete(self, request):
