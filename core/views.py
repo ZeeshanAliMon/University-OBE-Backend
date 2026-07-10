@@ -384,7 +384,7 @@ class CourseDetailView(APIView):
             # this was the only thing blocking it from working.
             # PATCH (editing course title/mappedGAs etc.) stays QA-only.
             return [IsDeptAdminOrQA()]
-        return [IsQA()]
+        return [IsDeptAdminOrQA()]
 
     def _get(self, request, slug):
         
@@ -432,7 +432,7 @@ class CourseDetailView(APIView):
         s = CourseSerializer(obj, data=data, partial=True)
         if s.is_valid():
             s.save()
-            return Response(CourseSerializer(self._get(request, slug)).data)
+            return Response(CourseSerializer(self._get(request,slug)).data)
         return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, slug):
