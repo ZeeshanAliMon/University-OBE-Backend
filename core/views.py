@@ -29,7 +29,7 @@ from .serializers import (
     CourseWriteSerializer, CLOWriteSerializer,
     TeacherWriteSerializer, StudentWriteSerializer,
 )
-from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin, IsDeptAdminOrQA
+from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin, IsDeptAdminOrQA, IsStaffReport
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -346,6 +346,15 @@ class CourseListView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # SECURITY: dept_admin can only create courses in their own department
+        if request.user.role == 'dept_admin':
+            admin_dept = get_admin_department(request.user)
+            if not admin_dept or department.id != admin_dept.id:
+                return Response(
+                    {'error': 'You can only create courses in your own department.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         program = None
         if program_id:
             try:
@@ -411,6 +420,16 @@ class CourseDetailView(APIView):
         obj = self._get(request, slug)
         if not obj:
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # SECURITY: dept_admin can only edit courses in their own department
+        if request.user.role == 'dept_admin':
+            admin_dept = get_admin_department(request.user)
+            if not admin_dept or obj.department_id != admin_dept.id:
+                return Response(
+                    {'error': 'You can only edit courses in your own department.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         data = request.data.copy()
         if 'mappedGAs' in data:
             data['mappedGAs_write'] = data.pop('mappedGAs')
@@ -1733,7 +1752,19 @@ class StudentGAAttainmentView(APIView):
 
     def get(self, request):
         reg_no = request.query_params.get('regNo', '').strip()
-        if not reg_no:
+
+        # SECURITY: force student's own regNo — any logged-in student could
+        # read another student's GA attainment by passing a different regNo.
+        # regNo follows a predictable pattern (FA22-BSCS-0012).
+        if request.user.role == 'student':
+            try:
+                reg_no = request.user.student_profile.reg_no
+            except Exception:
+                return Response(
+                    {'error': 'Student profile not found'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        elif not reg_no:
             return Response({'error': 'regNo is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         admission_student = AdmissionStudent.objects.filter(
@@ -1979,7 +2010,19 @@ class StudentSummaryView(APIView):
 
     def get(self, request):
         reg_no = request.query_params.get('regNo', '').strip()
-        if not reg_no:
+
+        # SECURITY: force student's own regNo — any logged-in student could
+        # read another student's GA attainment by passing a different regNo.
+        # regNo follows a predictable pattern (FA22-BSCS-0012).
+        if request.user.role == 'student':
+            try:
+                reg_no = request.user.student_profile.reg_no
+            except Exception:
+                return Response(
+                    {'error': 'Student profile not found'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        elif not reg_no:
             return Response({'error': 'regNo is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         admission_student = AdmissionStudent.objects.filter(
@@ -2796,6 +2839,15 @@ class TeacherOnboardingView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # SECURITY: dept_admin can only onboard into their own department
+        if request.user.role == 'dept_admin':
+            admin_dept = get_admin_department(request.user)
+            if not admin_dept or department.id != admin_dept.id:
+                return Response(
+                    {'error': 'You can only onboard instructors into your own department.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         # Use email as username — email is unique so username is unique
         # Wrap User + InstructorProfile in atomic — if profile creation fails
         # after User is saved, the orphaned User rolls back automatically.
@@ -2844,6 +2896,16 @@ class TeacherOnboardingView(APIView):
                 {'error': f'Instructor "{employee_id}" not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
+
+        # SECURITY: dept_admin can only delete instructors in their own department
+        # This is the more dangerous half — deletion is irreversible
+        if request.user.role == 'dept_admin':
+            admin_dept = get_admin_department(request.user)
+            if not admin_dept or profile.department_id != admin_dept.id:
+                return Response(
+                    {'error': 'You can only remove instructors in your own department.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
         # Block deletion if they have active courses with student data
         active_courses = InstructorCourse.objects.filter(
