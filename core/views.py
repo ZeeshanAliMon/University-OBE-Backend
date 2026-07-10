@@ -432,7 +432,7 @@ class CourseDetailView(APIView):
 # ─── Instructor Courses ───────────────────────────────────────────────────────
 
 class InstructorCourseView(APIView):
-    permission_classes = [IsInstructor,IsDeptAdminOrQA]
+    permission_classes = [IsDeptAdmin]
 
     def get(self, request):
         profile = get_instructor_profile(request.user)
