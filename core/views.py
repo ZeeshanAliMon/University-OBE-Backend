@@ -321,7 +321,6 @@ class CourseListView(APIView):
     # contrast, actually is QA-only (only QADashboard.tsx calls it) — that
     # one wasn't affected and doesn't need the same fix.
     def get_permissions(self):
-        print("get permission form courselist view called ")
         return [IsAuthenticated()] if self.request.method == 'GET' else [IsDeptAdminOrQA()]
 
     def get(self, request):
@@ -374,7 +373,6 @@ class CourseListView(APIView):
 
 class CourseDetailView(APIView):
     def get_permissions(self):
-        print("get permision in course detail view")
         if self.request.method == 'GET':
 
             return [IsAuthenticated()]
@@ -388,14 +386,11 @@ class CourseDetailView(APIView):
 
     def _get(self, request, slug):
         
-        print("before programcode")
         program_code = (
             request.query_params.get("programId")
             or request.query_params.get("program_id")
         )
 
-        print("slug:", slug)
-        print("program_code:", program_code)
 
         try:
             obj = Course.objects.select_related(
@@ -407,7 +402,6 @@ class CourseDetailView(APIView):
                 program__code__iexact=program_code
             )
 
-            print("Found:", obj)
             return obj
 
         except Exception:
@@ -416,7 +410,6 @@ class CourseDetailView(APIView):
 
 
     def get(self, request, slug):
-        print("get slug called")
         obj = self._get(request,slug)
         if not obj:
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -436,19 +429,12 @@ class CourseDetailView(APIView):
         return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, slug):
-        print(request.user.role, "is delete caller  \n ")
-        print("Detail view delete called")
-        print("line 1 ")
         obj = self._get(request,slug)
-        print("line 2 ")
         if not obj:
-            print("line 3 ")
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Dept admin can only delete courses belonging to their own department.
         # QA (and admin role) can delete any course.
-        print("line 4 ")
-        print(request.user.role, "has requested to delete a course")
         if request.user.role == 'dept_admin':
             admin_dept = get_admin_department(request.user)
             if not admin_dept or obj.department_id != admin_dept.id:
@@ -597,19 +583,27 @@ class InstructorCourseView(APIView):
                             pass
 
                     # ── Upsert course header ──────────────────────────────────────────
+                    # academic_year must NOT be overwritten if the incoming value is blank
+                    # — the frontend may not always send it, but the value was set at
+                    # assignment time and must be preserved to keep semester filtering correct.
+                    upsert_defaults = dict(
+                        code                    = c.get('code', ''),
+                        title                   = c.get('title', ''),
+                        course_type             = c.get('courseType', 'Theory'),
+                        department              = department,
+                        program                 = program,
+                        credit_hours            = c.get('creditHours', 3),
+                        clo_count               = c.get('cloCount', 4),
+                        selected_grading_system = c.get('selectedGradingSystem', 'ready1'),
+                    )
+                    incoming_year = c.get('academicYear', '').strip()
+                    if incoming_year:
+                        upsert_defaults['academic_year'] = incoming_year
+
                     course, _ = InstructorCourse.objects.update_or_create(
                         instructor=profile,
                         frontend_id=frontend_id,
-                        defaults=dict(
-                            code                    = c.get('code', ''),
-                            title                   = c.get('title', ''),
-                            course_type             = c.get('courseType', 'Theory'),
-                            department              = department,
-                            program                 = program,
-                            credit_hours            = c.get('creditHours', 3),
-                            clo_count               = c.get('cloCount', 4),
-                            selected_grading_system = c.get('selectedGradingSystem', 'ready1'),
-                        )
+                        defaults=upsert_defaults,
                     )
 
                     # ── Sync GradeScale ───────────────────────────────────────────────
@@ -787,7 +781,6 @@ class InstructorCourseView(APIView):
         students enrolled and no marks entered — if it does, dept admin
         must unassign the course instead, which preserves gradebook data).
         """
-        print("instructor course is called")
         if not frontend_id:
             return Response({'error': 'frontend_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1100,10 +1093,8 @@ class CourseAssignmentView(APIView):
     def get(self, request):
         import traceback
 
-        print("dept called", request.user)
 
         admin_dept = get_admin_department(request.user)
-        print("admindept =", admin_dept)
 
         if not admin_dept:
             return Response(
@@ -1120,15 +1111,10 @@ class CourseAssignmentView(APIView):
                 course__department=admin_dept
             )
 
-            print("QuerySet count:", qs.count())
 
             data = []
 
             for a in qs:
-                print("Assignment ID:", a.id)
-                print("Instructor:", a.instructor)
-                print("Course:", a.course)
-                print("Program:", a.program)
 
                 data.append({
                     'teacherId': a.instructor.employee_id,
@@ -1139,14 +1125,10 @@ class CourseAssignmentView(APIView):
                     'programName': a.program.name if a.program else None,
                 })
 
-            print("Returning response")
             return Response(data)
 
         except Exception as e:
-            print("=" * 80)
             traceback.print_exc()
-            print("Exception:", repr(e))
-            print("=" * 80)
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -1170,10 +1152,6 @@ class CourseAssignmentView(APIView):
             program_id = data.get('programId', '').strip()
             academic_year = data.get('academicYear', '').strip()
 
-            print("teacher_id:", teacher_id)
-            print("course_code:", course_code)
-            print("program_id:", program_id)
-            print("academic_year:", academic_year)
 
             if not teacher_id or not course_code:
                 return Response(
@@ -1184,20 +1162,17 @@ class CourseAssignmentView(APIView):
             instructor = InstructorProfile.objects.get(
                 employee_id=teacher_id
             )
-            print("Instructor:", instructor)
 
             program = None
             if program_id:
                 program = Program.objects.get(
                     code__iexact=program_id
                 )
-            print("Program:", program)
 
             course = Course.objects.get(
                 code__iexact=course_code,
                 program__code__iexact=program_id
             )
-            print("Course:", course)
 
             if course.department_id != admin_dept.id:
                 return Response(
@@ -1259,10 +1234,7 @@ class CourseAssignmentView(APIView):
             )
 
         except Exception as e:
-            print("=" * 80)
             traceback.print_exc()
-            print("Exception:", repr(e))
-            print("=" * 80)
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -2272,6 +2244,10 @@ class COAttainmentSummaryView(APIView):
         )
         if semester:
             ic_qs = ic_qs.filter(semester=semester)
+        # Also support filtering by academicYear query param
+        academic_year_param = request.query_params.get('academicYear', '').strip()
+        if academic_year_param:
+            ic_qs = ic_qs.filter(academic_year__iexact=academic_year_param)
 
         courses_data = []
         for ic in ic_qs:
