@@ -212,6 +212,7 @@ class Student(models.Model):
 
 class Course(models.Model):
     COURSE_TYPE_CHOICES = [('core', 'Core'), ('elective', 'Elective')]
+    COURSE_SUBTYPE_CHOICES = [('theory', 'lab')]
 
     # unique=True removed — same course code can exist across multiple programs
     # within a department (e.g. CMC371 taught in both BSCS and BSSE).
@@ -222,6 +223,7 @@ class Course(models.Model):
     code         = models.CharField(max_length=30)
     title        = models.CharField(max_length=200)
     type         = models.CharField(max_length=10, choices=COURSE_TYPE_CHOICES, default='core')
+    subtype         = models.CharField(max_length=10, choices=COURSE_SUBTYPE_CHOICES, default='theory')
     department   = models.ForeignKey(
         Department, on_delete=models.PROTECT, related_name='courses'
     )

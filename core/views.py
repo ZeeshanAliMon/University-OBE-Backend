@@ -1071,101 +1071,175 @@ class CourseAssignmentView(APIView):
     permission_classes = [IsDeptAdmin]
 
     def get(self, request):
+        import traceback
+
+        print("dept called", request.user)
+
         admin_dept = get_admin_department(request.user)
+        print("admindept =", admin_dept)
+
         if not admin_dept:
-            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
-
-        qs = CourseAssignment.objects.select_related(
-            'instructor__user', 'course', 'program'
-        ).filter(course__department=admin_dept)
-        data = [{
-            'teacherId':   a.instructor.employee_id,
-            'teacherName': a.instructor.user.get_full_name() or a.instructor.user.username,
-            'courseCode':  a.course.code,
-            'courseTitle': a.course.title,
-            'programId':   a.program.code.lower() if a.program else None,
-            'programName': a.program.name         if a.program else None,
-        } for a in qs]
-        return Response(data)
-
-    def post(self, request):
-        admin_dept = get_admin_department(request.user)
-        if not admin_dept:
-            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
-
-        data          = request.data
-        teacher_id    = data.get('teacherId', '').strip()
-        course_code   = data.get('courseCode', '').strip().upper()
-        program_id    = data.get('programId', '').strip()
-        academic_year = data.get('academicYear', '').strip()  # e.g. 'Fall-2024'
-
-        if not teacher_id or not course_code:
-            return Response({'error': 'teacherId and courseCode are required'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            instructor = InstructorProfile.objects.get(employee_id=teacher_id)
-        except InstructorProfile.DoesNotExist:
-            return Response({'error': f'Instructor "{teacher_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            course = Course.objects.get(code__iexact=course_code)
-        except Course.DoesNotExist:
-            return Response({'error': f'Course "{course_code}" not found'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # The course must belong to the requesting admin's own department.
-        # The instructor can be from anywhere — only the course is locked.
-        if course.department_id != admin_dept.id:
             return Response(
-                {'error': f'Course "{course_code}" does not belong to your department ({admin_dept.name}).'},
+                {'error': 'Admin profile not found'},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        program = None
-        if program_id:
-            try:
-                program = Program.objects.get(code__iexact=program_id)
-            except Program.DoesNotExist:
-                return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
-
-        dept_admin = request.user.dept_admin_profile
-
-        assignment, created = CourseAssignment.objects.get_or_create(
-            instructor=instructor, course=course, program=program, academic_year=academic_year,
-            defaults={'assigned_by': dept_admin}
-        )
-
-        # Eagerly create the InstructorCourse stub right now so enrollment
-        # can fire immediately after assignment without waiting for the
-        # instructor to log in (which is when the stub was previously created
-        # lazily). Without this, enrollment 404s in the same request cycle.
-        prog_suffix = program.code.lower() if program else 'all'
-        term_suffix = f'-{academic_year.lower().replace(" ", "")}' if academic_year else ''
-        frontend_id = f'course-assigned-{course.code}-{instructor.employee_id}-{prog_suffix}{term_suffix}'
-
-        InstructorCourse.objects.get_or_create(
-            instructor=instructor,
-            frontend_id=frontend_id,
-            defaults=dict(
-                code=course.code,
-                title=course.title,
-                course_type='Theory',
-                department=course.department,
-                program=program,
-                credit_hours=course.credit_hours or 3,
-                clo_count=0,
-                selected_grading_system='ready1',
-                semester='',
-                academic_year=academic_year,
+        try:
+            qs = CourseAssignment.objects.select_related(
+                'instructor__user',
+                'course',
+                'program'
+            ).filter(
+                course__department=admin_dept
             )
-        )
 
-        return Response({
-            'teacherId':    assignment.instructor.employee_id,
-            'courseCode':   assignment.course.code,
-            'programId':    assignment.program.code.lower() if assignment.program else None,
-            'academicYear': academic_year,
-            'courseId':     frontend_id,
-        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+            print("QuerySet count:", qs.count())
+
+            data = []
+
+            for a in qs:
+                print("Assignment ID:", a.id)
+                print("Instructor:", a.instructor)
+                print("Course:", a.course)
+                print("Program:", a.program)
+
+                data.append({
+                    'teacherId': a.instructor.employee_id,
+                    'teacherName': a.instructor.user.get_full_name() or a.instructor.user.username,
+                    'courseCode': a.course.code,
+                    'courseTitle': a.course.title,
+                    'programId': a.program.code.lower() if a.program else None,
+                    'programName': a.program.name if a.program else None,
+                })
+
+            print("Returning response")
+            return Response(data)
+
+        except Exception as e:
+            print("=" * 80)
+            traceback.print_exc()
+            print("Exception:", repr(e))
+            print("=" * 80)
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+    def post(self, request):
+        import traceback
+
+        try:
+            admin_dept = get_admin_department(request.user)
+            if not admin_dept:
+                return Response(
+                    {'error': 'Admin profile not found'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            data = request.data
+            teacher_id = data.get('teacherId', '').strip()
+            course_code = data.get('courseCode', '').strip().upper()
+            program_id = data.get('programId', '').strip()
+            academic_year = data.get('academicYear', '').strip()
+
+            print("teacher_id:", teacher_id)
+            print("course_code:", course_code)
+            print("program_id:", program_id)
+            print("academic_year:", academic_year)
+
+            if not teacher_id or not course_code:
+                return Response(
+                    {'error': 'teacherId and courseCode are required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            instructor = InstructorProfile.objects.get(
+                employee_id=teacher_id
+            )
+            print("Instructor:", instructor)
+
+            program = None
+            if program_id:
+                program = Program.objects.get(
+                    code__iexact=program_id
+                )
+            print("Program:", program)
+
+            course = Course.objects.get(
+                code__iexact=course_code,
+                program__code__iexact=program_id
+            )
+            print("Course:", course)
+
+            if course.department_id != admin_dept.id:
+                return Response(
+                    {
+                        'error': f'Course "{course_code}" does not belong to your department ({admin_dept.name}).'
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            dept_admin = request.user.dept_admin_profile
+
+            assignment, created = CourseAssignment.objects.get_or_create(
+                instructor=instructor,
+                course=course,
+                program=program,
+                academic_year=academic_year,
+                defaults={
+                    'assigned_by': dept_admin
+                }
+            )
+
+            prog_suffix = program.code.lower() if program else 'all'
+            term_suffix = (
+                f'-{academic_year.lower().replace(" ", "")}'
+                if academic_year else ''
+            )
+
+            frontend_id = (
+                f'course-assigned-{course.code}-'
+                f'{instructor.employee_id}-{prog_suffix}{term_suffix}'
+            )
+
+            InstructorCourse.objects.get_or_create(
+                instructor=instructor,
+                frontend_id=frontend_id,
+                defaults=dict(
+                    code=course.code,
+                    title=course.title,
+                    course_type='Theory',
+                    department=course.department,
+                    program=program,
+                    credit_hours=course.credit_hours or 3,
+                    clo_count=0,
+                    selected_grading_system='ready1',
+                    semester='',
+                    academic_year=academic_year,
+                )
+            )
+
+            return Response(
+                {
+                    'teacherId': assignment.instructor.employee_id,
+                    'courseCode': assignment.course.code,
+                    'programId': assignment.program.code.lower() if assignment.program else None,
+                    'academicYear': academic_year,
+                    'courseId': frontend_id,
+                },
+                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            print("=" * 80)
+            traceback.print_exc()
+            print("Exception:", repr(e))
+            print("=" * 80)
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     def delete(self, request):
         admin_dept = get_admin_department(request.user)
