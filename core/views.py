@@ -528,17 +528,24 @@ class InstructorCourseView(APIView):
                 )
             )
 
-        qs = prefetch_instructor_course(
-            InstructorCourse.objects.filter(instructor=profile).order_by('created_at')
+        # Only show courses for the current (latest) semester.
+        # A teacher may have taught the same course in previous terms — those
+        # are historical records that should not appear on the active dashboard.
+        # We find the most recent academic_year across all this instructor's
+        # courses and filter to that term only. Courses with no academic_year
+        # (legacy records) are shown only if there are no termed records at all.
+        all_ics = InstructorCourse.objects.filter(instructor=profile)
+        latest_term = (
+            all_ics.exclude(academic_year='')
+                   .order_by('-academic_year')
+                   .values_list('academic_year', flat=True)
+                   .first()
         )
 
-        # DEBUG — print every InstructorCourse record for this instructor so we
-        # can see exactly what's in the DB (remove once duplicate issue resolved)
-        print(f"\n[DEBUG] InstructorCourse records for {profile.user.get_full_name()} (emp={profile.employee_id}):")
-        for ic in InstructorCourse.objects.filter(instructor=profile).order_by('created_at'):
-            print(f"  id={ic.id} | frontend_id={ic.frontend_id} | code={ic.code} | program={ic.program} | status={ic.status}")
-        print(f"[DEBUG] Total: {InstructorCourse.objects.filter(instructor=profile).count()} records\n")
+        if latest_term:
+            all_ics = all_ics.filter(academic_year=latest_term)
 
+        qs = prefetch_instructor_course(all_ics.order_by('created_at'))
         return Response(InstructorCourseSerializer(qs, many=True).data)
 
     def post(self, request):
