@@ -18,7 +18,7 @@ from .models      import (
     OBEQuestion, CourseStudent, StudentMark, OBEStudentMark,
     InstructorProfile, QAProfile, Student,
     AdmissionProfile, DeptAdminProfile, CourseAssignment,
-    SemesterPlan, AdmissionStudent,
+    SemesterPlan, AdmissionStudent, FinalResult,
 )
 from .serializers import (
     LoginSerializer, UserSerializer,
@@ -898,8 +898,6 @@ class AdmissionStudentListView(APIView):
                 # fails after User.create succeeds, the orphaned User is rolled
                 # back automatically — otherwise the email is permanently taken
                 # and every retry attempt errors with "account already exists".
-                from django.contrib.auth.hashers import make_password as _make_password
-                from django.conf import settings as _settings
                 from .models import Student as StudentProfile
                 _email_conflict = False
                 with transaction.atomic():
@@ -917,7 +915,7 @@ class AdmissionStudentListView(APIView):
                             first_name=name_parts[0] if name_parts else '',
                             last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else '',
                             role='student',
-                            password=_make_password(_settings.DEFAULT_TEMP_PASSWORD),
+                            password=make_password(django_settings.DEFAULT_TEMP_PASSWORD),
                             must_change_password=True,
                             is_active=True,
                         )
@@ -2585,6 +2583,9 @@ class AtRiskStudentsView(APIView):
         ic_qs = InstructorCourse.objects.filter(program=program)
         if semester:
             ic_qs = ic_qs.filter(semester=semester)
+        academic_year_param = request.query_params.get('academicYear', '').strip()
+        if academic_year_param:
+            ic_qs = ic_qs.filter(academic_year__iexact=academic_year_param)
 
         # Map regNo → list of failed CLOs
         student_failures = {}
@@ -2796,8 +2797,6 @@ class TeacherOnboardingView(APIView):
             )
 
         # Use email as username — email is unique so username is unique
-        from django.contrib.auth.hashers import make_password
-        from django.conf import settings as _settings
         # Wrap User + InstructorProfile in atomic — if profile creation fails
         # after User is saved, the orphaned User rolls back automatically.
         # Without this, a crash here leaves a User with no profile and a taken
@@ -2809,7 +2808,7 @@ class TeacherOnboardingView(APIView):
                 first_name=name.split()[0] if name else '',
                 last_name=' '.join(name.split()[1:]) if len(name.split()) > 1 else '',
                 role='instructor',
-                password=make_password(_settings.DEFAULT_TEMP_PASSWORD),
+                password=make_password(django_settings.DEFAULT_TEMP_PASSWORD),
                 must_change_password=True,
                 is_active=True,
             )
@@ -2829,7 +2828,7 @@ class TeacherOnboardingView(APIView):
             'departmentId':       department.dept_id,
             'departmentName':     department.name,
             'mustChangePassword': True,
-            'message':            f'Account created. Default password is: {_settings.DEFAULT_TEMP_PASSWORD}',
+            'message':            f'Account created. Default password is: {django_settings.DEFAULT_TEMP_PASSWORD}',
         }, status=status.HTTP_201_CREATED)
 
     def delete(self, request, employee_id=None):
@@ -3087,9 +3086,6 @@ class StudentEnrollmentView(APIView):
 #      NEW term, a fresh InstructorCourse is created (frontend_id includes
 #      academic_year) — the closed one is never touched or reused
 # ───────────────────────────────────────────────────────────────────────────────
-
-from .models import FinalResult
-
 
 class FinalizeCourseView(APIView):
     """
