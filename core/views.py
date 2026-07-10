@@ -385,28 +385,20 @@ class CourseDetailView(APIView):
         return [IsDeptAdminOrQA()]
 
     def _get(self, request, slug):
-        
         program_code = (
             request.query_params.get("programId")
             or request.query_params.get("program_id")
         )
+        qs = Course.objects.select_related(
+            "department", "program"
+        ).prefetch_related("mapped_gas")
 
+        if program_code:
+            qs = qs.filter(code__iexact=slug, program__code__iexact=program_code)
+        else:
+            qs = qs.filter(code__iexact=slug)
 
-        try:
-            obj = Course.objects.select_related(
-                "department", "program"
-            ).prefetch_related(
-                "mapped_gas"
-            ).get(
-                code__iexact=slug,
-                program__code__iexact=program_code
-            )
-
-            return obj
-
-        except Exception:
-            traceback.print_exc()
-            raise
+        return qs.first()  # returns None instead of raising if not found
 
 
     def get(self, request, slug):
@@ -1512,10 +1504,9 @@ class StudentCoursesView(APIView):
                 {'name': c.name, 'percentage': c.percentage, 'units': c.units}
                 for c in ic.categories.order_by('order').all()
             ]
-            instructor_id = ic.instructor.employee_id if ic.instructor else 'unknown'
             program_code  = ic.program.code if ic.program else ''
             result.append({
-                'id':           f"course-{ic.code}-{instructor_id}-{program_code.lower() or 'all'}",
+                'id':           ic.frontend_id,
                 'code':         ic.code,
                 'title':        f"{ic.title} ({program_code})" if program_code else ic.title,
                 'creditHours':  ic.credit_hours,
@@ -2456,7 +2447,9 @@ class InstructorPerformanceView(APIView):
         result = []
         for profile in instructors:
             courses_data = []
-            for ic in profile.instructor_courses.all():
+            # Only report on active (current) courses, not historical closed ones.
+            # Closed courses are already finalized — their data is in FinalResult.
+            for ic in profile.instructor_courses.filter(status='active'):
                 clo_attainments = []
                 all_qs_cohort = list(ic.obe_questions.all())
                 clo_qs_cohort = ic.clos.all()
