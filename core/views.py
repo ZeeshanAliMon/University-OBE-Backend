@@ -353,19 +353,12 @@ class CourseListView(APIView):
             except Program.DoesNotExist:
                 pass
 
-        try:
-            course = Course.objects.create(
-                code=d['code'], title=d['title'],
-                type=d.get('type', 'core'),
-                department=department, program=program,
-                credit_hours=d.get('creditHours', 3)
-            )
-        except IntegrityError:
-            scope = f" in program {program.code}" if program else ""
-            return Response(
-                {'error': f'Course "{d["code"]}" already exists in {department.name}{scope}.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        course = Course.objects.create(
+            code=d['code'], title=d['title'],
+            type=d.get('type', 'core'),
+            department=department, program=program,
+            credit_hours=d.get('creditHours', 3)
+        )
         if mapped_gas:
             course.mapped_gas.set(GraduateAttribute.objects.filter(ga_id__in=mapped_gas))
 
@@ -390,27 +383,22 @@ class CourseDetailView(APIView):
             return [IsDeptAdminOrQA()]
         return [IsQA()]
 
-    def _get(self, slug, program_id=None):
-        # code is no longer globally unique — same code can exist per program.
-        # Use filter().first() instead of .get() to avoid MultipleObjectsReturned.
-        # When program_id is provided (PATCH/DELETE from dept admin who knows
-        # which program's version they're editing), scope to that program.
-        qs = Course.objects.select_related(
-            'department', 'program'
-        ).prefetch_related('mapped_gas').filter(code__iexact=slug)
-        if program_id:
-            qs = qs.filter(program__code__iexact=program_id)
-        return qs.first()
+    def _get(self, slug):
+        try:
+            return Course.objects.select_related(
+                'department', 'program'
+            ).prefetch_related('mapped_gas').get(code__iexact=slug)
+        except Course.DoesNotExist:
+            return None
 
     def get(self, request, slug):
-        obj = self._get(slug, request.query_params.get('programId', ''))
+        obj = self._get(slug)
         if not obj:
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
         return Response(CourseSerializer(obj).data)
 
     def patch(self, request, slug):
-        program_id = request.query_params.get('programId') or request.data.get('programId', '')
-        obj = self._get(slug, program_id)
+        obj = self._get(slug)
         if not obj:
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
         data = request.data.copy()
@@ -419,12 +407,11 @@ class CourseDetailView(APIView):
         s = CourseSerializer(obj, data=data, partial=True)
         if s.is_valid():
             s.save()
-            return Response(CourseSerializer(self._get(slug, program_id)).data)
+            return Response(CourseSerializer(self._get(slug)).data)
         return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, slug):
-        program_id = request.query_params.get('programId') or request.data.get('programId', '')
-        obj = self._get(slug, program_id)
+        obj = self._get(slug)
         if not obj:
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -445,7 +432,7 @@ class CourseDetailView(APIView):
 # ─── Instructor Courses ───────────────────────────────────────────────────────
 
 class InstructorCourseView(APIView):
-    permission_classes = [IsInstructor]
+    permission_classes = [IsInstructor,IsDeptAdminOrQA]
 
     def get(self, request):
         profile = get_instructor_profile(request.user)
@@ -1087,24 +1074,25 @@ class CourseAssignmentView(APIView):
         except InstructorProfile.DoesNotExist:
             return Response({'error': f'Instructor "{teacher_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # With code no longer globally unique, we must scope by department
-        # and program. Resolve program first so we can include it in the lookup.
+        try:
+            course = Course.objects.get(code__iexact=course_code)
+        except Course.DoesNotExist:
+            return Response({'error': f'Course "{course_code}" not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # The course must belong to the requesting admin's own department.
+        # The instructor can be from anywhere — only the course is locked.
+        if course.department_id != admin_dept.id:
+            return Response(
+                {'error': f'Course "{course_code}" does not belong to your department ({admin_dept.name}).'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         program = None
         if program_id:
             try:
                 program = Program.objects.get(code__iexact=program_id)
             except Program.DoesNotExist:
                 return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
-
-        course_qs = Course.objects.filter(
-            code__iexact=course_code,
-            department=admin_dept,
-        )
-        if program:
-            course_qs = course_qs.filter(program=program)
-        course = course_qs.first()
-        if not course:
-            return Response({'error': f'Course "{course_code}" not found in your department'}, status=status.HTTP_400_BAD_REQUEST)
 
         dept_admin = request.user.dept_admin_profile
 
@@ -1589,16 +1577,7 @@ class ProgramGAAttainmentView(APIView):
             course_title_map[ic.code] = ic.title
 
         course_codes    = list(course_avg_map.keys())
-        # Filter by program to avoid duplicate course code rows from other
-        # programs now that code is no longer globally unique.
-        catalog_courses = Course.objects.filter(
-            code__in=course_codes,
-            program=program,
-        ).prefetch_related('mapped_gas')
-        # Fallback: if no program-scoped rows exist (older data without program FK),
-        # fall back to any matching code.
-        if not catalog_courses.exists():
-            catalog_courses = Course.objects.filter(code__in=course_codes).prefetch_related('mapped_gas')
+        catalog_courses = Course.objects.filter(code__in=course_codes).prefetch_related('mapped_gas')
 
         ga_courses = {}
         for course in catalog_courses:
@@ -1684,21 +1663,10 @@ class StudentGAAttainmentView(APIView):
             })
 
         course_codes = [cs.course.code for cs in course_students]
-        # Scope by program to avoid duplicate-code collisions.
-        # cs.course is an InstructorCourse; use its program FK to pick the
-        # right Course catalog row when the same code exists for multiple programs.
-        catalog_map = {}
-        for cs in course_students:
-            code = cs.course.code
-            if code not in catalog_map:
-                prog = cs.course.program
-                row = Course.objects.filter(
-                    code=code, program=prog
-                ).prefetch_related('mapped_gas').first()
-                if not row:
-                    row = Course.objects.filter(code=code).prefetch_related('mapped_gas').first()
-                if row:
-                    catalog_map[code] = row
+        catalog_map  = {
+            c.code: c
+            for c in Course.objects.filter(code__in=course_codes).prefetch_related('mapped_gas')
+        }
 
         ga_scores         = {}   # ga_id → [scores]
         ga_info           = {}   # ga_id → { gaId, gaTitle }
@@ -1816,12 +1784,10 @@ class CourseAttainmentView(APIView):
             for clo, pct in clo_attain.items():
                 clo_scores_all.setdefault(clo, []).append(pct)
 
-        # GA catalog for mapping — scope by program when available so we get
-        # the right course row now that code is no longer globally unique.
-        catalog_qs = Course.objects.filter(code__iexact=course_code).prefetch_related('mapped_gas')
-        if program_id:
-            catalog_qs = catalog_qs.filter(program__code__iexact=program_id)
-        catalog_course = catalog_qs.first()
+        # GA catalog for mapping
+        catalog_course = Course.objects.filter(
+            code__iexact=course_code
+        ).prefetch_related('mapped_gas').first()
 
         # Build CLO → GA mapping
         # Priority: real CLO table records (exact join) → fallback to first course GA
