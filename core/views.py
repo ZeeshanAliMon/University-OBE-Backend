@@ -502,6 +502,18 @@ class InstructorCourseView(APIView):
             if existing_closed:
                 continue
 
+            # Skip auto-create if ANY record already exists for this
+            # instructor+course+program with a DIFFERENT frontend_id.
+            # This happens when a legacy record was created with the old
+            # "course-<code>-<emp_id>-<prog>" format (no "assigned-" prefix,
+            # no term suffix). Auto-creating a second record would make the
+            # same course appear twice on the teacher dashboard.
+            already_exists = InstructorCourse.objects.filter(
+                instructor=profile, code=course.code, program=program
+            ).exclude(frontend_id=frontend_id).exists()
+            if already_exists:
+                continue
+
             InstructorCourse.objects.get_or_create(
                 instructor=profile,
                 frontend_id=frontend_id,
