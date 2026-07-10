@@ -531,6 +531,14 @@ class InstructorCourseView(APIView):
         qs = prefetch_instructor_course(
             InstructorCourse.objects.filter(instructor=profile).order_by('created_at')
         )
+
+        # DEBUG — print every InstructorCourse record for this instructor so we
+        # can see exactly what's in the DB (remove once duplicate issue resolved)
+        print(f"\n[DEBUG] InstructorCourse records for {profile.user.get_full_name()} (emp={profile.employee_id}):")
+        for ic in InstructorCourse.objects.filter(instructor=profile).order_by('created_at'):
+            print(f"  id={ic.id} | frontend_id={ic.frontend_id} | code={ic.code} | program={ic.program} | status={ic.status}")
+        print(f"[DEBUG] Total: {InstructorCourse.objects.filter(instructor=profile).count()} records\n")
+
         return Response(InstructorCourseSerializer(qs, many=True).data)
 
     def post(self, request):
