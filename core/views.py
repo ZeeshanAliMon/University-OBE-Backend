@@ -3,7 +3,7 @@ from django.db import models
 from django.db import IntegrityError
 from django.db import transaction
 from django.utils import timezone
-
+import traceback
 from rest_framework             import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response    import Response
@@ -321,6 +321,7 @@ class CourseListView(APIView):
     # contrast, actually is QA-only (only QADashboard.tsx calls it) — that
     # one wasn't affected and doesn't need the same fix.
     def get_permissions(self):
+        print("get permission form courselist view called ")
         return [IsAuthenticated()] if self.request.method == 'GET' else [IsDeptAdminOrQA()]
 
     def get(self, request):
@@ -373,7 +374,9 @@ class CourseListView(APIView):
 
 class CourseDetailView(APIView):
     def get_permissions(self):
+        print("get permision in course detail view")
         if self.request.method == 'GET':
+
             return [IsAuthenticated()]
         if self.request.method == 'DELETE':
             # Dept admin can delete courses from their own department.
@@ -383,22 +386,44 @@ class CourseDetailView(APIView):
             return [IsDeptAdminOrQA()]
         return [IsQA()]
 
-    def _get(self, slug):
+    def _get(self, request, slug):
+        
+        print("before programcode")
+        program_code = (
+            request.query_params.get("programId")
+            or request.query_params.get("program_id")
+        )
+
+        print("slug:", slug)
+        print("program_code:", program_code)
+
         try:
-            return Course.objects.select_related(
-                'department', 'program'
-            ).prefetch_related('mapped_gas').get(code__iexact=slug)
-        except Course.DoesNotExist:
-            return None
+            obj = Course.objects.select_related(
+                "department", "program"
+            ).prefetch_related(
+                "mapped_gas"
+            ).get(
+                code__iexact=slug,
+                program__code__iexact=program_code
+            )
+
+            print("Found:", obj)
+            return obj
+
+        except Exception:
+            traceback.print_exc()
+            raise
+
 
     def get(self, request, slug):
-        obj = self._get(slug)
+        print("get slug called")
+        obj = self._get(request,slug)
         if not obj:
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
         return Response(CourseSerializer(obj).data)
 
     def patch(self, request, slug):
-        obj = self._get(slug)
+        obj = self._get(request, slug)
         if not obj:
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
         data = request.data.copy()
@@ -407,16 +432,23 @@ class CourseDetailView(APIView):
         s = CourseSerializer(obj, data=data, partial=True)
         if s.is_valid():
             s.save()
-            return Response(CourseSerializer(self._get(slug)).data)
+            return Response(CourseSerializer(self._get(request, slug)).data)
         return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, slug):
-        obj = self._get(slug)
+        print(request.user.role, "is delete caller  \n ")
+        print("Detail view delete called")
+        print("line 1 ")
+        obj = self._get(request,slug)
+        print("line 2 ")
         if not obj:
+            print("line 3 ")
             return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Dept admin can only delete courses belonging to their own department.
         # QA (and admin role) can delete any course.
+        print("line 4 ")
+        print(request.user.role, "has requested to delete a course")
         if request.user.role == 'dept_admin':
             admin_dept = get_admin_department(request.user)
             if not admin_dept or obj.department_id != admin_dept.id:
@@ -728,6 +760,7 @@ class InstructorCourseView(APIView):
         students enrolled and no marks entered — if it does, dept admin
         must unassign the course instead, which preserves gradebook data).
         """
+        print("instructor course is called")
         if not frontend_id:
             return Response({'error': 'frontend_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
