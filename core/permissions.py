@@ -66,3 +66,21 @@ class IsDeptAdminOrQA(BasePermission):
             request.user.is_authenticated and
             request.user.role in ('dept_admin', 'qa', 'admin')
         )
+
+
+class IsStaffReport(BasePermission):
+    """
+    Dept admins, admission officers, QA, and superadmins.
+
+    For internal reporting endpoints that name individual students or
+    instructors by name — must never be reachable by plain 'student' or
+    'instructor' roles since they expose data about other people.
+    Was previously guarded by IsAuthenticated only on AtRiskStudentsView
+    and InstructorPerformanceView.
+    """
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ('dept_admin', 'admission', 'qa', 'admin')
+        )
