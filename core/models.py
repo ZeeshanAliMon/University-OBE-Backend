@@ -212,7 +212,7 @@ class Student(models.Model):
 
 class Course(models.Model):
     COURSE_TYPE_CHOICES = [('core', 'Core'), ('elective', 'Elective')]
-    COURSE_SUBTYPE_CHOICES = [('theory', 'lab')]
+    COURSE_SUBTYPE_CHOICES = [('theory', 'Theory'), ('lab', 'Lab')]
 
     # unique=True removed — same course code can exist across multiple programs
     # within a department (e.g. CMC371 taught in both BSCS and BSSE).
