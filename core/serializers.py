@@ -267,6 +267,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     creditHours           = serializers.IntegerField(source='credit_hours')
     cloCount              = serializers.IntegerField(source='clo_count')
     selectedGradingSystem = serializers.CharField(source='selected_grading_system')
+    academicYear          = serializers.CharField(source='academic_year')
     customGradingSystem   = serializers.SerializerMethodField()
     categories            = serializers.SerializerMethodField()
     unitsData             = serializers.SerializerMethodField()
@@ -280,7 +281,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
             'id', 'code', 'title', 'courseType',
             'departmentId', 'departmentName',
             'programId', 'programName',
-            'creditHours', 'cloCount',
+            'creditHours', 'cloCount', 'academicYear',
             'selectedGradingSystem', 'customGradingSystem',
             'categories', 'unitsData',
             'students', 'obeQuestions', 'obeMarks',
