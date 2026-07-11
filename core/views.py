@@ -460,6 +460,33 @@ class CourseDetailView(APIView):
 
 # ─── Instructor Courses ───────────────────────────────────────────────────────
 
+import re as _re
+
+def _parse_percent_range_min(pct_str: str) -> float:
+    """
+    Mirrors frontend parsePercentRange() in InstructorDashboard.tsx exactly,
+    but only returns the MIN bound (what GradeScale.min_percentage needs).
+    Frontend always sends a range string like "88% - 100%" or "Below 60%",
+    never a plain number — this must stay in sync with that function.
+    """
+    if not pct_str:
+        return 0.0
+    clean = pct_str.replace('%', '').strip()
+    if 'below' in clean.lower():
+        # "Below 60%" -> min is 0 (frontend: { min: 0, max: val })
+        return 0.0
+    parts = _re.split(r'[-\u2013]|to', clean)
+    if len(parts) >= 2:
+        try:
+            return float(parts[0].strip())
+        except ValueError:
+            return 0.0
+    try:
+        return float(clean)
+    except ValueError:
+        return 0.0
+
+
 class InstructorCourseView(APIView):
     permission_classes = [IsInstructor]
 
@@ -618,14 +645,25 @@ class InstructorCourseView(APIView):
                     )
 
                     # ── Sync GradeScale ───────────────────────────────────────────────
+                    # CRITICAL: the frontend never sends a plain number for 'percentage' —
+                    # it always sends a range STRING like "88% - 100%" or "Below 60%"
+                    # (see DEFAULT_CUSTOM_GRADES / parsePercentRange in InstructorDashboard.tsx).
+                    # float("88% - 100%") raises ValueError, which was being silently
+                    # swallowed below — meaning EVERY GradeScale row failed to save for
+                    # EVERY course using custom grading, while grade_scale.all().delete()
+                    # still ran first, leaving the course with an empty custom scale.
+                    # _get_grade() then silently fell back to READY1_SCALE for every
+                    # student — wrong grades computed with zero error shown anywhere.
                     custom_grading = c.get('customGradingSystem', [])
                     course.grade_scale.all().delete()
                     for order, entry in enumerate(custom_grading):
                         try:
+                            pct_raw = str(entry.get('percentage', 0))
+                            min_pct = _parse_percent_range_min(pct_raw)
                             GradeScale.objects.create(
                                 course         = course,
                                 grade          = entry.get('grade', ''),
-                                min_percentage = float(entry.get('percentage', 0)),
+                                min_percentage = min_pct,
                                 points         = float(entry.get('points', 0)),
                                 order          = order,
                             )
