@@ -718,17 +718,26 @@ class InstructorCourseView(APIView):
                         mark_rows = []
 
                         for key, score in incoming_marks.items():
-                            # key = '{categoryName}-{unitNo}'
-                            last_dash = key.rfind('-')
-                            try:
-                                cat_name = key[:last_dash]
-                                unit_no  = int(key[last_dash + 1:])
-                                unit_obj = unit_obj_map.get((cat_name, unit_no))
-                                if unit_obj:
-                                    incoming_unit_pks.add(unit_obj.pk)
-                                    mark_rows.append((unit_obj, score))
-                            except (ValueError, IndexError):
-                                pass
+                            # key = '{categoryName}-{unitNo}' (aggregated unit total) OR
+                            # 'q-{categoryName}-{unitNo}-{questionId}' (per-question breakdown,
+                            # sent alongside the aggregate for UI granularity — not a real
+                            # unit mark, must be skipped here or the parse below silently
+                            # misfires whenever categoryName itself contains a dash e.g. "Mid-Term").
+                            if key.startswith('q-'):
+                                continue
+                            # Match against known (cat_name, unit_no) pairs instead of blindly
+                            # splitting on the last dash — a category renamed to include a dash
+                            # (e.g. "Class-Work") would otherwise silently drop that unit's marks
+                            # with no error, since int(key[last_dash+1:]) would raise ValueError
+                            # and get swallowed by the except clause below.
+                            unit_obj = None
+                            for (cat_name, unit_no), candidate in unit_obj_map.items():
+                                if key == f"{cat_name}-{unit_no}":
+                                    unit_obj = candidate
+                                    break
+                            if unit_obj:
+                                incoming_unit_pks.add(unit_obj.pk)
+                                mark_rows.append((unit_obj, score))
 
                         # Delete marks for units no longer in payload
                         student.marks.exclude(unit_item__in=incoming_unit_pks).delete()
