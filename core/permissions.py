@@ -84,3 +84,27 @@ class IsStaffReport(BasePermission):
             request.user.is_authenticated and
             request.user.role in ('dept_admin', 'admission', 'qa', 'admin')
         )
+
+
+class IsInstructorOrStaffReport(BasePermission):
+    """
+    GET-only extension of IsInstructor for InstructorCourseView.
+
+    Instructors manage their own courses (existing behavior, unchanged).
+    QA / dept_admin / admission / admin also need READ access to the full
+    course roster across all instructors for analytics, allocation
+    matrices, and attainment reports (they already see equivalent
+    student-level attainment data via COAttainmentSummaryView,
+    AtRiskStudentsView, and InstructorPerformanceView — this does not
+    expose a new category of data, just fixes access to data these roles
+    are already authorized to see).
+
+    Write operations (POST/PATCH/DELETE) on InstructorCourseView remain
+    instructor-only — this class is only ever used for the GET branch.
+    """
+    def has_permission(self, request, view):
+        return bool(
+            request.user and
+            request.user.is_authenticated and
+            request.user.role in ('instructor', 'admin', 'qa', 'dept_admin', 'admission')
+        )
