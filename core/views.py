@@ -1813,15 +1813,30 @@ class ProgramGAAttainmentView(APIView):
             program=program
         ).prefetch_related('students__marks__unit_item__category')
 
-        course_avg_map   = {}
+        # DATA-LOSS FIX: a course can have multiple InstructorCourse offerings
+        # (different academic_years, different instructors/sections). This
+        # used to do course_avg_map[ic.code] = ... inside the loop, which
+        # silently OVERWRITES on each iteration — only the last-processed
+        # offering's average survived, every earlier offering's data was
+        # discarded with no error. Now pools every student's percentage
+        # across every offering of that course code first, then averages
+        # once — this also weights correctly by student count instead of
+        # by offering count (a 50-student section and a 5-student section
+        # no longer count equally).
+        course_all_pcts  = {}
         course_title_map = {}
         for ic in instructor_courses:
             students = list(ic.students.prefetch_related('marks__unit_item__category').all())
             if not students:
                 continue
             percentages = [_student_total_percentage(s) for s in students]
-            course_avg_map[ic.code]   = round(sum(percentages) / len(percentages), 2)
+            course_all_pcts.setdefault(ic.code, []).extend(percentages)
             course_title_map[ic.code] = ic.title
+
+        course_avg_map = {
+            code: round(sum(pcts) / len(pcts), 2)
+            for code, pcts in course_all_pcts.items() if pcts
+        }
 
         course_codes    = list(course_avg_map.keys())
         catalog_courses = Course.objects.filter(code__in=course_codes).prefetch_related('mapped_gas')
@@ -1855,6 +1870,264 @@ class ProgramGAAttainmentView(APIView):
             'programName':        program.name,
             'attainmentThreshold': ATTAINMENT_THRESHOLD,
             'attributes':         attributes,
+        })
+
+
+# ── 1b. Program GA Attainment, broken down by curriculum semester ────────────
+
+class ProgramGAAttainmentBySemesterView(APIView):
+    """
+    GET /api/reports/program-ga-attainment-by-semester/?programId=bscs
+
+    Same computation as ProgramGAAttainmentView (course.mapped_gas +
+    average student percentage per course — NOT the CLO-level mapping
+    used elsewhere), but grouped by curriculum semester (1st..8th) instead
+    of flattened across the whole program. "Semester" here means the
+    SemesterPlan curriculum slot a course belongs to (e.g. CMC111 is a
+    1st-semester course) — NOT InstructorCourse.academic_year, which is
+    the calendar term (e.g. "Fall-2026") a particular offering ran in.
+    A course can be taught across many academic_years; this view pools
+    every InstructorCourse offering of that course together, same as
+    ProgramGAAttainmentView already does.
+
+    Only semesters with a SemesterPlan actually configured for this
+    program are included — dept_admin sets these up via
+    POST /api/admin/semester-plans/.
+
+    Response (chart-ready: X-axis = semester, grouped bars = GA):
+    {
+      "programId": "bscs",
+      "programName": "...",
+      "attainmentThreshold": 50.0,
+      "semesters": [
+        {
+          "semester": "1st",
+          "courseCodes": ["CMC111", "GER141"],
+          "attributes": [
+            { "id": "GA-1", "title": "...", "averageAttainment": 72.5, "contributingCoursesCount": 2, "attainmentStatus": "Passed" }
+          ]
+        }
+      ]
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        program_id = request.query_params.get('programId', '').strip()
+        if not program_id:
+            return Response({'error': 'programId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            program = Program.objects.select_related('department').get(code__iexact=program_id)
+        except Program.DoesNotExist:
+            return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        gas = GraduateAttribute.objects.filter(
+            models.Q(department=program.department, program__isnull=True) |
+            models.Q(program=program)
+        ).order_by('ga_id')
+
+        # Same pooling approach as ProgramGAAttainmentView (see fix note
+        # there): collect every student's percentage across every offering
+        # of a course code first, then average once — weights by student
+        # count rather than by offering count.
+        instructor_courses = InstructorCourse.objects.filter(
+            program=program
+        ).prefetch_related('students__marks__unit_item__category')
+
+        course_all_pcts = {}
+        for ic in instructor_courses:
+            students = list(ic.students.prefetch_related('marks__unit_item__category').all())
+            if not students:
+                continue
+            percentages = [_student_total_percentage(s) for s in students]
+            course_all_pcts.setdefault(ic.code, []).extend(percentages)
+
+        course_avg_map = {
+            code: round(sum(pcts) / len(pcts), 2)
+            for code, pcts in course_all_pcts.items() if pcts
+        }
+
+        catalog_courses = Course.objects.filter(
+            code__in=list(course_avg_map.keys())
+        ).prefetch_related('mapped_gas')
+        course_ga_map = {c.code: [ga.ga_id for ga in c.mapped_gas.all()] for c in catalog_courses}
+
+        semester_plans = SemesterPlan.objects.filter(program=program)
+        # Preserve curriculum order (1st..8th), only including configured semesters.
+        semester_order = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th']
+        plans_by_semester = {sp.semester: sp.course_codes for sp in semester_plans}
+
+        semesters_out = []
+        for sem in semester_order:
+            if sem not in plans_by_semester:
+                continue
+            sem_course_codes = [c for c in plans_by_semester[sem] if c in course_avg_map]
+
+            ga_courses = {}
+            for code in sem_course_codes:
+                avg = course_avg_map[code]
+                for ga_id in course_ga_map.get(code, []):
+                    ga_courses.setdefault(ga_id, []).append({'code': code, 'averageMarks': avg})
+
+            attributes = []
+            for ga in gas:
+                contributing   = ga_courses.get(ga.ga_id, [])
+                avg_attainment = round(sum(c['averageMarks'] for c in contributing) / len(contributing), 2) if contributing else 0.0
+                attributes.append({
+                    'id':                       ga.ga_id,
+                    'title':                    ga.name,
+                    'averageAttainment':        avg_attainment,
+                    'contributingCoursesCount': len(contributing),
+                    'attainmentStatus':         'Passed' if avg_attainment >= ATTAINMENT_THRESHOLD else 'Failed',
+                })
+
+            semesters_out.append({
+                'semester':    sem,
+                'courseCodes': plans_by_semester[sem],
+                'attributes':  attributes,
+            })
+
+        return Response({
+            'programId':           program.code.lower(),
+            'programName':         program.name,
+            'attainmentThreshold': ATTAINMENT_THRESHOLD,
+            'semesters':           semesters_out,
+        })
+
+
+# ── 1c. Batch GA Attainment ───────────────────────────────────────────────────
+
+class BatchGAAttainmentView(APIView):
+    """
+    GET /api/reports/batch-ga-attainment/?batch=sp23&departmentId=computing[&programId=bscs]
+
+    GA attainment for one admitted batch/cohort (e.g. all SP23 students),
+    identified by the batch code embedded in AdmissionStudent.reg_no
+    (e.g. "SP23-BSCS-014" -> batch "sp23"). Same course.mapped_gas /
+    per-student-percentage computation as ProgramGAAttainmentView, but
+    filtered to students in this batch instead of grouped by program.
+
+    programId is optional — omit it to see the batch across every program
+    in the department (matches "all sp23 students" as literally requested,
+    not just one program's sp23 cohort).
+
+    Response (chart-ready: one bar per GA):
+    {
+      "batch": "sp23",
+      "departmentId": "computing",
+      "studentCount": 42,
+      "attainmentThreshold": 50.0,
+      "attributes": [
+        { "id": "GA-1", "title": "...", "averageAttainment": 68.4, "assessedCount": 40, "passedCount": 27, "attainmentStatus": "Passed" }
+      ]
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        batch      = request.query_params.get('batch', '').strip().lower()
+        dept_id    = request.query_params.get('departmentId', '').strip()
+        program_id = request.query_params.get('programId', '').strip()
+
+        if not batch:
+            return Response({'error': 'batch is required (e.g. "sp23")'}, status=status.HTTP_400_BAD_REQUEST)
+        if not dept_id:
+            return Response({'error': 'departmentId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            department = Department.objects.get(dept_id=dept_id)
+        except Department.DoesNotExist:
+            return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        program = None
+        if program_id:
+            try:
+                program = Program.objects.get(code__iexact=program_id)
+            except Program.DoesNotExist:
+                return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Batch code is embedded in reg_no as "<BATCH>-<PROGRAM>-<NUM>" e.g.
+        # "SP23-BSCS-014" — matches getStudentBatchCode() on the frontend.
+        # __istartswith on reg_no is the DB-side equivalent of that parse.
+        students_qs = AdmissionStudent.objects.filter(
+            department=department, reg_no__istartswith=batch
+        )
+        if program:
+            students_qs = students_qs.filter(program=program)
+        # Uppercase-normalized set for comparison against CourseStudent.reg_no
+        # below — CourseStudent.reg_no is free-text (instructor-entered or
+        # Excel-imported, no FK to AdmissionStudent), so casing can differ.
+        # Matches the reg_no__iexact / .upper() normalization convention
+        # already used everywhere else in this file for the same
+        # AdmissionStudent <-> CourseStudent cross-reference.
+        reg_nos = set(r.upper() for r in students_qs.values_list('reg_no', flat=True))
+
+        if not reg_nos:
+            return Response({
+                'batch': batch, 'departmentId': dept_id, 'studentCount': 0,
+                'attainmentThreshold': ATTAINMENT_THRESHOLD, 'attributes': [],
+            })
+
+        gas_qs = GraduateAttribute.objects.filter(department=department)
+        if program:
+            gas_qs = gas_qs.filter(models.Q(program__isnull=True) | models.Q(program=program))
+        gas = gas_qs.order_by('ga_id')
+
+        # Pull every InstructorCourse in this department (optionally scoped
+        # to one program) that has at least one of this batch's students,
+        # and compute each such student's course percentage exactly like
+        # ProgramGAAttainmentView / _student_total_percentage do.
+        ic_qs = InstructorCourse.objects.filter(department=department)
+        if program:
+            ic_qs = ic_qs.filter(program=program)
+        ic_qs = ic_qs.prefetch_related('students__marks__unit_item__category')
+
+        # code -> list of per-student percentages, restricted to this batch
+        course_student_pcts = {}
+        for ic in ic_qs:
+            batch_students = [s for s in ic.students.all() if s.reg_no.strip().upper() in reg_nos]
+            if not batch_students:
+                continue
+            pcts = [_student_total_percentage(s) for s in batch_students]
+            course_student_pcts.setdefault(ic.code, []).extend(pcts)
+
+        catalog_courses = Course.objects.filter(
+            code__in=list(course_student_pcts.keys())
+        ).prefetch_related('mapped_gas')
+
+        # ga_id -> list of individual student percentages (not per-course
+        # averages) — pass/fail is evaluated per student per GA, matching
+        # how the existing QA batch report already counts pass/fail per
+        # student rather than per course.
+        ga_student_pcts = {}
+        for course in catalog_courses:
+            pcts = course_student_pcts.get(course.code, [])
+            for ga in course.mapped_gas.all():
+                ga_student_pcts.setdefault(ga.ga_id, []).extend(pcts)
+
+        attributes = []
+        for ga in gas:
+            pcts = ga_student_pcts.get(ga.ga_id, [])
+            assessed_count = len(pcts)
+            passed_count   = sum(1 for p in pcts if p >= ATTAINMENT_THRESHOLD)
+            avg_attainment = round(sum(pcts) / assessed_count, 2) if assessed_count > 0 else 0.0
+            attributes.append({
+                'id':                ga.ga_id,
+                'title':             ga.name,
+                'averageAttainment': avg_attainment,
+                'assessedCount':     assessed_count,
+                'passedCount':       passed_count,
+                'attainmentStatus':  'Passed' if avg_attainment >= ATTAINMENT_THRESHOLD else 'Failed',
+            })
+
+        return Response({
+            'batch':               batch,
+            'departmentId':        dept_id,
+            'programId':           program.code.lower() if program else None,
+            'studentCount':        len(reg_nos),
+            'attainmentThreshold': ATTAINMENT_THRESHOLD,
+            'attributes':          attributes,
         })
 
 

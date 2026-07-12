@@ -37,6 +37,8 @@ from .views import (
     DeptAdminProfileView,
     # Reports
     ProgramGAAttainmentView,
+    ProgramGAAttainmentBySemesterView,
+    BatchGAAttainmentView,
     StudentGAAttainmentView,
     CourseAttainmentView,
     StudentSummaryView,
@@ -92,6 +94,8 @@ urlpatterns = [
 
     # Reports
     path('reports/program-ga-attainment/', ProgramGAAttainmentView.as_view(),  name='report_program_ga'),
+    path('reports/program-ga-attainment-by-semester/', ProgramGAAttainmentBySemesterView.as_view(), name='report_program_ga_by_semester'),
+    path('reports/batch-ga-attainment/',   BatchGAAttainmentView.as_view(),    name='report_batch_ga'),
     path('reports/student-ga-attainment/', StudentGAAttainmentView.as_view(),  name='report_student_ga'),
     path('reports/course-attainment/',     CourseAttainmentView.as_view(),     name='report_course'),
     path('reports/student-summary/',       StudentSummaryView.as_view(),       name='report_student_summary'),
