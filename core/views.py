@@ -1,4 +1,6 @@
 from django.contrib.auth import authenticate
+from django.contrib.auth.hashers import make_password
+from django.conf import settings as django_settings
 from django.db import models
 from django.db import IntegrityError
 from django.db import transaction
