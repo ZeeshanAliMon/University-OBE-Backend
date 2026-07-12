@@ -3586,6 +3586,7 @@ class FinalizeCourseView(APIView):
         if not course_id:
             return Response({'error': 'courseId is required'}, status=status.HTTP_400_BAD_REQUEST)
 
+        ic = None
         try:
             ic = InstructorCourse.objects.select_related(
                 'instructor__user', 'department', 'program'
@@ -3595,7 +3596,82 @@ class FinalizeCourseView(APIView):
                 'obe_questions',
             ).get(frontend_id=course_id)
         except InstructorCourse.DoesNotExist:
-            return Response({'error': f'Course "{course_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+            # Auto-create InstructorCourse if instructor hasn't logged in yet
+            # This allows Dept Admins to finalize courses before instructor initialization
+            try:
+                # Parse frontend_id: "course-assigned-{CODE}-{PROG}-{SEM}-{YEAR}"
+                parts = course_id.split('-')
+                if len(parts) < 4 or parts[0] != 'course' or parts[1] != 'assigned':
+                    return Response(
+                        {'error': f'Invalid course ID format: "{course_id}"'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                course_code = parts[2]
+                program_code = parts[3]
+                semester = parts[4] if len(parts) > 4 else '1st'
+                academic_year = '-'.join(parts[5:]) if len(parts) > 5 else '2024'
+                
+                # Find the course and instructor from existing assignments
+                course = Course.objects.get(code__iexact=course_code)
+                program = Program.objects.filter(code__icontains=program_code).first()
+                if not program:
+                    program = Program.objects.filter(name__icontains=program_code).first()
+                
+                if not program:
+                    return Response(
+                        {'error': f'Program "{program_code}" not found'},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+                
+                # Find instructor assigned to this course
+                from core.models import CourseAssignment
+                assignment = CourseAssignment.objects.select_related(
+                    'instructor__user'
+                ).filter(
+                    course=course,
+                    program=program
+                ).first()
+                
+                if not assignment:
+                    return Response(
+                        {'error': f'No instructor assigned to {course_code} in {program_code}'},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+                
+                # Create InstructorCourse with defaults
+                ic, _ = InstructorCourse.objects.get_or_create(
+                    frontend_id=course_id,
+                    defaults={
+                        'instructor': assignment.instructor,
+                        'course': course,
+                        'program': program,
+                        'department': program.department,
+                        'semester': semester,
+                        'academic_year': academic_year,
+                        'status': 'active'
+                    }
+                )
+                
+                # Reload with relations
+                ic = InstructorCourse.objects.select_related(
+                    'instructor__user', 'department', 'program'
+                ).prefetch_related(
+                    'students__marks__unit_item__category',
+                    'students__obe_marks__question',
+                    'obe_questions',
+                ).get(id=ic.id)
+                
+            except Course.DoesNotExist:
+                return Response(
+                    {'error': f'Course "{course_code}" not found in database'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            except Exception as e:
+                return Response(
+                    {'error': f'Failed to auto-initialize course: {str(e)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
         # Department scoping — a dept_admin may only close courses that
         # belong to their own managed department. Without this check, any
