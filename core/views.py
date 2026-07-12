@@ -2560,7 +2560,12 @@ class InstructorPerformanceView(APIView):
     Shows per-instructor: which courses are below attainment threshold.
     For dept_admin and QA use.
     """
-    permission_classes = [IsAuthenticated]
+    # SECURITY: was IsAuthenticated only — any logged-in student could pull
+    # instructor names and their per-course performance breakdown. A prior
+    # commit (5927da4) claimed to apply IsStaffReport here but the string
+    # replace silently didn't match and this was left unfixed — verified
+    # and actually applied now.
+    permission_classes = [IsStaffReport]
 
     def get(self, request):
         dept_id = request.query_params.get('departmentId', '').strip()
@@ -2720,7 +2725,11 @@ class AtRiskStudentsView(APIView):
     Students below attainment threshold on 2+ CLOs across enrolled courses.
     For dept_admin and admission early intervention.
     """
-    permission_classes = [IsAuthenticated]
+    # SECURITY: was IsAuthenticated only — any logged-in student could see
+    # classmates flagged as at-risk by name. Same silent-replace-failure
+    # issue as InstructorPerformanceView above — verified and actually
+    # applied now.
+    permission_classes = [IsStaffReport]
 
     def get(self, request):
         program_id = request.query_params.get('programId', '').strip()
