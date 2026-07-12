@@ -271,11 +271,24 @@ class GraduateAttributeListView(APIView):
         return [IsAuthenticated()] if self.request.method == 'GET' else [IsQA()]
 
     def get(self, request):
-        qs = GraduateAttribute.objects.select_related('department', 'program').order_by('ga_id')
+        qs = GraduateAttribute.objects.select_related('department', 'program')
         dept = request.query_params.get('departmentId')
         if dept:
             qs = qs.filter(department__dept_id=dept)
-        return Response(GraduateAttributeSerializer(qs, many=True).data)
+
+        # Natural/numeric sort instead of lexicographic order_by('ga_id') —
+        # plain string sort puts "GA-10" between "GA-1" and "GA-2". Mirrors
+        # the naturalCompare() the frontend already applies for display;
+        # fixing it here too so the API itself returns correct order for
+        # any consumer that doesn't re-sort client-side (server-rendered
+        # exports, future integrations, etc).
+        import re as _re
+        def _natural_key(ga):
+            parts = _re.split(r'(\d+)', ga.ga_id)
+            return [int(p) if p.isdigit() else p.lower() for p in parts]
+
+        items = sorted(qs, key=_natural_key)
+        return Response(GraduateAttributeSerializer(items, many=True).data)
 
     def post(self, request):
         ws = GraduateAttributeWriteSerializer(data=request.data)
