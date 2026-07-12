@@ -469,6 +469,28 @@ class CourseDetailView(APIView):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
+        # DATA-INTEGRITY FIX: InstructorCourse has no FK to Course (only a
+        # loose code/department/program match — see the auto-create logic
+        # in InstructorCourseView), so deleting a Course here previously did
+        # NOT cascade to or even check for InstructorCourse records already
+        # created from it. A dept_admin deleting a catalog entry while a
+        # teacher has an active InstructorCourse for it (real students,
+        # grades, CLOs already entered) would silently orphan that teaching
+        # record: grades are NOT lost, but the course vanishes from every
+        # catalog/admin view while still being actively taught — the same
+        # "in progress, but now invisible" gap TeacherOnboardingView.delete
+        # already guards against for instructors. Applying the same guard.
+        conflicting = InstructorCourse.objects.filter(
+            code=obj.code, department=obj.department, program=obj.program,
+        ).filter(students__isnull=False).distinct()
+
+        if conflicting.exists():
+            return Response({
+                'error': f'Cannot delete — {conflicting.count()} instructor course record(s) '
+                         f'for "{obj.code}" already have enrolled students. Remove those '
+                         f'course assignments first.',
+            }, status=status.HTTP_409_CONFLICT)
+
         obj.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
