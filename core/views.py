@@ -1733,15 +1733,22 @@ def _get_grade(percentage: float, instructor_course) -> tuple:
 def _student_total_percentage(course_student) -> float:
     """
     Weighted total percentage using:
-      sum of: (score / total_marks) × (unit_weightage / 100) × (category_percentage / 100)
-    across all units, to produce a 0-100 scale result.
+      sum of: (score / total_marks) × (unit_weightage / 100) × (category_percentage)
+    across all units, where category_percentage is in 0-100 range.
 
-    Example: if a student scores 84/100 total marks, categories sum to 100%,
-    and all units are equally weighted, the result should be ~84%.
+    Each StudentMark row represents one unit's score. The contribution is:
+      - (score / total_marks): how well did the student do on THIS unit (0-100 scale)
+      - (weightage / 100): how much does this unit matter within its category (0-1 scale, weightage stored 0-100)
+      - category_percentage: how much does the category matter overall (already 0-100, NOT 0-1)
 
-    PREVIOUS BUG: category_percentage was treated as already being in 0-1
-    range (0.10 instead of 10). But the DB stores it as a raw number (10),
-    so it must be divided by 100 to convert to the 0-1 scale the formula needs.
+    So: (0-1) * (0-1) * (0-100) = (0-100) ✓
+
+    CRITICAL BUG FOUND & FIXED: The formula was missing the multiplication by category_percentage
+    ENTIRELY. It was just:
+      total += (score / total_marks) * (weightage / 100)
+    which gives 0-1 scale (0-100 if multiplied by 100), but never multiplied by cat.percentage,
+    so every contribution was independent of its category weight. A student scoring 100% on a
+    10% category got the same contribution as 100% on a 40% category.
     """
     marks_qs = course_student.marks.select_related('unit_item__category')
     total = 0.0
@@ -1749,14 +1756,10 @@ def _student_total_percentage(course_student) -> float:
         ui  = mark.unit_item
         cat = ui.category
         if ui.total_marks > 0 and cat.percentage > 0:
-            # Each unit's contribution is: (its percentage score) * (its weight in category) * (category's weight in overall grade)
-            # (score / total_marks) gives 0-1 scale  of student's performance on this unit
-            # (weightage / 100) gives 0-1 scale of how much this unit matters within its category
-            # (cat.percentage / 100) converts the raw number (10 for 10%) to 0-1 scale for overall contribution
-            unit_contribution = (mark.score / ui.total_marks) * (ui.weightage / 100) * (cat.percentage / 100)
+            # Contribution = (unit's score as 0-100) * (unit's weight in category) * (category's weight in total)
+            # All multiplied together to give a contribution in 0-100 scale
+            unit_contribution = (mark.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage
             total += unit_contribution
-            # Debug: if you need to see per-unit contributions, uncomment:
-            # print(f"  {cat.name} unit {ui.unit_no}: {mark.score}/{ui.total_marks} * {ui.weightage}% * {cat.percentage}% = {unit_contribution:.4f}")
     return round(total, 2)
 
 
