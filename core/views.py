@@ -1733,8 +1733,15 @@ def _get_grade(percentage: float, instructor_course) -> tuple:
 def _student_total_percentage(course_student) -> float:
     """
     Weighted total percentage using:
-      (score / total_marks) * (unit_weightage / 100) * category_percentage
-    Sums to 0-100 scale.
+      sum of: (score / total_marks) × (unit_weightage / 100) × (category_percentage / 100)
+    across all units, to produce a 0-100 scale result.
+
+    Example: if a student scores 84/100 total marks, categories sum to 100%,
+    and all units are equally weighted, the result should be ~84%.
+
+    PREVIOUS BUG: category_percentage was treated as already being in 0-1
+    range (0.10 instead of 10). But the DB stores it as a raw number (10),
+    so it must be divided by 100 to convert to the 0-1 scale the formula needs.
     """
     marks_qs = course_student.marks.select_related('unit_item__category')
     total = 0.0
@@ -1742,7 +1749,14 @@ def _student_total_percentage(course_student) -> float:
         ui  = mark.unit_item
         cat = ui.category
         if ui.total_marks > 0 and cat.percentage > 0:
-            total += (mark.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage
+            # Each unit's contribution is: (its percentage score) * (its weight in category) * (category's weight in overall grade)
+            # (score / total_marks) gives 0-1 scale  of student's performance on this unit
+            # (weightage / 100) gives 0-1 scale of how much this unit matters within its category
+            # (cat.percentage / 100) converts the raw number (10 for 10%) to 0-1 scale for overall contribution
+            unit_contribution = (mark.score / ui.total_marks) * (ui.weightage / 100) * (cat.percentage / 100)
+            total += unit_contribution
+            # Debug: if you need to see per-unit contributions, uncomment:
+            # print(f"  {cat.name} unit {ui.unit_no}: {mark.score}/{ui.total_marks} * {ui.weightage}% * {cat.percentage}% = {unit_contribution:.4f}")
     return round(total, 2)
 
 
