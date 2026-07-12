@@ -29,7 +29,7 @@ from .serializers import (
     CourseWriteSerializer, CLOWriteSerializer,
     TeacherWriteSerializer, StudentWriteSerializer,
 )
-from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin, IsDeptAdminOrQA, IsStaffReport
+from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin, IsDeptAdminOrQA, IsStaffReport, IsInstructorOrStaffReport
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -501,9 +501,58 @@ def _parse_percent_range_min(pct_str: str) -> float:
 
 
 class InstructorCourseView(APIView):
-    permission_classes = [IsInstructor]
+    def get_permissions(self):
+        # GET is shared: instructors read their own courses, QA/dept_admin/
+        # admission read the full roster for analytics. Write operations
+        # (POST/PATCH/DELETE, handled elsewhere on this view) stay
+        # instructor-only via IsInstructor.
+        if self.request.method == 'GET':
+            return [IsInstructorOrStaffReport()]
+        return [IsInstructor()]
 
     def get(self, request):
+        role = request.user.role
+
+        # ── QA / dept_admin / admission / admin: full roster, read-only ──
+        # BUG FIX: QADashboard.tsx (and equivalent dept_admin/admission
+        # views) call this same endpoint expecting ALL instructors' courses
+        # for allocation matrices and CO/PO/GA attainment analytics. Before
+        # this fix, IsInstructor rejected every QA/dept_admin request with
+        # 403, which the frontend's .catch() silently swallowed and fell
+        # back to LOCAL/MOCK data — every QA report was built on stale
+        # client-side data, never the real database, with no visible error.
+        if role in ('qa', 'dept_admin', 'admission', 'admin'):
+            qs = InstructorCourse.objects.all()
+
+            # dept_admin is scoped to their own department, matching the
+            # write-scoping pattern used elsewhere (course create/edit,
+            # teacher onboarding). QA/admission/admin see university-wide,
+            # matching COAttainmentSummaryView and AtRiskStudentsView, which
+            # already expose equivalent student-level attainment data to
+            # these roles with only a programId filter, no dept restriction.
+            if role == 'dept_admin':
+                admin_dept = get_admin_department(request.user)
+                qs = qs.filter(department=admin_dept) if admin_dept else qs.none()
+
+            dept_id = request.query_params.get('departmentId', '').strip()
+            if dept_id:
+                qs = qs.filter(department__dept_id=dept_id)
+
+            program_id = request.query_params.get('programId', '').strip()
+            if program_id:
+                qs = qs.filter(program__code__iexact=program_id)
+
+            academic_year_param = request.query_params.get('academicYear', '').strip()
+            if academic_year_param:
+                qs = qs.filter(academic_year__iexact=academic_year_param)
+            # No "latest term only" filter here (unlike the instructor path
+            # below) — QA/dept_admin analytics need historical/multi-term
+            # data for trend reporting, not just the active semester.
+
+            qs = prefetch_instructor_course(qs.order_by('created_at'))
+            return Response(InstructorCourseSerializer(qs, many=True).data)
+
+        # ── Instructor: own courses only (existing behavior, unchanged) ──
         profile = get_instructor_profile(request.user)
         if not profile:
             return Response(
