@@ -398,9 +398,14 @@ class MarksCategory(models.Model):
     Assessment category per course.
     e.g. Assignments (15%, 3 units), Mid Term (20%, 1 unit)
     Frontend type: MarksCategory { name, percentage, units }
+    
+    FIX (commit hash will show): Changed course FK from InstructorCourse to Course.
+    InstructorCourse is a specific offering of a course. MarksCategories belong to
+    the Course definition itself (catalog entry), not to each offering. Multiple
+    InstructorCourses for the same course code should all share the same categories.
     """
     course      = models.ForeignKey(
-        InstructorCourse, on_delete=models.CASCADE, related_name='categories'
+        Course, on_delete=models.CASCADE, related_name='markscategories'
     )
     name        = models.CharField(max_length=100)
     percentage  = models.FloatField(default=0)
