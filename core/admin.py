@@ -144,7 +144,7 @@ class CourseAdmin(admin.ModelAdmin):
     list_filter       = ('type', 'department', 'program')
     search_fields     = ('code', 'title')
     filter_horizontal = ('mapped_gas',)
-    inlines           = [MarksCategoryInline]
+    inlines           = []  # Will be set after all inlines are defined
 
 
 # ─── Instructor Course ────────────────────────────────────────────────────────
@@ -161,6 +161,10 @@ class MarksCategoryInline(admin.TabularInline):
     extra    = 0
     fields   = ('name', 'percentage', 'units', 'order')
     ordering = ('order',)
+
+
+# Set CourseAdmin inlines now that all are defined
+CourseAdmin.inlines = [MarksCategoryInline]
 
 
 @admin.register(InstructorCourse)
