@@ -302,6 +302,16 @@ class InstructorCourse(models.Model):
     instructor              = models.ForeignKey(
         InstructorProfile, on_delete=models.CASCADE, related_name='instructor_courses'
     )
+    # Link to the catalog Course this offering is teaching. MarksCategory now
+    # hangs off Course (see migration 0011) so that categories/units are shared
+    # across every instructor/term teaching the same course, instead of being
+    # duplicated per-offering. This FK is how InstructorCourse reaches them —
+    # nullable/SET_NULL so existing rows created before this field don't break,
+    # but every new InstructorCourse should have it set at creation time.
+    catalog_course           = models.ForeignKey(
+        Course, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='instructor_offerings'
+    )
     frontend_id             = models.CharField(max_length=100, db_index=True)
     course_type             = models.CharField(
         max_length=10,
@@ -519,7 +529,7 @@ class StudentMark(models.Model):
     Frontend key: '{categoryName}-{unitNo}' e.g. 'Assignments-1'
     """
     student   = models.ForeignKey(
-        CourseStudent, on_delete=models.CASCADE, related_name='studentmark_set'
+        CourseStudent, on_delete=models.CASCADE, related_name='marks'
     )
     unit_item = models.ForeignKey(
         UnitItem, on_delete=models.CASCADE, related_name='student_marks'

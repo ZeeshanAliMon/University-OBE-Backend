@@ -62,10 +62,16 @@ def get_admin_department(user):
 
 
 def prefetch_instructor_course(qs):
-    """Standard prefetch set for InstructorCourse querysets."""
-    return qs.select_related('department', 'program').prefetch_related(
+    """Standard prefetch set for InstructorCourse querysets.
+
+    MarksCategory/UnitItem/OBEQuestion for the marking structure live on the
+    catalog Course now (shared across instructors/terms teaching the same
+    course — see migration 0011), reached via InstructorCourse.catalog_course,
+    NOT a direct 'categories' relation on InstructorCourse itself.
+    """
+    return qs.select_related('department', 'program', 'catalog_course').prefetch_related(
         'grade_scale',
-        'categories__unit_items__questions',
+        'catalog_course__markscategories__unit_items__questions',
         'students__marks__unit_item__category',
         'students__obe_marks__question',
         'obe_questions',
@@ -531,132 +537,188 @@ class InstructorCourseView(APIView):
         # (POST/PATCH/DELETE, handled elsewhere on this view) stay
         # instructor-only via IsInstructor.
         if self.request.method == 'GET':
+            print("request method is get")
+            print(IsInstructorOrStaffReport())
             return [IsInstructorOrStaffReport()]
         return [IsInstructor()]
 
+
+
     def get(self, request):
-        role = request.user.role
+        try:
+            print("\n================ InstructorCourseView GET ================")
+            print("User:", request.user)
+            print("Authenticated:", request.user.is_authenticated)
+            print("Role:", getattr(request.user, "role", None))
+            print("Query Params:", request.query_params)
 
-        # ── QA / dept_admin / admission / admin: full roster, read-only ──
-        # BUG FIX: QADashboard.tsx (and equivalent dept_admin/admission
-        # views) call this same endpoint expecting ALL instructors' courses
-        # for allocation matrices and CO/PO/GA attainment analytics. Before
-        # this fix, IsInstructor rejected every QA/dept_admin request with
-        # 403, which the frontend's .catch() silently swallowed and fell
-        # back to LOCAL/MOCK data — every QA report was built on stale
-        # client-side data, never the real database, with no visible error.
-        if role in ('qa', 'dept_admin', 'admission', 'admin'):
-            qs = InstructorCourse.objects.all()
+            role = request.user.role
 
-            # dept_admin is scoped to their own department, matching the
-            # write-scoping pattern used elsewhere (course create/edit,
-            # teacher onboarding). QA/admission/admin see university-wide,
-            # matching COAttainmentSummaryView and AtRiskStudentsView, which
-            # already expose equivalent student-level attainment data to
-            # these roles with only a programId filter, no dept restriction.
-            if role == 'dept_admin':
-                admin_dept = get_admin_department(request.user)
-                qs = qs.filter(department=admin_dept) if admin_dept else qs.none()
+            print("Entered GET method")
 
-            dept_id = request.query_params.get('departmentId', '').strip()
-            if dept_id:
-                qs = qs.filter(department__dept_id=dept_id)
+            # ---------------- STAFF PATH ----------------
+            if role in ('qa', 'dept_admin', 'admission', 'admin'):
+                print("Entered STAFF PATH")
 
-            program_id = request.query_params.get('programId', '').strip()
-            if program_id:
-                qs = qs.filter(program__code__iexact=program_id)
+                qs = InstructorCourse.objects.all()
+                print("Initial queryset count:", qs.count())
 
-            academic_year_param = request.query_params.get('academicYear', '').strip()
-            if academic_year_param:
-                qs = qs.filter(academic_year__iexact=academic_year_param)
-            # No "latest term only" filter here (unlike the instructor path
-            # below) — QA/dept_admin analytics need historical/multi-term
-            # data for trend reporting, not just the active semester.
+                if role == 'dept_admin':
+                    print("Getting admin department...")
+                    admin_dept = get_admin_department(request.user)
+                    print("Admin department:", admin_dept)
 
-            qs = prefetch_instructor_course(qs.order_by('created_at'))
-            return Response(InstructorCourseSerializer(qs, many=True).data)
+                    qs = qs.filter(department=admin_dept) if admin_dept else qs.none()
+                    print("After department filter:", qs.count())
 
-        # ── Instructor: own courses only (existing behavior, unchanged) ──
-        profile = get_instructor_profile(request.user)
-        if not profile:
-            return Response(
-                {'error': 'Instructor profile not found'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+                dept_id = request.query_params.get('departmentId', '').strip()
+                print("departmentId =", dept_id)
+                if dept_id:
+                    qs = qs.filter(department__dept_id=dept_id)
+                    print("After departmentId filter:", qs.count())
 
-        # Auto-create InstructorCourse stubs for any CourseAssignment
-        # not yet in the instructor's course list
-        assignments = CourseAssignment.objects.filter(
-            instructor=profile
-        ).select_related('course', 'program')
+                program_id = request.query_params.get('programId', '').strip()
+                print("programId =", program_id)
+                if program_id:
+                    qs = qs.filter(program__code__iexact=program_id)
+                    print("After program filter:", qs.count())
 
-        for assignment in assignments:
-            course   = assignment.course
-            program  = assignment.program
-            term     = assignment.academic_year  # e.g. 'Fall-2024', may be blank for legacy
+                academic_year = request.query_params.get('academicYear', '').strip()
+                print("academicYear =", academic_year)
+                if academic_year:
+                    qs = qs.filter(academic_year__iexact=academic_year)
+                    print("After academic year filter:", qs.count())
 
-            # Unique ID for this assignment — includes term so the SAME
-            # teacher+course in a DIFFERENT semester is a separate record.
-            # This is what prevents a new term's offering from overwriting
-            # a previous term's marks when a teacher repeats a course.
-            prog_suffix  = program.code.lower() if program else 'all'
-            term_suffix  = f"-{term.lower().replace(' ', '')}" if term else ''
-            frontend_id  = f"course-assigned-{course.code}-{profile.employee_id}-{prog_suffix}{term_suffix}"
+                print("Calling prefetch_instructor_course()")
+                qs = prefetch_instructor_course(qs.order_by('created_at'))
 
-            # Skip auto-create if a CLOSED InstructorCourse already exists for
-            # this exact assignment+term — closed courses are finalized and
-            # must never be silently reopened or duplicated.
-            existing_closed = InstructorCourse.objects.filter(
-                instructor=profile, frontend_id=frontend_id, status='closed'
-            ).exists()
-            if existing_closed:
-                continue
+                print("Serializing...")
+                data = InstructorCourseSerializer(qs, many=True).data
 
-            # Skip auto-create if ANY record already exists for this
-            # instructor+course+program with a DIFFERENT frontend_id.
-            # This happens when a legacy record was created with the old
-            # "course-<code>-<emp_id>-<prog>" format (no "assigned-" prefix,
-            # no term suffix). Auto-creating a second record would make the
-            # same course appear twice on the teacher dashboard.
-            already_exists = InstructorCourse.objects.filter(
-                instructor=profile, code=course.code, program=program
-            ).exclude(frontend_id=frontend_id).exists()
-            if already_exists:
-                continue
+                print("Returning", len(data), "records")
+                return Response(data)
 
-            InstructorCourse.objects.get_or_create(
-                instructor=profile,
-                frontend_id=frontend_id,
-                defaults=dict(
-                    code=course.code,
-                    title=course.title,
-                    course_type='Theory',
-                    department=course.department,
-                    program=program,
-                    credit_hours=course.credit_hours,
-                    academic_year=term,
+            # ---------------- INSTRUCTOR PATH ----------------
+            print("Entered INSTRUCTOR PATH")
+
+            print("Getting instructor profile...")
+            profile = get_instructor_profile(request.user)
+            print("Profile:", profile)
+
+            if not profile:
+                print("Instructor profile NOT FOUND")
+                return Response(
+                    {'error': 'Instructor profile not found'},
+                    status=status.HTTP_403_FORBIDDEN
                 )
+
+            print("Loading assignments...")
+            assignments = CourseAssignment.objects.filter(
+                instructor=profile
+            ).select_related('course', 'program')
+
+            print("Assignments found:", assignments.count())
+
+            for assignment in assignments:
+                print("-----------------------------------")
+                print("Assignment ID:", assignment.id)
+                print("Course:", assignment.course)
+                print("Program:", assignment.program)
+
+                course = assignment.course
+                program = assignment.program
+                term = assignment.academic_year
+
+                prog_suffix = program.code.lower() if program else 'all'
+                term_suffix = f"-{term.lower().replace(' ', '')}" if term else ''
+                frontend_id = (
+                    f"course-assigned-{course.code}-"
+                    f"{profile.employee_id}-{prog_suffix}{term_suffix}"
+                )
+
+                print("Frontend ID:", frontend_id)
+
+                existing_closed = InstructorCourse.objects.filter(
+                    instructor=profile,
+                    frontend_id=frontend_id,
+                    status='closed'
+                ).exists()
+
+                print("Existing closed:", existing_closed)
+
+                if existing_closed:
+                    continue
+
+                already_exists = InstructorCourse.objects.filter(
+                    instructor=profile,
+                    code=course.code,
+                    program=program
+                ).exclude(frontend_id=frontend_id).exists()
+
+                print("Already exists:", already_exists)
+
+                if already_exists:
+                    continue
+
+                print("Creating/getting InstructorCourse...")
+                obj, created = InstructorCourse.objects.get_or_create(
+                    instructor=profile,
+                    frontend_id=frontend_id,
+                    defaults=dict(
+                        code=course.code,
+                        title=course.title,
+                        course_type='Theory',
+                        department=course.department,
+                        program=program,
+                        credit_hours=course.credit_hours,
+                        academic_year=term,
+                        catalog_course=course,
+                    )
+                )
+
+                # Backfill catalog_course on rows created before this field
+                # existed, so categories/units resolve for them too.
+                if not created and obj.catalog_course_id is None:
+                    obj.catalog_course = course
+                    obj.save(update_fields=['catalog_course'])
+
+                print("Created:", created)
+
+            print("Loading instructor courses...")
+            all_ics = InstructorCourse.objects.filter(instructor=profile)
+            print("Total instructor courses:", all_ics.count())
+
+            latest_term = (
+                all_ics.exclude(academic_year='')
+                .order_by('-academic_year')
+                .values_list('academic_year', flat=True)
+                .first()
             )
 
-        # Only show courses for the current (latest) semester.
-        # A teacher may have taught the same course in previous terms — those
-        # are historical records that should not appear on the active dashboard.
-        # We find the most recent academic_year across all this instructor's
-        # courses and filter to that term only. Courses with no academic_year
-        # (legacy records) are shown only if there are no termed records at all.
-        all_ics = InstructorCourse.objects.filter(instructor=profile)
-        latest_term = (
-            all_ics.exclude(academic_year='')
-                   .order_by('-academic_year')
-                   .values_list('academic_year', flat=True)
-                   .first()
-        )
+            print("Latest term:", latest_term)
 
-        if latest_term:
-            all_ics = all_ics.filter(academic_year=latest_term)
+            if latest_term:
+                all_ics = all_ics.filter(academic_year=latest_term)
+                print("Filtered courses:", all_ics.count())
 
-        qs = prefetch_instructor_course(all_ics.order_by('created_at'))
-        return Response(InstructorCourseSerializer(qs, many=True).data)
+            print("Prefetching...")
+            qs = prefetch_instructor_course(all_ics.order_by('created_at'))
+
+            print("Serializing...")
+            data = InstructorCourseSerializer(qs, many=True).data
+
+            print("Returning", len(data), "courses")
+            print("================ END SUCCESS ================\n")
+
+            return Response(data)
+
+        except Exception as e:
+            print("\n================ EXCEPTION =================")
+            print("Exception type:", type(e).__name__)
+            print("Exception:", e)
+            traceback.print_exc()
+            print("================ END EXCEPTION ================\n")
+            raise
 
     def post(self, request):
         profile = get_instructor_profile(request.user)
@@ -724,6 +786,22 @@ class InstructorCourseView(APIView):
                     if incoming_year:
                         upsert_defaults['academic_year'] = incoming_year
 
+                    # Resolve (or create) the catalog Course row this offering
+                    # teaches. MarksCategory/OBEQuestion hang off Course now
+                    # (migration 0011), shared across every instructor/term
+                    # teaching the same course — so we must upsert the catalog
+                    # entry too, not just the InstructorCourse header.
+                    catalog_course, _ = Course.objects.get_or_create(
+                        code=upsert_defaults['code'],
+                        department=department,
+                        program=program,
+                        defaults={
+                            'title':        upsert_defaults['title'],
+                            'credit_hours': upsert_defaults['credit_hours'],
+                        }
+                    )
+                    upsert_defaults['catalog_course'] = catalog_course
+
                     course, _ = InstructorCourse.objects.update_or_create(
                         instructor=profile,
                         frontend_id=frontend_id,
@@ -757,11 +835,18 @@ class InstructorCourseView(APIView):
                             pass
 
                     # ── Sync Categories + UnitItems ───────────────────────────────────
+                    # NOTE: these hang off catalog_course (the shared Course catalog
+                    # entry), not the per-instructor InstructorCourse row — see
+                    # migration 0011. Editing categories here affects every
+                    # instructor/term teaching this same catalog course, which
+                    # matches the frontend's mental model of "the course's marking
+                    # structure" (frontend still sends/reads categories/unitsData
+                    # nested under the InstructorCourse object, unchanged).
                     incoming_categories = c.get('categories', [])
                     incoming_units_data = c.get('unitsData', {})
                     incoming_cat_names  = [cat['name'] for cat in incoming_categories]
 
-                    course.categories.exclude(name__in=incoming_cat_names).delete()
+                    catalog_course.markscategories.exclude(name__in=incoming_cat_names).delete()
 
                     cat_obj_map  = {}   # cat_name -> MarksCategory instance
                     unit_obj_map = {}   # (cat_name, unit_no) -> UnitItem instance
@@ -769,7 +854,7 @@ class InstructorCourseView(APIView):
                     for order, cat_data in enumerate(incoming_categories):
                         cat_name = cat_data['name']
                         cat_obj, _ = MarksCategory.objects.update_or_create(
-                            course=course, name=cat_name,
+                            course=catalog_course, name=cat_name,
                             defaults={
                                 'percentage': cat_data.get('percentage', 0),
                                 'units':      cat_data.get('units', 0),
@@ -798,6 +883,10 @@ class InstructorCourseView(APIView):
 
                     # ── Sync OBE Questions ────────────────────────────────────────────
                     incoming_questions = c.get('obeQuestions', [])
+                    print(f"\n==== OBE DEBUG ====")
+                    print(f"Course: {c.get('code')} ({frontend_id})")
+                    print(f"obeQuestions received: {incoming_questions}")
+                    print(f"====================\n")
                     incoming_q_ids     = [q['id'] for q in incoming_questions]
                     course.obe_questions.exclude(frontend_id__in=incoming_q_ids).delete()
 
@@ -1366,6 +1455,7 @@ class CourseAssignmentView(APIView):
                     selected_grading_system='ready1',
                     semester='',
                     academic_year=academic_year,
+                    catalog_course=course,
                 )
             )
 
@@ -1641,9 +1731,10 @@ class StudentCoursesView(APIView):
             'course__department',
             'course__program',
             'course__instructor',   # needed for frontend_id construction
+            'course__catalog_course',
         ).prefetch_related(
             'marks__unit_item__category',
-            'course__categories',
+            'course__catalog_course__markscategories',
         )
 
         result = []
@@ -1654,10 +1745,15 @@ class StudentCoursesView(APIView):
                 f"{m.unit_item.category.name}-{m.unit_item.unit_no}": m.score
                 for m in enrollment.marks.all()
             }
-            # Build categories list (already prefetched)
+            # Build categories list (already prefetched). Categories live on
+            # catalog_course now, shared across instructors/terms — see
+            # migration 0011.
             categories = [
                 {'name': c.name, 'percentage': c.percentage, 'units': c.units}
-                for c in ic.categories.order_by('order').all()
+                for c in (
+                    ic.catalog_course.markscategories.order_by('order').all()
+                    if ic.catalog_course_id else []
+                )
             ]
             program_code  = ic.program.code if ic.program else ''
             result.append({
@@ -3666,9 +3762,12 @@ class FinalizeCourseView(APIView):
                     frontend_id=course_id,
                     defaults={
                         'instructor': assignment.instructor,
-                        'course': course,
+                        'code': course.code,
+                        'title': course.title,
+                        'catalog_course': course,
                         'program': program,
                         'department': program.department,
+                        'credit_hours': course.credit_hours or 3,
                         'semester': semester,
                         'academic_year': academic_year,
                         'status': 'active'
@@ -3677,11 +3776,12 @@ class FinalizeCourseView(APIView):
                 
                 # Reload with relations
                 ic = InstructorCourse.objects.select_related(
-                    'instructor__user', 'department', 'program'
+                    'instructor__user', 'department', 'program', 'catalog_course'
                 ).prefetch_related(
                     'students__marks__unit_item__category',
                     'students__obe_marks__question',
                     'obe_questions',
+                    'catalog_course__markscategories__unit_items',
                 ).get(id=ic.id)
                 
             except Course.DoesNotExist:
@@ -3724,7 +3824,7 @@ class FinalizeCourseView(APIView):
         # before permanently committing a grade.
         validation_errors = []
 
-        categories = list(ic.categories.all())
+        categories = list(ic.catalog_course.markscategories.all()) if ic.catalog_course_id else []
         if not categories:
             validation_errors.append('Course has no marks categories defined.')
         else:
