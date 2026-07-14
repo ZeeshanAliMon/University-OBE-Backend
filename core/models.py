@@ -529,7 +529,7 @@ class StudentMark(models.Model):
     Frontend key: '{categoryName}-{unitNo}' e.g. 'Assignments-1'
     """
     student   = models.ForeignKey(
-        CourseStudent, on_delete=models.CASCADE, related_name='studentmark_set'
+        CourseStudent, on_delete=models.CASCADE, related_name='marks'
     )
     unit_item = models.ForeignKey(
         UnitItem, on_delete=models.CASCADE, related_name='student_marks'
