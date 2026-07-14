@@ -171,7 +171,7 @@ TEMPLATES = [
 # Every account created with this password must also get must_change_password=True
 # (enforced server-side in core/authentication.py) — the temp password alone is not
 # a security boundary, the forced-rotation gate is.
-DEFAULT_TEMP_PASSWORD = os.environ.get('DEFAULT_TEMP_PASSWORD', 'zeeshan123')
+DEFAULT_TEMP_PASSWORD = os.environ.get('DEFAULT_TEMP_PASSWORD', 'zeeshan1234')
 
 AUTH_USER_MODEL = 'core.User'
 WSGI_APPLICATION = 'obe.wsgi.application'
