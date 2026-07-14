@@ -317,7 +317,14 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
         ).data
 
     def get_obeQuestions(self, obj):
-        return OBEQuestionSerializer(obj.obe_questions.all(), many=True).data
+        import logging
+        logger = logging.getLogger(__name__)
+        questions = obj.obe_questions.all()
+        count = questions.count()
+        logger.warning(f"🔍 FETCHING OBE QUESTIONS: course={obj.code}, count={count}")
+        for q in questions:
+            logger.warning(f"   - q_id={q.id}, frontend_id={q.frontend_id}, name={q.question_name}, unit_item={q.unit_item}")
+        return OBEQuestionSerializer(questions, many=True).data
 
     def get_obeMarks(self, obj):
         result = {}
