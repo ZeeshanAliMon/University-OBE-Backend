@@ -896,11 +896,7 @@ class InstructorCourseView(APIView):
                         unit_no  = q_data.get('unitNo', 0)
                         unit_obj = unit_obj_map.get((cat_name, unit_no))
 
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.warning(f"🔍 SAVING OBE QUESTION: course={course.code}, q_id={q_data['id']}, name={q_data.get('questionName')}, unit_obj={unit_obj}")
-
-                        q_obj, created = OBEQuestion.objects.update_or_create(
+                        q_obj, _ = OBEQuestion.objects.update_or_create(
                             course=course,
                             frontend_id=q_data['id'],
                             defaults={
@@ -913,7 +909,6 @@ class InstructorCourseView(APIView):
                                 'order':         order,
                             }
                         )
-                        logger.warning(f"✅ SAVED: q_obj.id={q_obj.id}, created={created}, q_obj.unit_item={q_obj.unit_item}")
                         q_obj_map[q_data['id']] = q_obj
 
                     # ── Sync Students ─────────────────────────────────────────────────
