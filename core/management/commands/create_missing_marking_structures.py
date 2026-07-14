@@ -25,44 +25,56 @@ class Command(BaseCommand):
         
         categories_created = 0
         units_created = 0
+        errors = 0
         
         for course in courses_without_structure:
-            self.stdout.write(f'  Creating for {course.code}...')
-            
-            # Standard structure: Assignment (30%, 2 units), Mid (30%, 1 unit), Final (40%, 1 unit)
-            category_specs = [
-                ("Assignment", 30, 2),
-                ("Mid Term", 30, 1),
-                ("Final", 40, 1),
-            ]
-            
-            for order, (name, pct, num_units) in enumerate(category_specs):
-                cat = MarksCategory.objects.create(
-                    course=course,
-                    name=name,
-                    percentage=pct,
-                    units=num_units,
-                    order=order
-                )
-                categories_created += 1
+            try:
+                self.stdout.write(f'  Creating for {course.code}...')
                 
-                # Create units for this category
-                for unit_no in range(1, num_units + 1):
-                    total_marks = 15 if num_units > 1 else (30 if name == "Mid Term" else 40)
-                    weightage = 100.0 / num_units
-                    
-                    UnitItem.objects.create(
-                        category=cat,
-                        unit_no=unit_no,
-                        total_marks=total_marks,
-                        weightage=weightage,
-                        passing=total_marks * 0.5,
-                        mapped_clos=json.dumps([])
+                # Standard structure: Assignment (30%, 2 units), Mid (30%, 1 unit), Final (40%, 1 unit)
+                category_specs = [
+                    ("Assignment", 30, 2),
+                    ("Mid Term", 30, 1),
+                    ("Final", 40, 1),
+                ]
+                
+                for order, (name, pct, num_units) in enumerate(category_specs):
+                    cat = MarksCategory.objects.create(
+                        course=course,
+                        name=name,
+                        percentage=pct,
+                        units=num_units,
+                        order=order
                     )
-                    units_created += 1
+                    categories_created += 1
+                    
+                    # Create units for this category
+                    for unit_no in range(1, num_units + 1):
+                        total_marks = 15 if num_units > 1 else (30 if name == "Mid Term" else 40)
+                        weightage = 100.0 / num_units
+                        
+                        UnitItem.objects.create(
+                            category=cat,
+                            unit_no=unit_no,
+                            total_marks=total_marks,
+                            weightage=weightage,
+                            passing=total_marks * 0.5,
+                            mapped_clos=json.dumps([])
+                        )
+                        units_created += 1
+            except Exception as e:
+                errors += 1
+                self.stdout.write(
+                    self.style.ERROR(f'    ERROR: {str(e)}')
+                )
         
         self.stdout.write(
             self.style.SUCCESS(
                 f'✅ Created {categories_created} categories with {units_created} units'
             )
         )
+        
+        if errors > 0:
+            self.stdout.write(
+                self.style.WARNING(f'⚠ {errors} courses had errors (likely data issues)')
+            )
