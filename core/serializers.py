@@ -302,11 +302,18 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
         return GradeScaleSerializer(obj.grade_scale.all(), many=True).data
 
     def get_categories(self, obj):
-        return MarksCategorySerializer(obj.categories.all(), many=True).data
+        # MarksCategory now belongs to the catalog Course, not InstructorCourse
+        # directly (migration 0011) — shared across every instructor/term
+        # teaching the same course. Reached via catalog_course.
+        if not obj.catalog_course_id:
+            return []
+        return MarksCategorySerializer(obj.catalog_course.markscategories.all(), many=True).data
 
     def get_unitsData(self, obj):
         result = {}
-        for cat in obj.categories.prefetch_related('unit_items__questions').all():
+        if not obj.catalog_course_id:
+            return result
+        for cat in obj.catalog_course.markscategories.all():
             result[cat.name] = UnitItemSerializer(cat.unit_items.all(), many=True).data
         return result
 

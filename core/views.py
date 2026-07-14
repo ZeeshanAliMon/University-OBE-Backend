@@ -62,10 +62,16 @@ def get_admin_department(user):
 
 
 def prefetch_instructor_course(qs):
-    """Standard prefetch set for InstructorCourse querysets."""
-    return qs.select_related('department', 'program').prefetch_related(
+    """Standard prefetch set for InstructorCourse querysets.
+
+    MarksCategory/UnitItem/OBEQuestion for the marking structure live on the
+    catalog Course now (shared across instructors/terms teaching the same
+    course — see migration 0011), reached via InstructorCourse.catalog_course,
+    NOT a direct 'categories' relation on InstructorCourse itself.
+    """
+    return qs.select_related('department', 'program', 'catalog_course').prefetch_related(
         'grade_scale',
-        'categories__unit_items__questions',
+        'catalog_course__markscategories__unit_items__questions',
         'students__marks__unit_item__category',
         'students__obe_marks__question',
         'obe_questions',
@@ -666,8 +672,15 @@ class InstructorCourseView(APIView):
                         program=program,
                         credit_hours=course.credit_hours,
                         academic_year=term,
+                        catalog_course=course,
                     )
                 )
+
+                # Backfill catalog_course on rows created before this field
+                # existed, so categories/units resolve for them too.
+                if not created and obj.catalog_course_id is None:
+                    obj.catalog_course = course
+                    obj.save(update_fields=['catalog_course'])
 
                 print("Created:", created)
 
@@ -773,6 +786,22 @@ class InstructorCourseView(APIView):
                     if incoming_year:
                         upsert_defaults['academic_year'] = incoming_year
 
+                    # Resolve (or create) the catalog Course row this offering
+                    # teaches. MarksCategory/OBEQuestion hang off Course now
+                    # (migration 0011), shared across every instructor/term
+                    # teaching the same course — so we must upsert the catalog
+                    # entry too, not just the InstructorCourse header.
+                    catalog_course, _ = Course.objects.get_or_create(
+                        code=upsert_defaults['code'],
+                        department=department,
+                        program=program,
+                        defaults={
+                            'title':        upsert_defaults['title'],
+                            'credit_hours': upsert_defaults['credit_hours'],
+                        }
+                    )
+                    upsert_defaults['catalog_course'] = catalog_course
+
                     course, _ = InstructorCourse.objects.update_or_create(
                         instructor=profile,
                         frontend_id=frontend_id,
@@ -806,11 +835,18 @@ class InstructorCourseView(APIView):
                             pass
 
                     # ── Sync Categories + UnitItems ───────────────────────────────────
+                    # NOTE: these hang off catalog_course (the shared Course catalog
+                    # entry), not the per-instructor InstructorCourse row — see
+                    # migration 0011. Editing categories here affects every
+                    # instructor/term teaching this same catalog course, which
+                    # matches the frontend's mental model of "the course's marking
+                    # structure" (frontend still sends/reads categories/unitsData
+                    # nested under the InstructorCourse object, unchanged).
                     incoming_categories = c.get('categories', [])
                     incoming_units_data = c.get('unitsData', {})
                     incoming_cat_names  = [cat['name'] for cat in incoming_categories]
 
-                    course.categories.exclude(name__in=incoming_cat_names).delete()
+                    catalog_course.markscategories.exclude(name__in=incoming_cat_names).delete()
 
                     cat_obj_map  = {}   # cat_name -> MarksCategory instance
                     unit_obj_map = {}   # (cat_name, unit_no) -> UnitItem instance
@@ -818,7 +854,7 @@ class InstructorCourseView(APIView):
                     for order, cat_data in enumerate(incoming_categories):
                         cat_name = cat_data['name']
                         cat_obj, _ = MarksCategory.objects.update_or_create(
-                            course=course, name=cat_name,
+                            course=catalog_course, name=cat_name,
                             defaults={
                                 'percentage': cat_data.get('percentage', 0),
                                 'units':      cat_data.get('units', 0),
@@ -1410,6 +1446,7 @@ class CourseAssignmentView(APIView):
                     selected_grading_system='ready1',
                     semester='',
                     academic_year=academic_year,
+                    catalog_course=course,
                 )
             )
 
@@ -1685,9 +1722,10 @@ class StudentCoursesView(APIView):
             'course__department',
             'course__program',
             'course__instructor',   # needed for frontend_id construction
+            'course__catalog_course',
         ).prefetch_related(
             'marks__unit_item__category',
-            'course__categories',
+            'course__catalog_course__markscategories',
         )
 
         result = []
@@ -1698,10 +1736,15 @@ class StudentCoursesView(APIView):
                 f"{m.unit_item.category.name}-{m.unit_item.unit_no}": m.score
                 for m in enrollment.marks.all()
             }
-            # Build categories list (already prefetched)
+            # Build categories list (already prefetched). Categories live on
+            # catalog_course now, shared across instructors/terms — see
+            # migration 0011.
             categories = [
                 {'name': c.name, 'percentage': c.percentage, 'units': c.units}
-                for c in ic.categories.order_by('order').all()
+                for c in (
+                    ic.catalog_course.markscategories.order_by('order').all()
+                    if ic.catalog_course_id else []
+                )
             ]
             program_code  = ic.program.code if ic.program else ''
             result.append({
@@ -3710,9 +3753,12 @@ class FinalizeCourseView(APIView):
                     frontend_id=course_id,
                     defaults={
                         'instructor': assignment.instructor,
-                        'course': course,
+                        'code': course.code,
+                        'title': course.title,
+                        'catalog_course': course,
                         'program': program,
                         'department': program.department,
+                        'credit_hours': course.credit_hours or 3,
                         'semester': semester,
                         'academic_year': academic_year,
                         'status': 'active'
@@ -3721,11 +3767,12 @@ class FinalizeCourseView(APIView):
                 
                 # Reload with relations
                 ic = InstructorCourse.objects.select_related(
-                    'instructor__user', 'department', 'program'
+                    'instructor__user', 'department', 'program', 'catalog_course'
                 ).prefetch_related(
                     'students__marks__unit_item__category',
                     'students__obe_marks__question',
                     'obe_questions',
+                    'catalog_course__markscategories__unit_items',
                 ).get(id=ic.id)
                 
             except Course.DoesNotExist:
@@ -3768,7 +3815,7 @@ class FinalizeCourseView(APIView):
         # before permanently committing a grade.
         validation_errors = []
 
-        categories = list(ic.categories.all())
+        categories = list(ic.catalog_course.markscategories.all()) if ic.catalog_course_id else []
         if not categories:
             validation_errors.append('Course has no marks categories defined.')
         else:
