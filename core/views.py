@@ -531,132 +531,181 @@ class InstructorCourseView(APIView):
         # (POST/PATCH/DELETE, handled elsewhere on this view) stay
         # instructor-only via IsInstructor.
         if self.request.method == 'GET':
+            print("request method is get")
+            print(IsInstructorOrStaffReport())
             return [IsInstructorOrStaffReport()]
         return [IsInstructor()]
 
+
+
     def get(self, request):
-        role = request.user.role
+        try:
+            print("\n================ InstructorCourseView GET ================")
+            print("User:", request.user)
+            print("Authenticated:", request.user.is_authenticated)
+            print("Role:", getattr(request.user, "role", None))
+            print("Query Params:", request.query_params)
 
-        # ── QA / dept_admin / admission / admin: full roster, read-only ──
-        # BUG FIX: QADashboard.tsx (and equivalent dept_admin/admission
-        # views) call this same endpoint expecting ALL instructors' courses
-        # for allocation matrices and CO/PO/GA attainment analytics. Before
-        # this fix, IsInstructor rejected every QA/dept_admin request with
-        # 403, which the frontend's .catch() silently swallowed and fell
-        # back to LOCAL/MOCK data — every QA report was built on stale
-        # client-side data, never the real database, with no visible error.
-        if role in ('qa', 'dept_admin', 'admission', 'admin'):
-            qs = InstructorCourse.objects.all()
+            role = request.user.role
 
-            # dept_admin is scoped to their own department, matching the
-            # write-scoping pattern used elsewhere (course create/edit,
-            # teacher onboarding). QA/admission/admin see university-wide,
-            # matching COAttainmentSummaryView and AtRiskStudentsView, which
-            # already expose equivalent student-level attainment data to
-            # these roles with only a programId filter, no dept restriction.
-            if role == 'dept_admin':
-                admin_dept = get_admin_department(request.user)
-                qs = qs.filter(department=admin_dept) if admin_dept else qs.none()
+            print("Entered GET method")
 
-            dept_id = request.query_params.get('departmentId', '').strip()
-            if dept_id:
-                qs = qs.filter(department__dept_id=dept_id)
+            # ---------------- STAFF PATH ----------------
+            if role in ('qa', 'dept_admin', 'admission', 'admin'):
+                print("Entered STAFF PATH")
 
-            program_id = request.query_params.get('programId', '').strip()
-            if program_id:
-                qs = qs.filter(program__code__iexact=program_id)
+                qs = InstructorCourse.objects.all()
+                print("Initial queryset count:", qs.count())
 
-            academic_year_param = request.query_params.get('academicYear', '').strip()
-            if academic_year_param:
-                qs = qs.filter(academic_year__iexact=academic_year_param)
-            # No "latest term only" filter here (unlike the instructor path
-            # below) — QA/dept_admin analytics need historical/multi-term
-            # data for trend reporting, not just the active semester.
+                if role == 'dept_admin':
+                    print("Getting admin department...")
+                    admin_dept = get_admin_department(request.user)
+                    print("Admin department:", admin_dept)
 
-            qs = prefetch_instructor_course(qs.order_by('created_at'))
-            return Response(InstructorCourseSerializer(qs, many=True).data)
+                    qs = qs.filter(department=admin_dept) if admin_dept else qs.none()
+                    print("After department filter:", qs.count())
 
-        # ── Instructor: own courses only (existing behavior, unchanged) ──
-        profile = get_instructor_profile(request.user)
-        if not profile:
-            return Response(
-                {'error': 'Instructor profile not found'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+                dept_id = request.query_params.get('departmentId', '').strip()
+                print("departmentId =", dept_id)
+                if dept_id:
+                    qs = qs.filter(department__dept_id=dept_id)
+                    print("After departmentId filter:", qs.count())
 
-        # Auto-create InstructorCourse stubs for any CourseAssignment
-        # not yet in the instructor's course list
-        assignments = CourseAssignment.objects.filter(
-            instructor=profile
-        ).select_related('course', 'program')
+                program_id = request.query_params.get('programId', '').strip()
+                print("programId =", program_id)
+                if program_id:
+                    qs = qs.filter(program__code__iexact=program_id)
+                    print("After program filter:", qs.count())
 
-        for assignment in assignments:
-            course   = assignment.course
-            program  = assignment.program
-            term     = assignment.academic_year  # e.g. 'Fall-2024', may be blank for legacy
+                academic_year = request.query_params.get('academicYear', '').strip()
+                print("academicYear =", academic_year)
+                if academic_year:
+                    qs = qs.filter(academic_year__iexact=academic_year)
+                    print("After academic year filter:", qs.count())
 
-            # Unique ID for this assignment — includes term so the SAME
-            # teacher+course in a DIFFERENT semester is a separate record.
-            # This is what prevents a new term's offering from overwriting
-            # a previous term's marks when a teacher repeats a course.
-            prog_suffix  = program.code.lower() if program else 'all'
-            term_suffix  = f"-{term.lower().replace(' ', '')}" if term else ''
-            frontend_id  = f"course-assigned-{course.code}-{profile.employee_id}-{prog_suffix}{term_suffix}"
+                print("Calling prefetch_instructor_course()")
+                qs = prefetch_instructor_course(qs.order_by('created_at'))
 
-            # Skip auto-create if a CLOSED InstructorCourse already exists for
-            # this exact assignment+term — closed courses are finalized and
-            # must never be silently reopened or duplicated.
-            existing_closed = InstructorCourse.objects.filter(
-                instructor=profile, frontend_id=frontend_id, status='closed'
-            ).exists()
-            if existing_closed:
-                continue
+                print("Serializing...")
+                data = InstructorCourseSerializer(qs, many=True).data
 
-            # Skip auto-create if ANY record already exists for this
-            # instructor+course+program with a DIFFERENT frontend_id.
-            # This happens when a legacy record was created with the old
-            # "course-<code>-<emp_id>-<prog>" format (no "assigned-" prefix,
-            # no term suffix). Auto-creating a second record would make the
-            # same course appear twice on the teacher dashboard.
-            already_exists = InstructorCourse.objects.filter(
-                instructor=profile, code=course.code, program=program
-            ).exclude(frontend_id=frontend_id).exists()
-            if already_exists:
-                continue
+                print("Returning", len(data), "records")
+                return Response(data)
 
-            InstructorCourse.objects.get_or_create(
-                instructor=profile,
-                frontend_id=frontend_id,
-                defaults=dict(
-                    code=course.code,
-                    title=course.title,
-                    course_type='Theory',
-                    department=course.department,
-                    program=program,
-                    credit_hours=course.credit_hours,
-                    academic_year=term,
+            # ---------------- INSTRUCTOR PATH ----------------
+            print("Entered INSTRUCTOR PATH")
+
+            print("Getting instructor profile...")
+            profile = get_instructor_profile(request.user)
+            print("Profile:", profile)
+
+            if not profile:
+                print("Instructor profile NOT FOUND")
+                return Response(
+                    {'error': 'Instructor profile not found'},
+                    status=status.HTTP_403_FORBIDDEN
                 )
+
+            print("Loading assignments...")
+            assignments = CourseAssignment.objects.filter(
+                instructor=profile
+            ).select_related('course', 'program')
+
+            print("Assignments found:", assignments.count())
+
+            for assignment in assignments:
+                print("-----------------------------------")
+                print("Assignment ID:", assignment.id)
+                print("Course:", assignment.course)
+                print("Program:", assignment.program)
+
+                course = assignment.course
+                program = assignment.program
+                term = assignment.academic_year
+
+                prog_suffix = program.code.lower() if program else 'all'
+                term_suffix = f"-{term.lower().replace(' ', '')}" if term else ''
+                frontend_id = (
+                    f"course-assigned-{course.code}-"
+                    f"{profile.employee_id}-{prog_suffix}{term_suffix}"
+                )
+
+                print("Frontend ID:", frontend_id)
+
+                existing_closed = InstructorCourse.objects.filter(
+                    instructor=profile,
+                    frontend_id=frontend_id,
+                    status='closed'
+                ).exists()
+
+                print("Existing closed:", existing_closed)
+
+                if existing_closed:
+                    continue
+
+                already_exists = InstructorCourse.objects.filter(
+                    instructor=profile,
+                    code=course.code,
+                    program=program
+                ).exclude(frontend_id=frontend_id).exists()
+
+                print("Already exists:", already_exists)
+
+                if already_exists:
+                    continue
+
+                print("Creating/getting InstructorCourse...")
+                obj, created = InstructorCourse.objects.get_or_create(
+                    instructor=profile,
+                    frontend_id=frontend_id,
+                    defaults=dict(
+                        code=course.code,
+                        title=course.title,
+                        course_type='Theory',
+                        department=course.department,
+                        program=program,
+                        credit_hours=course.credit_hours,
+                        academic_year=term,
+                    )
+                )
+
+                print("Created:", created)
+
+            print("Loading instructor courses...")
+            all_ics = InstructorCourse.objects.filter(instructor=profile)
+            print("Total instructor courses:", all_ics.count())
+
+            latest_term = (
+                all_ics.exclude(academic_year='')
+                .order_by('-academic_year')
+                .values_list('academic_year', flat=True)
+                .first()
             )
 
-        # Only show courses for the current (latest) semester.
-        # A teacher may have taught the same course in previous terms — those
-        # are historical records that should not appear on the active dashboard.
-        # We find the most recent academic_year across all this instructor's
-        # courses and filter to that term only. Courses with no academic_year
-        # (legacy records) are shown only if there are no termed records at all.
-        all_ics = InstructorCourse.objects.filter(instructor=profile)
-        latest_term = (
-            all_ics.exclude(academic_year='')
-                   .order_by('-academic_year')
-                   .values_list('academic_year', flat=True)
-                   .first()
-        )
+            print("Latest term:", latest_term)
 
-        if latest_term:
-            all_ics = all_ics.filter(academic_year=latest_term)
+            if latest_term:
+                all_ics = all_ics.filter(academic_year=latest_term)
+                print("Filtered courses:", all_ics.count())
 
-        qs = prefetch_instructor_course(all_ics.order_by('created_at'))
-        return Response(InstructorCourseSerializer(qs, many=True).data)
+            print("Prefetching...")
+            qs = prefetch_instructor_course(all_ics.order_by('created_at'))
+
+            print("Serializing...")
+            data = InstructorCourseSerializer(qs, many=True).data
+
+            print("Returning", len(data), "courses")
+            print("================ END SUCCESS ================\n")
+
+            return Response(data)
+
+        except Exception as e:
+            print("\n================ EXCEPTION =================")
+            print("Exception type:", type(e).__name__)
+            print("Exception:", e)
+            traceback.print_exc()
+            print("================ END EXCEPTION ================\n")
+            raise
 
     def post(self, request):
         profile = get_instructor_profile(request.user)
