@@ -144,6 +144,7 @@ class CourseAdmin(admin.ModelAdmin):
     list_filter       = ('type', 'department', 'program')
     search_fields     = ('code', 'title')
     filter_horizontal = ('mapped_gas',)
+    inlines           = [MarksCategoryInline]
 
 
 # ─── Instructor Course ────────────────────────────────────────────────────────
@@ -169,7 +170,7 @@ class InstructorCourseAdmin(admin.ModelAdmin):
     list_filter     = ('department', 'program', 'selected_grading_system')
     search_fields   = ('code', 'title', 'instructor__user__username', 'frontend_id')
     readonly_fields = ('frontend_id', 'created_at', 'updated_at')
-    inlines         = [GradeScaleInline, MarksCategoryInline]
+    inlines         = [GradeScaleInline]
 
 
 # ─── Marks Category ───────────────────────────────────────────────────────────
