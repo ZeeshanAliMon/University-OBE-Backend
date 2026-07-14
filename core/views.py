@@ -883,6 +883,10 @@ class InstructorCourseView(APIView):
 
                     # ── Sync OBE Questions ────────────────────────────────────────────
                     incoming_questions = c.get('obeQuestions', [])
+                    print(f"\n==== OBE DEBUG ====")
+                    print(f"Course: {c.get('code')} ({frontend_id})")
+                    print(f"obeQuestions received: {incoming_questions}")
+                    print(f"====================\n")
                     incoming_q_ids     = [q['id'] for q in incoming_questions]
                     course.obe_questions.exclude(frontend_id__in=incoming_q_ids).delete()
 
