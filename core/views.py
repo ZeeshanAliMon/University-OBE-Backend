@@ -1694,9 +1694,120 @@ class StudentCoursesView(APIView):
         "code":        "CMC111",
         "title":       "Programming Fundamentals (BSCS)",
         "creditHours": 3,
-        "categories":  [...],
-        "studentMarks": { "Assignments-1": 8.5, "Mid Term-1": 24.5 }
+        "categories":  [
+            {
+                "name":       "Assignments",
+                "percentage": 10,     ← category weight in total grade (0-100)
+                "units":      2       ← number of units in this category
+            }
+        ],
+        "unitsData": {
+            "Assignments": [
+                {
+                    "unitNo":     1,
+                    "totalMarks": 10,   ← max marks for this unit
+                    "weightage":  50,   ← unit weight within category (0-100, sums to 100 per cat)
+                    "passing":    5,
+                    "obtainedMarks": 8  ← student's raw score
+                }
+            ]
+        },
+        "studentMarks": { "Assignments-1": 8, "Assignments-2": 5 },  ← raw scores (legacy)
+        "weightedMarks": {
+            "Assignments-1": {
+                "obtained":     8,     ← raw score
+                "totalMarks":   10,    ← max for this unit
+                "weightage":    50,    ← unit weight within category
+                "catPercentage":10,    ← category weight in total
+                "contribution": 4.0    ← actual contribution to final grade
+                                       ← formula: (8/10) * (50/100) * 10 = 4.0%
+            }
+        },
+        "totalPercentage": 88.0,       ← backend-calculated final grade (USE THIS!)
+        "grade":           "A-",       ← backend-calculated letter grade (USE THIS!)
+        "gradePoints":     3.67,       ← backend-calculated GPA points (USE THIS!)
+        "obeQuestions": [
+            {
+                "id":         "1784046977475_1",
+                "questionName": "Question 1",
+                "maxMarks":   5,
+                "categoryName": "Assignments",
+                "unitNo":     1,
+                "mappedCLOs": ["CLO-1"]
+            }
+        ],
+        "obeMarks": {
+            "1784046977475_1": 5.0     ← student's score for this specific question
+        },
+        "cloAttainments": [
+            {
+                "code":       "CLO-1",
+                "percentage": 100.0,   ← (student_score / max_score) * 100
+                "attained":   true     ← percentage >= 50%
+            }
+        ]
     }
+
+    HOW MARKS WORK:
+    ─────────────────────────────────────────────────────────────
+    There are TWO types of marks in the system:
+
+    1. StudentMark (Regular Marks) — stored per unit
+       - Key: "{CategoryName}-{unitNo}" e.g. "Assignments-1"
+       - Value: raw score e.g. 8.0
+       - Total: unit.total_marks e.g. 10.0
+       - These are what show in the marks grid
+
+    2. OBEStudentMark (OBE Marks) — stored per question
+       - Key: question.frontend_id e.g. "1784046977475_1"
+       - Value: raw score e.g. 5.0
+       - Total: question.max_marks e.g. 5.0
+       - These are used for CLO attainment calculation
+
+    HOW TOTAL PERCENTAGE IS CALCULATED:
+    ─────────────────────────────────────────────────────────────
+    For each StudentMark:
+        contribution = (score / unit.total_marks)    ← 0-1 scale (how well student did)
+                     * (unit.weightage / 100)         ← 0-1 scale (unit's share of category)
+                     * category.percentage            ← 0-100 scale (category's share of total)
+
+    Example:
+        Assignments Unit 1: (8/10) * (50/100) * 10 = 4.0%
+        Assignments Unit 2: (5/5)  * (50/100) * 10 = 5.0%
+        Quizzes Unit 1:     (4/5)  * (100/100) * 10 = 8.0%
+        Mid Term Unit 1:    (7/10) * (100/100) * 30 = 21.0%
+        Final Unit 1:       (5/5)  * (100/100) * 50 = 50.0%
+        ──────────────────────────────────────────────────────
+        TOTAL = 88.0%  → Grade: A-
+
+    !! DO NOT RECALCULATE THIS ON FRONTEND !!
+    Use totalPercentage, grade, and gradePoints from this response directly.
+
+    HOW CLO ATTAINMENT IS CALCULATED:
+    ─────────────────────────────────────────────────────────────
+    For each CLO, find all questions mapped to it:
+        CLO-1 questions: [Q1(max=5, score=5)]
+        CLO-1 attainment = (5/5) * 100 = 100%
+
+        CLO-2 questions: [Q2(max=5, score=3), Q1-unit2(max=5, score=5), Q2-mid(max=5, score=3), Q1-final(max=5, score=5)]
+        CLO-2 attainment = (3+5+3+5)/(5+5+5+5) * 100 = 16/20 * 100 = 80%
+
+    !! DO NOT RECALCULATE CLOs ON FRONTEND !!
+    Use cloAttainments from /api/reports/student-summary/ directly.
+
+    HOW MARKS DISPLAY SHOULD WORK ON FRONTEND:
+    ─────────────────────────────────────────────────────────────
+    The student dashboard "Assessment Marks Breakdown" section should show:
+        Category    | Obtained | Total | Weight%
+        Assignments |    9.0   |  10   |  10%     ← use weightedMarks contributions sum
+        Quizzes     |    8.0   |  10   |  10%
+        Mid Term    |   21.0   |  30   |  30%
+        Final       |   50.0   |  50   |  50%
+        ─────────────────────────────────────────
+        TOTAL       |   88.0   | 100   | 100%
+
+    The "obtained" here is the WEIGHTED contribution, NOT the raw score.
+    "Assignments obtained = 9.0" means 9 out of 10 possible percentage points.
 
     Requires: User.role == 'student'
     """
@@ -1709,40 +1820,133 @@ class StudentCoursesView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Get reg_no from Student profile
         try:
             reg_no = request.user.student_profile.reg_no
         except Exception:
-            # No Student profile — fall back to username for demo/seed users
-            reg_no = request.user.email.split('@')[0]  # fallback only
+            reg_no = request.user.email.split('@')[0]
 
-        # Find all CourseStudent rows matching this reg_no.
-        # select_related covers every FK traversal in the response loop below
-        # so no per-course DB hits occur. Previously instructor was missing,
-        # causing one extra query per enrolled course for employee_id.
         enrollments = CourseStudent.objects.filter(
             reg_no=reg_no
         ).select_related(
             'course__department',
             'course__program',
-            'course__instructor',   # needed for frontend_id construction
+            'course__instructor',
             'course__catalog_course',
         ).prefetch_related(
             'marks__unit_item__category',
-            'course__catalog_course__markscategories',
+            'course__catalog_course__markscategories__unit_items',
+            'course__obe_questions',
+            'obe_marks__question',
         )
 
         result = []
         for enrollment in enrollments:
             ic = enrollment.course
-            # Build student-specific marks dict (marks already prefetched)
+
+            # ── 1. Raw marks dict (legacy format, kept for backward compat) ──
             student_marks = {
                 f"{m.unit_item.category.name}-{m.unit_item.unit_no}": m.score
                 for m in enrollment.marks.all()
             }
-            # Build categories list (already prefetched). Categories live on
-            # catalog_course now, shared across instructors/terms — see
-            # migration 0011.
+
+            # ── 2. Weighted marks with full context ──────────────────────────
+            # Each unit tells frontend: raw score, total marks, weights, contribution
+            weighted_marks = {}
+            units_data = {}
+            total_percentage = 0.0
+
+            all_marks = list(enrollment.marks.select_related('unit_item__category').all())
+            for m in all_marks:
+                ui  = m.unit_item
+                cat = ui.category
+                key = f"{cat.name}-{ui.unit_no}"
+
+                contribution = 0.0
+                if ui.total_marks > 0 and cat.percentage > 0:
+                    contribution = (m.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage
+                    total_percentage += contribution
+
+                weighted_marks[key] = {
+                    'obtained':      m.score,          # raw score e.g. 8.0
+                    'totalMarks':    ui.total_marks,   # max for this unit e.g. 10.0
+                    'weightage':     ui.weightage,     # unit weight in category e.g. 50.0
+                    'catPercentage': cat.percentage,   # category weight in total e.g. 10.0
+                    'contribution':  round(contribution, 4),  # actual % added to total
+                    # contribution formula: (obtained/totalMarks) * (weightage/100) * catPercentage
+                }
+
+                # unitsData grouped by category name
+                if cat.name not in units_data:
+                    units_data[cat.name] = []
+                units_data[cat.name].append({
+                    'unitNo':        ui.unit_no,
+                    'totalMarks':    ui.total_marks,
+                    'weightage':     ui.weightage,
+                    'passing':       ui.passing,
+                    'obtainedMarks': m.score,
+                    'contribution':  round(contribution, 4),
+                })
+
+            total_percentage = round(total_percentage, 2)
+
+            # ── 3. Grade ─────────────────────────────────────────────────────
+            grade_letter, grade_points = _get_grade(total_percentage, ic)
+
+            # ── 4. Category breakdown (for display table) ────────────────────
+            # "Assignments: 9.0 out of 10 percentage points"
+            category_breakdown = {}
+            for m in all_marks:
+                ui  = m.unit_item
+                cat = ui.category
+                if cat.name not in category_breakdown:
+                    category_breakdown[cat.name] = {
+                        'obtained':    0.0,
+                        'total':       cat.percentage,   # max possible % from this category
+                        'weight':      cat.percentage,
+                    }
+                if ui.total_marks > 0:
+                    category_breakdown[cat.name]['obtained'] += round(
+                        (m.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage, 4
+                    )
+            # Round obtained values
+            for cat_name in category_breakdown:
+                category_breakdown[cat_name]['obtained'] = round(
+                    category_breakdown[cat_name]['obtained'], 2
+                )
+
+            # ── 5. OBE Questions ─────────────────────────────────────────────
+            obe_questions = [
+                {
+                    'id':           q.frontend_id,
+                    'questionName': q.question_name,
+                    'maxMarks':     q.max_marks,
+                    'categoryName': q.category_name,
+                    'unitNo':       q.unit_no,
+                    'mappedCLOs':   q.mapped_clos or [],
+                }
+                for q in ic.obe_questions.all()
+            ]
+
+            # ── 6. OBE Marks (student's scores per question) ─────────────────
+            obe_marks = {
+                om.question.frontend_id: om.score
+                for om in enrollment.obe_marks.all()
+                if om.question
+            }
+
+            # ── 7. CLO Attainments ───────────────────────────────────────────
+            questions_qs = list(ic.obe_questions.all())
+            clo_pcts     = _clo_attainments_for_student(enrollment, questions_qs)
+            clo_attainments = [
+                {
+                    'code':       clo,
+                    'percentage': pct,
+                    'attained':   pct >= ATTAINMENT_THRESHOLD,
+                }
+                for clo, pct in sorted(clo_pcts.items())
+            ]
+
+            # ── 8. Categories list ───────────────────────────────────────────
             categories = [
                 {'name': c.name, 'percentage': c.percentage, 'units': c.units}
                 for c in (
@@ -1750,14 +1954,27 @@ class StudentCoursesView(APIView):
                     if ic.catalog_course_id else []
                 )
             ]
-            program_code  = ic.program.code if ic.program else ''
+
             result.append({
-                'id':           ic.frontend_id,
-                'code':         ic.code,
-                'title':        f"{ic.title} ({program_code})" if program_code else ic.title,
-                'creditHours':  ic.credit_hours,
-                'categories':   categories,
-                'studentMarks': student_marks,
+                'id':                ic.frontend_id,
+                'code':              ic.code,
+                'title':             f"{ic.title} ({ic.program.code})" if ic.program else ic.title,
+                'creditHours':       ic.credit_hours,
+                'categories':        categories,
+
+                # LEGACY (raw scores only - DO NOT USE FOR CALCULATIONS)
+                'studentMarks':      student_marks,
+
+                # USE THESE INSTEAD:
+                'weightedMarks':     weighted_marks,     # full context per unit
+                'unitsData':         units_data,         # grouped by category
+                'categoryBreakdown': category_breakdown, # for display table
+                'totalPercentage':   total_percentage,   # FINAL GRADE % (use this!)
+                'grade':             grade_letter,        # letter grade (use this!)
+                'gradePoints':       grade_points,        # GPA points (use this!)
+                'obeQuestions':      obe_questions,       # questions with CLO mappings
+                'obeMarks':          obe_marks,           # student scores per question
+                'cloAttainments':    clo_attainments,    # CLO results (use this!)
             })
 
         return Response(result)
