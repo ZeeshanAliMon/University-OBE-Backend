@@ -2583,14 +2583,36 @@ class StudentSummaryView(APIView):
             total_credit_points += grade_points * credit_hours
             total_credits       += credit_hours
 
+            # Build per-category breakdown scaled to category total marks
+            # e.g. student got 5/5 on a question in Assignments (10% weight, 1 unit)
+            # → displayed as 10/10 not 5/5
+            category_breakdown = {}
+            for m in cs.marks.select_related('unit_item__category').all():
+                ui  = m.unit_item
+                cat = ui.category
+                key = cat.name
+                if key not in category_breakdown:
+                    category_breakdown[key] = {
+                        'obtained': 0.0,
+                        'total':    0.0,
+                        'weight':   cat.percentage,
+                    }
+                # Scale: student's score as fraction of unit, then multiply by category total marks
+                # category total marks = cat.percentage (since total course = 100%)
+                unit_fraction = (m.score / ui.total_marks) if ui.total_marks > 0 else 0
+                # Each unit contributes (weightage/100) of the category
+                category_breakdown[key]['obtained'] += round(unit_fraction * (ui.weightage / 100) * cat.percentage, 2)
+                category_breakdown[key]['total']    = cat.percentage  # always the full category weight
+
             enrolled_courses.append({
-                'courseCode':   ic.code,
-                'courseTitle':  ic.title,
-                'creditHours':  credit_hours,
-                'grade':        grade_letter,
-                'gpa':          grade_points,
-                'marksSummary': {'obtained': student_pct, 'total': 100.0},
-                'cloAttainments': clo_attainments,
+                'courseCode':        ic.code,
+                'courseTitle':       ic.title,
+                'creditHours':       credit_hours,
+                'grade':             grade_letter,
+                'gpa':               grade_points,
+                'marksSummary':      {'obtained': student_pct, 'total': 100.0},
+                'categoryBreakdown': category_breakdown,
+                'cloAttainments':    clo_attainments,
             })
 
         cgpa = round(total_credit_points / total_credits, 2) if total_credits > 0 else 0.0
