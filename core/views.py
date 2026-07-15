@@ -2568,8 +2568,42 @@ class StudentSummaryView(APIView):
             student_pct = _student_total_percentage(cs)
             grade_letter, grade_points = _get_grade(student_pct, ic)
 
-            questions        = list(ic.obe_questions.all())
-            clo_pcts         = _clo_attainments_for_student(cs, questions)
+            print(f"\n{'='*60}")
+            print(f"STUDENT DASHBOARD DEBUG: {reg_no} | Course: {ic.code}")
+            print(f"{'='*60}")
+
+            # Debug: marks breakdown
+            all_marks = cs.marks.select_related('unit_item__category').all()
+            print(f"\n[MARKS BREAKDOWN]")
+            for m in all_marks:
+                ui  = m.unit_item
+                cat = ui.category
+                contrib = (m.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage if ui.total_marks > 0 else 0
+                print(f"  {cat.name} Unit {ui.unit_no}: score={m.score}/{ui.total_marks}, weightage={ui.weightage}%, cat_pct={cat.percentage}% → contrib={contrib:.2f}%")
+            print(f"  TOTAL PERCENTAGE: {student_pct:.2f}%")
+            print(f"  GRADE: {grade_letter} (points={grade_points})")
+
+            # Debug: questions and CLO mapping
+            questions = list(ic.obe_questions.all())
+            print(f"\n[OBE QUESTIONS] count={len(questions)}")
+            for q in questions:
+                print(f"  Q: {q.question_name} | max={q.max_marks} | mapped_clos={q.mapped_clos} | unit={q.unit_item}")
+
+            # Debug: student OBE marks
+            obe_marks = {m.question_id: m.score for m in cs.obe_marks.select_related('question').all()}
+            print(f"\n[OBE MARKS] count={len(obe_marks)}")
+            for q_id, score in obe_marks.items():
+                print(f"  question_id={q_id} → score={score}")
+
+            # Debug: CLO attainment calculation
+            clo_pcts = _clo_attainments_for_student(cs, questions)
+            print(f"\n[CLO ATTAINMENTS]")
+            for clo, pct in sorted(clo_pcts.items()):
+                print(f"  {clo}: {pct}% ({'ATTAINED' if pct >= ATTAINMENT_THRESHOLD else 'NOT ATTAINED'})")
+
+            if not clo_pcts:
+                print("  ⚠ NO CLO ATTAINMENTS - either no questions or no OBE marks")
+
             clo_attainments  = [
                 {
                     'code':       clo,
