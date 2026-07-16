@@ -2524,7 +2524,10 @@ class StudentGAAttainmentView(APIView):
         course_students = CourseStudent.objects.filter(
             reg_no__iexact=reg_no
         ).select_related('course__program').prefetch_related(
-            'obe_marks__question', 'marks__unit_item__category',
+            'obe_marks__question',
+            'marks__unit_item__category',
+            'course__obe_questions',
+            'course__clos__mapped_ga',
         )
 
         if not course_students.exists():
@@ -2541,22 +2544,53 @@ class StudentGAAttainmentView(APIView):
             for c in Course.objects.filter(code__in=course_codes).prefetch_related('mapped_gas')
         }
 
-        ga_scores         = {}   # ga_id → [scores]
+        ga_scores         = {}   # ga_id → [clo_attainment_scores]
         ga_info           = {}   # ga_id → { gaId, gaTitle }
-        ga_course_details = {}   # ga_id → [{ code, title, score }]
+        ga_course_details = {}   # ga_id → [{ code, title, score, clos }]
 
         for cs in course_students:
             catalog_course = catalog_map.get(cs.course.code)
             if not catalog_course:
                 continue
-            student_pct = _student_total_percentage(cs)
-            for ga in catalog_course.mapped_gas.all():
-                ga_scores.setdefault(ga.ga_id, []).append(student_pct)
+
+            # Get CLO attainments for this student in this course
+            questions    = list(cs.course.obe_questions.all())
+            clo_pcts     = _clo_attainments_for_student(cs, questions)
+
+            if not clo_pcts:
+                # No OBE questions/marks yet — skip this course for GA calculation
+                continue
+
+            # Get CLOs for this course with their GA mappings
+            clos = cs.course.clos.select_related('mapped_ga').all()
+            clo_ga_map = {
+                clo.code: clo.mapped_ga
+                for clo in clos
+                if clo.mapped_ga
+            }
+
+            # For each CLO that has a score AND maps to a GA, add to that GA's scores
+            course_ga_scores = {}  # ga_id → [clo scores] for this course
+            for clo_code, clo_pct in clo_pcts.items():
+                ga = clo_ga_map.get(clo_code)
+                if not ga:
+                    continue
+                ga_scores.setdefault(ga.ga_id, []).append(clo_pct)
                 ga_info[ga.ga_id] = {'gaId': ga.ga_id, 'gaTitle': ga.name}
-                ga_course_details.setdefault(ga.ga_id, []).append({
+                course_ga_scores.setdefault(ga.ga_id, []).append(clo_pct)
+
+            # Build per-course detail for each GA this course contributes to
+            for ga_id, scores in course_ga_scores.items():
+                course_avg = round(sum(scores) / len(scores), 2) if scores else 0.0
+                ga_course_details.setdefault(ga_id, []).append({
                     'code':  cs.course.code,
                     'title': cs.course.title,
-                    'score': student_pct,
+                    'score': course_avg,
+                    'cloScores': {
+                        clo_code: clo_pcts[clo_code]
+                        for clo_code in clo_pcts
+                        if clo_ga_map.get(clo_code) and clo_ga_map[clo_code].ga_id == ga_id
+                    }
                 })
 
         attainments = []
