@@ -1836,6 +1836,7 @@ class StudentCoursesView(APIView):
             'marks__unit_item__category',
             'course__catalog_course__markscategories__unit_items',
             'course__obe_questions',
+            'course__clos__mapped_ga',
             'obe_marks__question',
         )
 
@@ -1934,14 +1935,26 @@ class StudentCoursesView(APIView):
                 if om.question
             }
 
-            # ── 7. CLO Attainments ───────────────────────────────────────────
+            # ── 7. CLO Attainments with GA mapping ──────────────────────────
             questions_qs = list(ic.obe_questions.all())
             clo_pcts     = _clo_attainments_for_student(enrollment, questions_qs)
+
+            # Build CLO → GA mapping from the CLO records
+            clo_ga_map = {
+                clo.code: {
+                    'gaId':    clo.mapped_ga.ga_id,
+                    'gaTitle': clo.mapped_ga.name,
+                }
+                for clo in ic.clos.select_related('mapped_ga').all()
+                if clo.mapped_ga
+            }
+
             clo_attainments = [
                 {
                     'code':       clo,
                     'percentage': pct,
                     'attained':   pct >= ATTAINMENT_THRESHOLD,
+                    'mappedGA':   clo_ga_map.get(clo),  # { gaId, gaTitle } or None
                 }
                 for clo, pct in sorted(clo_pcts.items())
             ]
