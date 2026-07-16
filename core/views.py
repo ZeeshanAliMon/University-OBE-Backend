@@ -1996,28 +1996,39 @@ class StudentCoursesView(APIView):
 ATTAINMENT_THRESHOLD = 50.0   # % — student "attains" a CLO/GA if score >= this
 
 # ── Built-in grading scales ───────────────────────────────────────────────────
+
+# ── Grading Scales ────────────────────────────────────────────────────────────
+# These MUST match exactly what the frontend shows in the grading system UI.
+# If these don't match, students see wrong grades.
+
+# System 1: Iqra Standard (ready1) — 6-tier
+# Frontend shows: A=88-100, B+=81-87, B=74-80, C+=67-73, C=60-66, F=Below 60
 READY1_SCALE = [
-    ('A',   90.0, 4.00),
-    ('A-',  85.0, 3.67),
-    ('B+',  81.0, 3.33),
-    ('B',   77.0, 3.00),
-    ('B-',  73.0, 2.67),
-    ('C+',  69.0, 2.33),
-    ('C',   65.0, 2.00),
-    ('C-',  61.0, 1.67),
-    ('D+',  57.0, 1.33),
-    ('D',   53.0, 1.00),
-    ('F',    0.0, 0.00),
-]
-READY2_SCALE = [
     ('A',   88.0, 4.00),
     ('B+',  81.0, 3.50),
     ('B',   74.0, 3.00),
     ('C+',  67.0, 2.50),
     ('C',   60.0, 2.00),
+    ('F',    0.0, 0.00),
+]
+
+# System 2: Plus/Minus (ready2) — 10-tier
+# Frontend shows: A+=90-100, A=85-89, A-=80-84, B+=75-79, B=70-74,
+#                 B-=65-69, C+=60-64, C=55-59, D=50-54, F=Below 50
+READY2_SCALE = [
+    ('A+',  90.0, 4.00),
+    ('A',   85.0, 4.00),
+    ('A-',  80.0, 3.70),
+    ('B+',  75.0, 3.30),
+    ('B',   70.0, 3.00),
+    ('B-',  65.0, 2.70),
+    ('C+',  60.0, 2.30),
+    ('C',   55.0, 2.00),
     ('D',   50.0, 1.00),
     ('F',    0.0, 0.00),
 ]
+
+
 
 
 def _apply_scale(percentage: float, scale: list) -> tuple:
