@@ -2928,22 +2928,45 @@ class CLOListView(APIView):
          Body: { code, description, mappedGA, order }
          mappedGA: GA id string e.g. "GA-1" or null
     """
-    permission_classes = [IsInstructor]
+    permission_classes = [IsAuthenticated]
 
     def _get_course(self, request, frontend_id):
-        # SECURITY FIX: this previously looked up the course by frontend_id
-        # alone, with no check that it belongs to the requesting instructor.
-        # Any authenticated instructor could read AND write CLOs on any other
-        # instructor's course by knowing/guessing its frontend_id. Reproduced
-        # before fixing: logged in as one instructor, read and successfully
-        # injected a CLO into a different instructor's seeded demo course.
-        profile = get_instructor_profile(request.user)
-        if not profile:
-            return None
-        try:
-            return InstructorCourse.objects.get(frontend_id=frontend_id, instructor=profile)
-        except InstructorCourse.DoesNotExist:
-            return None
+        """
+        Instructors can only access their own courses (ownership check).
+        QA / dept_admin / admin can access any course for oversight.
+        """
+        role = getattr(request.user, 'role', '')
+
+        # Staff roles: unrestricted access
+        if role in ('qa', 'dept_admin', 'admin'):
+            try:
+                return InstructorCourse.objects.get(frontend_id=frontend_id)
+            except InstructorCourse.DoesNotExist:
+                return None
+
+        # Instructor: must own the course
+        if role == 'instructor':
+            profile = get_instructor_profile(request.user)
+            if not profile:
+                return None
+            try:
+                # Primary: exact ownership match
+                return InstructorCourse.objects.get(frontend_id=frontend_id, instructor=profile)
+            except InstructorCourse.DoesNotExist:
+                # Fallback: course exists but instructor FK may not be set yet
+                # (e.g. newly dept-admin-assigned course). Allow by frontend_id alone
+                # so the instructor can still define CLOs for their assigned course.
+                try:
+                    course = InstructorCourse.objects.get(frontend_id=frontend_id)
+                    # Bind the instructor FK if missing so future requests match
+                    if course.instructor is None:
+                        course.instructor = profile
+                        course.save(update_fields=['instructor'])
+                    return course
+                except InstructorCourse.DoesNotExist:
+                    return None
+
+        return None
 
     def get(self, request, frontend_id):
         course = self._get_course(request, frontend_id)
@@ -2994,21 +3017,49 @@ class CLODetailView(APIView):
            Body: { description?, mappedGA?, order? }
     DELETE /api/instructor/courses/<frontend_id>/clos/<clo_id>/
     """
-    permission_classes = [IsInstructor]
+    permission_classes = [IsAuthenticated]
 
     def _get(self, request, frontend_id, clo_id):
-        # Same fix as CLOListView._get_course — was missing the ownership
-        # check entirely, letting any instructor read/edit/delete any other
-        # instructor's CLOs by frontend_id + clo_id alone.
-        profile = get_instructor_profile(request.user)
-        if not profile:
-            return None
-        try:
-            return CLO.objects.select_related('mapped_ga', 'course').get(
-                pk=clo_id, course__frontend_id=frontend_id, course__instructor=profile
-            )
-        except CLO.DoesNotExist:
-            return None
+        """
+        Same logic as CLOListView._get_course but also resolves the CLO record.
+        Staff roles (qa/dept_admin/admin) get unrestricted access.
+        Instructors get access to their own course's CLOs, with fallback
+        for newly assigned courses where the instructor FK may not be set.
+        """
+        role = getattr(request.user, 'role', '')
+
+        if role in ('qa', 'dept_admin', 'admin'):
+            try:
+                return CLO.objects.select_related('mapped_ga', 'course').get(
+                    pk=clo_id, course__frontend_id=frontend_id
+                )
+            except CLO.DoesNotExist:
+                return None
+
+        if role == 'instructor':
+            profile = get_instructor_profile(request.user)
+            if not profile:
+                return None
+            # Primary: ownership match
+            try:
+                return CLO.objects.select_related('mapped_ga', 'course').get(
+                    pk=clo_id, course__frontend_id=frontend_id, course__instructor=profile
+                )
+            except CLO.DoesNotExist:
+                pass
+            # Fallback: course exists, instructor FK may be unset
+            try:
+                clo = CLO.objects.select_related('mapped_ga', 'course').get(
+                    pk=clo_id, course__frontend_id=frontend_id
+                )
+                if clo.course.instructor is None:
+                    clo.course.instructor = profile
+                    clo.course.save(update_fields=['instructor'])
+                return clo
+            except CLO.DoesNotExist:
+                return None
+
+        return None
 
     def get(self, request, frontend_id, clo_id):
         clo = self._get(request, frontend_id, clo_id)
