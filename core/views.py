@@ -925,9 +925,20 @@ class InstructorCourseView(APIView):
                         q_obj_map[q_data['id']] = q_obj
 
                     # ── Sync Students ─────────────────────────────────────────────────
+                    # IMPORTANT: The instructor POST must NEVER delete students.
+                    # Roster management (add/remove students) is the exclusive
+                    # responsibility of the Dept Admin via POST /api/admin/enroll/.
+                    #
+                    # Why: the instructor's React state is loaded once on login.
+                    # If a dept admin enrolls a new student AFTER the instructor
+                    # logged in, the instructor's state won't include that student.
+                    # If we delete-then-sync from instructor state, the newly
+                    # enrolled student gets wiped from the DB on the next auto-save.
+                    #
+                    # Instructor can only: update names & marks for existing students,
+                    # and add students that appear in their payload but aren't yet in DB
+                    # (e.g. students they added locally before backend sync).
                     incoming_students = c.get('students', [])
-                    incoming_reg_nos  = [s['regNo'] for s in incoming_students]
-                    course.students.exclude(reg_no__in=incoming_reg_nos).delete()
 
                     for s_data in incoming_students:
                         reg_no     = s_data['regNo']
