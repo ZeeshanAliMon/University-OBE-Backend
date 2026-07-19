@@ -661,13 +661,20 @@ class InstructorCourseView(APIView):
                     continue
 
                 print("Creating/getting InstructorCourse...")
+                # Map catalogue subtype ('theory'/'lab') to InstructorCourse
+                # course_type ('Theory'/'Lab'). Fallback to 'Theory' if unset.
+                subtype_map = {'lab': 'Lab', 'theory': 'Theory'}
+                ic_course_type = subtype_map.get(
+                    getattr(course, 'subtype', 'theory'), 'Theory'
+                )
+
                 obj, created = InstructorCourse.objects.get_or_create(
                     instructor=profile,
                     frontend_id=frontend_id,
                     defaults=dict(
                         code=course.code,
                         title=course.title,
-                        course_type='Theory',
+                        course_type=ic_course_type,
                         department=course.department,
                         program=program,
                         credit_hours=course.credit_hours,
@@ -675,6 +682,12 @@ class InstructorCourseView(APIView):
                         catalog_course=course,
                     )
                 )
+
+                # Backfill course_type on existing rows where it defaulted to
+                # Theory but the catalogue says Lab (or vice-versa).
+                if not created and obj.course_type != ic_course_type:
+                    obj.course_type = ic_course_type
+                    obj.save(update_fields=['course_type'])
 
                 # Backfill catalog_course on rows created before this field
                 # existed, so categories/units resolve for them too.
@@ -1436,13 +1449,18 @@ class CourseAssignmentView(APIView):
                 f'{instructor.employee_id}-{prog_suffix}{term_suffix}'
             )
 
+            _subtype_map = {'lab': 'Lab', 'theory': 'Theory'}
+            _ic_course_type = _subtype_map.get(
+                getattr(course, 'subtype', 'theory'), 'Theory'
+            )
+
             InstructorCourse.objects.get_or_create(
                 instructor=instructor,
                 frontend_id=frontend_id,
                 defaults=dict(
                     code=course.code,
                     title=course.title,
-                    course_type='Theory',
+                    course_type=_ic_course_type,
                     department=course.department,
                     program=program,
                     credit_hours=course.credit_hours or 3,
