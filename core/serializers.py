@@ -223,14 +223,19 @@ class OBEQuestionSerializer(serializers.ModelSerializer):
 
 
 class CourseStudentSerializer(serializers.ModelSerializer):
-    regNo = serializers.CharField(source='reg_no')
-    marks = serializers.SerializerMethodField()
+    regNo         = serializers.CharField(source='reg_no')
+    student_marks = serializers.SerializerMethodField()
 
     class Meta:
         model  = CourseStudent
-        fields = ['regNo', 'name', 'marks']
+        fields = ['regNo', 'name', 'student_marks']
 
-    def get_marks(self, obj):
+    def get_student_marks(self, obj):
+        """
+        Returns unit-level marks keyed as "{CategoryName}-{unitNo}".
+        e.g. { "Assignments-1": 8.5, "Mid Term-1": 24.5, "Final-1": 34.0 }
+        Key is always snake_case field name: student_marks.
+        """
         return {
             f"{m.unit_item.category.name}-{m.unit_item.unit_no}": m.score
             for m in obj.marks.select_related('unit_item__category').all()
@@ -273,7 +278,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     unitsData             = serializers.SerializerMethodField()
     students              = serializers.SerializerMethodField()
     obeQuestions          = serializers.SerializerMethodField()
-    obeMarks              = serializers.SerializerMethodField()
+    obe_marks             = serializers.SerializerMethodField()
 
     class Meta:
         model  = InstructorCourse
@@ -284,7 +289,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
             'creditHours', 'cloCount', 'academicYear',
             'selectedGradingSystem', 'customGradingSystem',
             'categories', 'unitsData',
-            'students', 'obeQuestions', 'obeMarks',
+            'students', 'obeQuestions', 'obe_marks',
         ]
 
     def get_departmentId(self, obj):
@@ -326,15 +331,21 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     def get_obeQuestions(self, obj):
         return OBEQuestionSerializer(obj.obe_questions.all(), many=True).data
 
-    def get_obeMarks(self, obj):
+    def get_obe_marks(self, obj):
+        """
+        Returns per-student, per-question OBE marks.
+        Key is always snake_case: obe_marks.
+        Shape: { "regNo": { "questionId": score } }
+        e.g. { "012-fa22-22012": { "CLO-1": 85.0, "CLO-2": 72.5 } }
+        """
         result = {}
         for student in obj.students.prefetch_related('obe_marks__question').all():
-            student_marks = {
+            q_marks = {
                 om.question.frontend_id: om.score
                 for om in student.obe_marks.all()
             }
-            if student_marks:
-                result[student.reg_no] = student_marks
+            if q_marks:
+                result[student.reg_no] = q_marks
         return result
 
 

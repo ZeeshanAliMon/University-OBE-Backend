@@ -986,7 +986,8 @@ class InstructorCourseView(APIView):
                             )
 
                         # ── Sync OBE Marks ────────────────────────────────────────────
-                    incoming_obe_marks = c.get('obeMarks', {})
+                    # Accept both camelCase (legacy frontend) and snake_case (new standard)
+                    incoming_obe_marks = c.get('obe_marks') or c.get('obeMarks') or {}
                     for reg_no, q_marks in incoming_obe_marks.items():
                         try:
                             student = CourseStudent.objects.get(course=course, reg_no=reg_no)
@@ -1741,7 +1742,7 @@ class StudentCoursesView(APIView):
                 }
             ]
         },
-        "studentMarks": { "Assignments-1": 8, "Assignments-2": 5 },  ← raw scores (legacy)
+        "student_marks": { "Assignments-1": 8, "Assignments-2": 5 },  ← unit-level scores (snake_case)
         "weightedMarks": {
             "Assignments-1": {
                 "obtained":     8,     ← raw score
@@ -1765,7 +1766,7 @@ class StudentCoursesView(APIView):
                 "mappedCLOs": ["CLO-1"]
             }
         ],
-        "obeMarks": {
+        "obe_marks": {
             "1784046977475_1": 5.0     ← student's score for this specific question
         },
         "cloAttainments": [
@@ -1997,26 +1998,35 @@ class StudentCoursesView(APIView):
                 )
             ]
 
+            # grade_letter is always a string from _get_grade (e.g. 'F' when 0%).
+            # Return null instead of 'F' when the student genuinely has no marks,
+            # so the frontend can distinguish "no data yet" from a real F grade.
+            has_any_marks = bool(student_marks)
+            final_grade   = grade_letter if has_any_marks else None
+            final_points  = grade_points if has_any_marks else None
+            final_pct     = total_percentage if has_any_marks else None
+
             result.append({
                 'id':                ic.frontend_id,
                 'code':              ic.code,
                 'title':             f"{ic.title} ({ic.program.code})" if ic.program else ic.title,
                 'creditHours':       ic.credit_hours,
+                'is_finalized':      getattr(ic, 'is_closed', False),  # True once course is closed/finalized
                 'categories':        categories,
 
-                # LEGACY (raw scores only - DO NOT USE FOR CALCULATIONS)
-                'studentMarks':      student_marks,
+                # ── Standardized mark keys (snake_case) ──────────────────────
+                'student_marks':     student_marks,      # { "Cat-Unit": score }
+                'obe_marks':         obe_marks,           # { questionId: score } per student
 
-                # USE THESE INSTEAD:
-                'weightedMarks':     weighted_marks,     # full context per unit
+                # ── Backend-calculated results (USE THESE, never recalculate) ─
+                'weightedMarks':     weighted_marks,     # full per-unit context
                 'unitsData':         units_data,         # grouped by category
                 'categoryBreakdown': category_breakdown, # for display table
-                'totalPercentage':   total_percentage,   # FINAL GRADE % (use this!)
-                'grade':             grade_letter,        # letter grade (use this!)
-                'gradePoints':       grade_points,        # GPA points (use this!)
+                'totalPercentage':   final_pct,          # Float or null (never recalculate!)
+                'grade':             final_grade,         # String or null (never "-")
+                'gradePoints':       final_points,        # Float or null
                 'obeQuestions':      obe_questions,       # questions with CLO mappings
-                'obeMarks':          obe_marks,           # student scores per question
-                'cloAttainments':    clo_attainments,    # CLO results (use this!)
+                'cloAttainments':    clo_attainments,    # CLO % (never recalculate!)
             })
 
         return Response(result)
