@@ -537,8 +537,6 @@ class InstructorCourseView(APIView):
         # (POST/PATCH/DELETE, handled elsewhere on this view) stay
         # instructor-only via IsInstructor.
         if self.request.method == 'GET':
-            print("request method is get")
-            print(IsInstructorOrStaffReport())
             return [IsInstructorOrStaffReport()]
         return [IsInstructor()]
 
@@ -546,84 +544,54 @@ class InstructorCourseView(APIView):
 
     def get(self, request):
         try:
-            print("\n================ InstructorCourseView GET ================")
-            print("User:", request.user)
-            print("Authenticated:", request.user.is_authenticated)
-            print("Role:", getattr(request.user, "role", None))
-            print("Query Params:", request.query_params)
 
             role = request.user.role
 
-            print("Entered GET method")
 
             # ---------------- STAFF PATH ----------------
             if role in ('qa', 'dept_admin', 'admission', 'admin'):
-                print("Entered STAFF PATH")
 
                 qs = InstructorCourse.objects.all()
-                print("Initial queryset count:", qs.count())
 
                 if role == 'dept_admin':
-                    print("Getting admin department...")
                     admin_dept = get_admin_department(request.user)
-                    print("Admin department:", admin_dept)
 
                     qs = qs.filter(department=admin_dept) if admin_dept else qs.none()
-                    print("After department filter:", qs.count())
 
                 dept_id = request.query_params.get('departmentId', '').strip()
-                print("departmentId =", dept_id)
                 if dept_id:
                     qs = qs.filter(department__dept_id=dept_id)
-                    print("After departmentId filter:", qs.count())
 
                 program_id = request.query_params.get('programId', '').strip()
-                print("programId =", program_id)
                 if program_id:
                     qs = qs.filter(program__code__iexact=program_id)
-                    print("After program filter:", qs.count())
 
                 academic_year = request.query_params.get('academicYear', '').strip()
-                print("academicYear =", academic_year)
                 if academic_year:
                     qs = qs.filter(academic_year__iexact=academic_year)
-                    print("After academic year filter:", qs.count())
 
-                print("Calling prefetch_instructor_course()")
                 qs = prefetch_instructor_course(qs.order_by('created_at'))
 
-                print("Serializing...")
                 data = InstructorCourseSerializer(qs, many=True).data
 
-                print("Returning", len(data), "records")
                 return Response(data)
 
             # ---------------- INSTRUCTOR PATH ----------------
-            print("Entered INSTRUCTOR PATH")
 
-            print("Getting instructor profile...")
             profile = get_instructor_profile(request.user)
-            print("Profile:", profile)
 
             if not profile:
-                print("Instructor profile NOT FOUND")
                 return Response(
                     {'error': 'Instructor profile not found'},
                     status=status.HTTP_403_FORBIDDEN
                 )
 
-            print("Loading assignments...")
             assignments = CourseAssignment.objects.filter(
                 instructor=profile
             ).select_related('course', 'program')
 
-            print("Assignments found:", assignments.count())
 
             for assignment in assignments:
-                print("-----------------------------------")
-                print("Assignment ID:", assignment.id)
-                print("Course:", assignment.course)
-                print("Program:", assignment.program)
 
                 course = assignment.course
                 program = assignment.program
@@ -636,7 +604,6 @@ class InstructorCourseView(APIView):
                     f"{profile.employee_id}-{prog_suffix}{term_suffix}"
                 )
 
-                print("Frontend ID:", frontend_id)
 
                 existing_closed = InstructorCourse.objects.filter(
                     instructor=profile,
@@ -644,7 +611,6 @@ class InstructorCourseView(APIView):
                     status='closed'
                 ).exists()
 
-                print("Existing closed:", existing_closed)
 
                 if existing_closed:
                     continue
@@ -655,12 +621,10 @@ class InstructorCourseView(APIView):
                     program=program
                 ).exclude(frontend_id=frontend_id).exists()
 
-                print("Already exists:", already_exists)
 
                 if already_exists:
                     continue
 
-                print("Creating/getting InstructorCourse...")
                 # Map catalogue subtype ('theory'/'lab') to InstructorCourse
                 # course_type ('Theory'/'Lab'). Fallback to 'Theory' if unset.
                 subtype_map = {'lab': 'Lab', 'theory': 'Theory'}
@@ -695,11 +659,8 @@ class InstructorCourseView(APIView):
                     obj.catalog_course = course
                     obj.save(update_fields=['catalog_course'])
 
-                print("Created:", created)
 
-            print("Loading instructor courses...")
             all_ics = InstructorCourse.objects.filter(instructor=profile)
-            print("Total instructor courses:", all_ics.count())
 
             latest_term = (
                 all_ics.exclude(academic_year='')
@@ -708,29 +669,19 @@ class InstructorCourseView(APIView):
                 .first()
             )
 
-            print("Latest term:", latest_term)
 
             if latest_term:
                 all_ics = all_ics.filter(academic_year=latest_term)
-                print("Filtered courses:", all_ics.count())
 
-            print("Prefetching...")
             qs = prefetch_instructor_course(all_ics.order_by('created_at'))
 
-            print("Serializing...")
             data = InstructorCourseSerializer(qs, many=True).data
 
-            print("Returning", len(data), "courses")
-            print("================ END SUCCESS ================\n")
 
             return Response(data)
 
         except Exception as e:
-            print("\n================ EXCEPTION =================")
-            print("Exception type:", type(e).__name__)
-            print("Exception:", e)
             traceback.print_exc()
-            print("================ END EXCEPTION ================\n")
             raise
 
     def post(self, request):
@@ -896,10 +847,6 @@ class InstructorCourseView(APIView):
 
                     # ── Sync OBE Questions ────────────────────────────────────────────
                     incoming_questions = c.get('obeQuestions', [])
-                    print(f"\n==== OBE DEBUG ====")
-                    print(f"Course: {c.get('code')} ({frontend_id})")
-                    print(f"obeQuestions received: {incoming_questions}")
-                    print(f"====================\n")
                     incoming_q_ids     = [q['id'] for q in incoming_questions]
                     course.obe_questions.exclude(frontend_id__in=incoming_q_ids).delete()
 
@@ -1946,6 +1893,7 @@ class StudentCoursesView(APIView):
                 )
 
             # ── 5. OBE Questions ─────────────────────────────────────────────
+            all_obe_questions = list(ic.obe_questions.all())
             obe_questions = [
                 {
                     'id':           q.frontend_id,
@@ -1955,8 +1903,22 @@ class StudentCoursesView(APIView):
                     'unitNo':       q.unit_no,
                     'mappedCLOs':   q.mapped_clos or [],
                 }
-                for q in ic.obe_questions.all()
+                for q in all_obe_questions
             ]
+
+            # Build a lookup: (categoryName, unitNo) → set of CLO codes
+            # so we can attach mappedCLOs to each unitsData entry
+            unit_clo_map = {}
+            for q in all_obe_questions:
+                key = (q.category_name, q.unit_no)
+                for clo in (q.mapped_clos or []):
+                    unit_clo_map.setdefault(key, set()).add(clo)
+
+            # Enrich unitsData entries with mappedCLOs
+            for cat_name, unit_list in units_data.items():
+                for unit_entry in unit_list:
+                    key = (cat_name, unit_entry['unitNo'])
+                    unit_entry['mappedCLOs'] = sorted(unit_clo_map.get(key, []))
 
             # ── 6. OBE Marks (student's scores per question) ─────────────────
             obe_marks = {
@@ -1965,26 +1927,30 @@ class StudentCoursesView(APIView):
                 if om.question
             }
 
-            # ── 7. CLO Attainments with GA mapping ──────────────────────────
-            questions_qs = list(ic.obe_questions.all())
+            # ── 7. CLO Attainments with GA mapping and description ───────────
+            questions_qs = all_obe_questions
             clo_pcts     = _clo_attainments_for_student(enrollment, questions_qs)
 
-            # Build CLO → GA mapping from the CLO records
-            clo_ga_map = {
+            # Build CLO record lookup: code → { ga, description }
+            clo_meta = {
                 clo.code: {
-                    'gaId':    clo.mapped_ga.ga_id,
-                    'gaTitle': clo.mapped_ga.name,
+                    'description': clo.description or '',
+                    'mappedGA': {
+                        'gaId':    clo.mapped_ga.ga_id,
+                        'gaTitle': clo.mapped_ga.name,
+                    } if clo.mapped_ga else None,
                 }
                 for clo in ic.clos.select_related('mapped_ga').all()
-                if clo.mapped_ga
             }
 
             clo_attainments = [
                 {
-                    'code':       clo,
-                    'percentage': pct,
-                    'attained':   pct >= ATTAINMENT_THRESHOLD,
-                    'mappedGA':   clo_ga_map.get(clo),  # { gaId, gaTitle } or None
+                    'code':        clo,
+                    'description': clo_meta.get(clo, {}).get('description', ''),
+                    'percentage':  pct,
+                    'attained':    pct >= ATTAINMENT_THRESHOLD,   # bool (backwards compat)
+                    'status':      'Attained' if pct >= ATTAINMENT_THRESHOLD else 'Not Attained',
+                    'mappedGA':    clo_meta.get(clo, {}).get('mappedGA'),  # { gaId, gaTitle } or None
                 }
                 for clo, pct in sorted(clo_pcts.items())
             ]
@@ -2882,47 +2848,40 @@ class StudentSummaryView(APIView):
             student_pct = _student_total_percentage(cs)
             grade_letter, grade_points = _get_grade(student_pct, ic)
 
-            print(f"\n{'='*60}")
-            print(f"STUDENT DASHBOARD DEBUG: {reg_no} | Course: {ic.code}")
-            print(f"{'='*60}")
 
             # Debug: marks breakdown
             all_marks = cs.marks.select_related('unit_item__category').all()
-            print(f"\n[MARKS BREAKDOWN]")
             for m in all_marks:
                 ui  = m.unit_item
                 cat = ui.category
                 contrib = (m.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage if ui.total_marks > 0 else 0
-                print(f"  {cat.name} Unit {ui.unit_no}: score={m.score}/{ui.total_marks}, weightage={ui.weightage}%, cat_pct={cat.percentage}% → contrib={contrib:.2f}%")
-            print(f"  TOTAL PERCENTAGE: {student_pct:.2f}%")
-            print(f"  GRADE: {grade_letter} (points={grade_points})")
 
             # Debug: questions and CLO mapping
             questions = list(ic.obe_questions.all())
-            print(f"\n[OBE QUESTIONS] count={len(questions)}")
             for q in questions:
-                print(f"  Q: {q.question_name} | max={q.max_marks} | mapped_clos={q.mapped_clos} | unit={q.unit_item}")
 
-            # Debug: student OBE marks
-            obe_marks = {m.question_id: m.score for m in cs.obe_marks.select_related('question').all()}
-            print(f"\n[OBE MARKS] count={len(obe_marks)}")
-            for q_id, score in obe_marks.items():
-                print(f"  question_id={q_id} → score={score}")
-
-            # Debug: CLO attainment calculation
             clo_pcts = _clo_attainments_for_student(cs, questions)
-            print(f"\n[CLO ATTAINMENTS]")
-            for clo, pct in sorted(clo_pcts.items()):
-                print(f"  {clo}: {pct}% ({'ATTAINED' if pct >= ATTAINMENT_THRESHOLD else 'NOT ATTAINED'})")
 
-            if not clo_pcts:
-                print("  ⚠ NO CLO ATTAINMENTS - either no questions or no OBE marks")
+            # Build CLO meta (description + GA) for this course
+            clo_meta_summary = {
+                clo_obj.code: {
+                    'description': clo_obj.description or '',
+                    'mappedGA': {
+                        'gaId':    clo_obj.mapped_ga.ga_id,
+                        'gaTitle': clo_obj.mapped_ga.name,
+                    } if clo_obj.mapped_ga else None,
+                }
+                for clo_obj in ic.clos.select_related('mapped_ga').all()
+            }
 
-            clo_attainments  = [
+            clo_attainments = [
                 {
-                    'code':       clo,
-                    'attained':   pct >= ATTAINMENT_THRESHOLD,
-                    'percentage': pct,
+                    'code':        clo,
+                    'description': clo_meta_summary.get(clo, {}).get('description', ''),
+                    'percentage':  pct,
+                    'attained':    pct >= ATTAINMENT_THRESHOLD,
+                    'status':      'Attained' if pct >= ATTAINMENT_THRESHOLD else 'Not Attained',
+                    'mappedGA':    clo_meta_summary.get(clo, {}).get('mappedGA'),
                 }
                 for clo, pct in sorted(clo_pcts.items())
             ]
@@ -4256,6 +4215,18 @@ class FinalizeCourseView(APIView):
         questions = list(ic.obe_questions.all())
         instructor_name = ic.instructor.user.get_full_name() or ic.instructor.user.email
 
+        # Pre-build CLO meta (description + GA) once for all students
+        clo_meta_final = {
+            clo_obj.code: {
+                'description': clo_obj.description or '',
+                'mappedGA': {
+                    'gaId':    clo_obj.mapped_ga.ga_id,
+                    'gaTitle': clo_obj.mapped_ga.name,
+                } if clo_obj.mapped_ga else None,
+            }
+            for clo_obj in ic.clos.select_related('mapped_ga').all()
+        }
+
         # Wrap the entire finalization in a single atomic transaction.
         # Without this, a crash or DB error partway through the student loop
         # leaves some FinalResult rows written and others not — but the course
@@ -4271,7 +4242,21 @@ class FinalizeCourseView(APIView):
             for student in ic.students.all():
                 pct = _student_total_percentage(student)
                 grade_letter, grade_points = _get_grade(pct, ic)
-                clo_attainments = _clo_attainments_for_student(student, questions)
+                clo_pcts_raw = _clo_attainments_for_student(student, questions)
+
+                # Store enriched CLO blob so FinalResultsView returns the same
+                # shape as StudentCoursesView — description, status, GA all included
+                clo_attainments = [
+                    {
+                        'code':        clo,
+                        'description': clo_meta_final.get(clo, {}).get('description', ''),
+                        'percentage':  pct_val,
+                        'attained':    pct_val >= ATTAINMENT_THRESHOLD,
+                        'status':      'Attained' if pct_val >= ATTAINMENT_THRESHOLD else 'Not Attained',
+                        'mappedGA':    clo_meta_final.get(clo, {}).get('mappedGA'),
+                    }
+                    for clo, pct_val in sorted(clo_pcts_raw.items())
+                ]
 
                 result, _ = FinalResult.objects.update_or_create(
                     student_reg_no=student.reg_no,
