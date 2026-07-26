@@ -2916,6 +2916,56 @@ class StudentSummaryView(APIView):
 # CLO MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _resolve_ga(ga_identifier):
+    """
+    Flexibly resolve a GA identifier string to a GraduateAttribute instance.
+
+    Accepts any of these formats (case-insensitive):
+      'BSCS8'   → ga_id exact match
+      'GA-8'    → strips 'GA-' prefix, looks for ga_id ending in '8'
+      'GA8'     → strips 'GA' prefix, same
+      'CS8'     → program-prefixed format
+      '8'       → bare number, matches any ga_id ending in '8'
+
+    Returns the GraduateAttribute or None if not found.
+    The frontend sends whatever the dropdown gives it — this function
+    handles all variants so the DB schema (BSCS1..BSCS12) doesn't need
+    to match the frontend label format exactly.
+    """
+    if not ga_identifier:
+        return None
+
+    ga_id = str(ga_identifier).strip()
+
+    # 1. Exact match first (fastest path — covers BSCS8, CS8, etc.)
+    try:
+        return GraduateAttribute.objects.get(ga_id__iexact=ga_id)
+    except GraduateAttribute.DoesNotExist:
+        pass
+
+    # 2. Extract the numeric suffix — covers GA-8, GA8, BSCS8 etc.
+    import re as _re
+    digits = ''.join(_re.findall(r'\d+', ga_id))
+    if not digits:
+        return None  # no number found — can't match
+
+    # 3. Look for any GA whose ga_id ends with that number
+    #    e.g. digits='8' matches 'BSCS8', 'CS8', 'GA8'
+    candidates = GraduateAttribute.objects.filter(ga_id__iregex=rf'[A-Za-z]+{digits}$')
+    if candidates.count() == 1:
+        return candidates.first()
+
+    # 4. Multiple candidates — try common prefixes in order
+    for prefix in ('BSCS', 'CS', 'SE', 'EE', 'CE', 'GA'):
+        try:
+            return GraduateAttribute.objects.get(ga_id__iexact=f'{prefix}{digits}')
+        except GraduateAttribute.DoesNotExist:
+            continue
+
+    # 5. Last resort — return first candidate if any exist
+    return candidates.first() or None
+
+
 class CLOListView(APIView):
     """
     GET  /api/instructor/courses/<frontend_id>/clos/
@@ -2993,12 +3043,15 @@ class CLOListView(APIView):
 
         ga = None
         if ga_id:
-            try:
-                ga = GraduateAttribute.objects.get(ga_id=ga_id)
-            except GraduateAttribute.DoesNotExist:
-                return Response(
-                    {'error': f'Graduate Attribute "{ga_id}" not found'},
-                    status=status.HTTP_400_BAD_REQUEST
+            ga = _resolve_ga(ga_id)
+            if not ga:
+                # Log and continue with no GA rather than blocking the instructor.
+                # The instructor can remap later once GAs are seeded.
+                import logging
+                logging.getLogger(__name__).warning(
+                    f'CLO POST: Graduate Attribute "{ga_id}" not found — '
+                    f'CLO will be saved without GA mapping. '
+                    f'Run: python manage.py seed_graduate_attributes'
                 )
 
         clo = CLO.objects.create(
@@ -3076,14 +3129,17 @@ class CLODetailView(APIView):
         if 'order' in data:
             clo.order = data['order']
         if 'mappedGA' in data:
-            ga_id = data['mappedGA']
+            ga_id = data.get('mappedGA') or data.get('mapped_ga') or ''
             if ga_id:
-                try:
-                    clo.mapped_ga = GraduateAttribute.objects.get(ga_id=ga_id)
-                except GraduateAttribute.DoesNotExist:
-                    return Response(
-                        {'error': f'Graduate Attribute "{ga_id}" not found'},
-                        status=status.HTTP_400_BAD_REQUEST
+                ga = _resolve_ga(ga_id)
+                if ga:
+                    clo.mapped_ga = ga
+                else:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f'CLO PATCH: Graduate Attribute "{ga_id}" not found — '
+                        f'GA mapping unchanged. '
+                        f'Run: python manage.py seed_graduate_attributes'
                     )
             else:
                 clo.mapped_ga = None
