@@ -41,7 +41,12 @@ class CLOSerializer(serializers.ModelSerializer):
         fields = ['id', 'code', 'description', 'mappedGA', 'order']
 
     def get_mappedGA(self, obj):
-        return obj.mapped_ga.ga_id if obj.mapped_ga else None
+        if not obj.mapped_ga:
+            return None
+        return {
+            'gaId':    obj.mapped_ga.ga_id,
+            'gaTitle': obj.mapped_ga.name,
+        }
 
 
 class GraduateAttributeSerializer(serializers.ModelSerializer):
@@ -279,6 +284,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     students              = serializers.SerializerMethodField()
     obeQuestions          = serializers.SerializerMethodField()
     obe_marks             = serializers.SerializerMethodField()
+    obeMarks              = serializers.SerializerMethodField()
 
     class Meta:
         model  = InstructorCourse
@@ -289,7 +295,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
             'creditHours', 'cloCount', 'academicYear',
             'selectedGradingSystem', 'customGradingSystem',
             'categories', 'unitsData',
-            'students', 'obeQuestions', 'obe_marks',
+            'students', 'obeQuestions', 'obe_marks', 'obeMarks',
         ]
 
     def get_departmentId(self, obj):
@@ -334,9 +340,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     def get_obe_marks(self, obj):
         """
         Returns per-student, per-question OBE marks.
-        Key is always snake_case: obe_marks.
-        Shape: { "regNo": { "questionId": score } }
-        e.g. { "012-fa22-22012": { "CLO-1": 85.0, "CLO-2": 72.5 } }
+        Shape: { "regNo": { "questionFrontendId": score } }
         """
         result = {}
         for student in obj.students.prefetch_related('obe_marks__question').all():
@@ -347,6 +351,10 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
             if q_marks:
                 result[student.reg_no] = q_marks
         return result
+
+    def get_obeMarks(self, obj):
+        """camelCase alias for obe_marks — same data."""
+        return self.get_obe_marks(obj)
 
 
 
