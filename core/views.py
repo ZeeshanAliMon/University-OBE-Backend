@@ -6,6 +6,7 @@ from django.db import IntegrityError
 from django.db import transaction
 from django.utils import timezone
 import traceback
+import re
 from rest_framework             import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response    import Response
@@ -290,10 +291,9 @@ class GraduateAttributeListView(APIView):
         # fixing it here too so the API itself returns correct order for
         # any consumer that doesn't re-sort client-side (server-rendered
         # exports, future integrations, etc).
-        import re as _re
-        def _natural_key(ga):
-            parts = _re.split(r'(\d+)', ga.ga_id)
-            return [int(p) if p.isdigit() else p.lower() for p in parts]
+            def _natural_key(ga):
+                parts = re.split(r'(\d+)', ga.ga_id)
+                return [int(p) if p.isdigit() else p.lower() for p in parts]
 
         items = sorted(qs, key=_natural_key)
         return Response(GraduateAttributeSerializer(items, many=True).data)
@@ -518,7 +518,7 @@ def _parse_percent_range_min(pct_str: str) -> float:
     if 'below' in clean.lower():
         # "Below 60%" -> min is 0 (frontend: { min: 0, max: val })
         return 0.0
-    parts = _re.split(r'[-\u2013]|to', clean)
+    parts = re.split(r'[-\u2013]|to', clean)
     if len(parts) >= 2:
         try:
             return float(parts[0].strip())
@@ -2856,10 +2856,7 @@ class StudentSummaryView(APIView):
                 cat = ui.category
                 contrib = (m.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage if ui.total_marks > 0 else 0
 
-            # Debug: questions and CLO mapping
             questions = list(ic.obe_questions.all())
-            for q in questions:
-
             clo_pcts = _clo_attainments_for_student(cs, questions)
 
             # Build CLO meta (description + GA) for this course
@@ -2944,8 +2941,7 @@ def _resolve_ga(ga_identifier):
         pass
 
     # 2. Extract the numeric suffix — covers GA-8, GA8, BSCS8 etc.
-    import re as _re
-    digits = ''.join(_re.findall(r'\d+', ga_id))
+    digits = ''.join(re.findall(r'\d+', ga_id))
     if not digits:
         return None  # no number found — can't match
 
@@ -3047,8 +3043,7 @@ class CLOListView(APIView):
             if not ga:
                 # Log and continue with no GA rather than blocking the instructor.
                 # The instructor can remap later once GAs are seeded.
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     f'CLO POST: Graduate Attribute "{ga_id}" not found — '
                     f'CLO will be saved without GA mapping. '
                     f'Run: python manage.py seed_graduate_attributes'
