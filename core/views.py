@@ -204,6 +204,9 @@ class ProgramListView(APIView):
         qs = Program.objects.select_related('department').prefetch_related(
             'objectives__ga_mappings__graduate_attribute'
         ).all().order_by('name')
+        dept_filter = request.query_params.get('department', '').strip()
+        if dept_filter:
+            qs = qs.filter(department__dept_id=dept_filter)
         return Response(ProgramSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -281,7 +284,7 @@ class GraduateAttributeListView(APIView):
 
     def get(self, request):
         qs = GraduateAttribute.objects.select_related('department', 'program')
-        dept = request.query_params.get('departmentId')
+        dept = request.query_params.get('department') or request.query_params.get('departmentId')
         if dept:
             qs = qs.filter(department__dept_id=dept)
 
@@ -1378,10 +1381,18 @@ class CourseAssignmentView(APIView):
                     code__iexact=program_id
                 )
 
-            course = Course.objects.get(
-                code__iexact=course_code,
-                program__code__iexact=program_id
-            )
+            if program_id:
+                course = Course.objects.get(
+                    code__iexact=course_code,
+                    program__code__iexact=program_id
+                )
+            else:
+                course = Course.objects.filter(code__iexact=course_code).first()
+                if not course:
+                    return Response(
+                        {'error': f'Course "{course_code}" not found'},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
 
             if course.department_id != admin_dept.id:
                 return Response(
