@@ -61,23 +61,41 @@ def make_user(username, email, first_name, last_name, role):
 # ─── 1. Departments ───────────────────────────────────────────────────────────
 print("\n[1] Departments")
 
-dept_cs, _ = Department.objects.get_or_create(
-    dept_id='computing',
-    defaults={
-        'name': 'Department of Computing',
-        'vision': 'To be a leading computing department producing world-class graduates.',
-        'mission': 'To provide quality education in computing sciences through OBE.',
-    }
+def get_or_create_dept(dept_id, name, vision, mission):
+    # Try by dept_id first
+    try:
+        d, created = Department.objects.get_or_create(
+            dept_id=dept_id,
+            defaults={'name': name, 'vision': vision, 'mission': mission}
+        )
+        return d
+    except Exception:
+        pass
+    # Fallback: already exists with this name under a different dept_id
+    try:
+        return Department.objects.get(name=name)
+    except Department.DoesNotExist:
+        pass
+    # Last resort: use any existing dept
+    existing = Department.objects.first()
+    if existing:
+        print(f"  ⚠ Could not create dept '{name}', using existing: {existing.name}")
+        return existing
+    raise Exception(f"No departments found and could not create '{name}'")
+
+dept_cs = get_or_create_dept(
+    'computing',
+    'Department of Computing',
+    'To be a leading computing department producing world-class graduates.',
+    'To provide quality education in computing sciences through OBE.',
 )
 print(f"  ✓ {dept_cs.name}")
 
-dept_bus, _ = Department.objects.get_or_create(
-    dept_id='business',
-    defaults={
-        'name': 'Department of Business Administration',
-        'vision': 'To cultivate ethical, innovative business leaders.',
-        'mission': 'To deliver outcome-based business education aligned with industry needs.',
-    }
+dept_bus = get_or_create_dept(
+    'business',
+    'Department of Business Administration',
+    'To cultivate ethical, innovative business leaders.',
+    'To deliver outcome-based business education aligned with industry needs.',
 )
 print(f"  ✓ {dept_bus.name}")
 
