@@ -386,6 +386,7 @@ class CourseListView(APIView):
         course = Course.objects.create(
             code=d['code'], title=d['title'],
             type=d.get('type', 'core'),
+            subtype=d.get('subtype', 'theory'),
             department=department, program=program,
             credit_hours=d.get('creditHours', 3)
         )
@@ -454,6 +455,11 @@ class CourseDetailView(APIView):
         data = request.data.copy()
         if 'mappedGAs' in data:
             data['mappedGAs_write'] = data.pop('mappedGAs')
+        # Map any of the frontend subtype field names to the model field 'subtype'
+        if 'subtype' not in data:
+            raw_subtype = data.get('course_subtype') or data.get('courseSubtype') or data.get('courseType')
+            if raw_subtype:
+                data['subtype'] = str(raw_subtype).lower()
         s = CourseSerializer(obj, data=data, partial=True)
         if s.is_valid():
             s.save()

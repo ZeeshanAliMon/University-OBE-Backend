@@ -155,10 +155,11 @@ class CourseSerializer(serializers.ModelSerializer):
         child=serializers.CharField(), write_only=True, required=False, source='mapped_gas_ids'
     )
     creditHours     = serializers.IntegerField(source='credit_hours', required=False)
+    courseType      = serializers.CharField(source='subtype', read_only=True)
 
     class Meta:
         model  = Course
-        fields = ['id', 'code', 'title', 'type', 'mappedGAs', 'mappedGAs_write',
+        fields = ['id', 'code', 'title', 'type', 'courseType', 'mappedGAs', 'mappedGAs_write',
                   'departmentId', 'programId', 'creditHours']
 
     def get_id(self, obj):
@@ -175,9 +176,10 @@ class CourseSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         mapped_gas_ids = validated_data.pop('mapped_gas_ids', None)
-        instance.code  = validated_data.get('code',  instance.code)
-        instance.title = validated_data.get('title', instance.title)
-        instance.type  = validated_data.get('type',  instance.type)
+        instance.code    = validated_data.get('code',    instance.code)
+        instance.title   = validated_data.get('title',   instance.title)
+        instance.type    = validated_data.get('type',    instance.type)
+        instance.subtype = validated_data.get('subtype', instance.subtype)
         instance.save()
         if mapped_gas_ids is not None:
             instance.mapped_gas.set(GraduateAttribute.objects.filter(ga_id__in=mapped_gas_ids))
@@ -382,11 +384,13 @@ class GraduateAttributeWriteSerializer(serializers.Serializer):
 
 
 class CourseWriteSerializer(serializers.Serializer):
-    COURSE_TYPE_CHOICES = ['core', 'elective']
+    COURSE_TYPE_CHOICES    = ['core', 'elective']
+    COURSE_SUBTYPE_CHOICES = ['theory', 'lab']
 
     code         = serializers.CharField(max_length=30)
     title        = serializers.CharField(max_length=200)
     type         = serializers.ChoiceField(choices=COURSE_TYPE_CHOICES, default='core')
+    subtype      = serializers.ChoiceField(choices=COURSE_SUBTYPE_CHOICES, default='theory', required=False)
     departmentId = serializers.CharField()
     programId    = serializers.CharField(required=False, allow_blank=True, default='')
     creditHours  = serializers.IntegerField(required=False, default=3, min_value=0, max_value=20)
