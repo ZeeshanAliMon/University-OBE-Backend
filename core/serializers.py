@@ -32,21 +32,25 @@ class UserSerializer(serializers.ModelSerializer):
 class CLOSerializer(serializers.ModelSerializer):
     """
     Serializer for Course Learning Outcomes.
-    mappedGA: GA id string (e.g. "GA-1") or null.
+    mappedGA: plain GA id string (e.g. "GA-1") or null.
+    mappedGATitle: human-readable GA name for display, or null.
     """
-    mappedGA = serializers.SerializerMethodField()
+    mappedGA      = serializers.SerializerMethodField()
+    mappedGATitle = serializers.SerializerMethodField()
 
     class Meta:
         model  = CLO
-        fields = ['id', 'code', 'description', 'mappedGA', 'order']
+        fields = ['id', 'code', 'description', 'mappedGA', 'mappedGATitle', 'order']
 
     def get_mappedGA(self, obj):
         if not obj.mapped_ga:
             return None
-        return {
-            'gaId':    obj.mapped_ga.ga_id,
-            'gaTitle': obj.mapped_ga.name,
-        }
+        return obj.mapped_ga.ga_id
+
+    def get_mappedGATitle(self, obj):
+        if not obj.mapped_ga:
+            return None
+        return obj.mapped_ga.name
 
 
 class GraduateAttributeSerializer(serializers.ModelSerializer):
@@ -288,16 +292,31 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     obe_marks             = serializers.SerializerMethodField()
     obeMarks              = serializers.SerializerMethodField()
 
+    clos   = serializers.SerializerMethodField()
+    semester = serializers.CharField(required=False, allow_blank=True)
+
+    def get_clos(self, obj):
+        return [
+            {
+                'id':          clo.id,
+                'code':        clo.code,
+                'description': clo.description,
+                'mappedGA':    clo.mapped_ga.ga_id if clo.mapped_ga else None,
+            }
+            for clo in obj.clos.order_by('order').all()
+        ]
+
     class Meta:
         model  = InstructorCourse
         fields = [
             'id', 'code', 'title', 'courseType',
             'departmentId', 'departmentName',
             'programId', 'programName',
-            'creditHours', 'cloCount', 'academicYear',
+            'creditHours', 'cloCount', 'academicYear', 'semester',
             'selectedGradingSystem', 'customGradingSystem',
-            'categories', 'unitsData',
+            'categories', 'unitsData', 'clos',
             'students', 'obeQuestions', 'obe_marks', 'obeMarks',
+            'status',
         ]
 
     def get_departmentId(self, obj):
