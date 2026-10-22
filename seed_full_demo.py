@@ -346,7 +346,7 @@ for ic in all_ics:
     cat_course = ic.catalog_course
     if not cat_course:
         continue
-    existing_q_ids = set(ic.obe_questions.values_list('frontend_id', flat=True))
+    existing_q_ids = set(OBEQuestion.objects.filter(course=ic).values_list('frontend_id', flat=True))
     q_order = 0
 
     for cat in cat_course.markscategories.all():
@@ -450,7 +450,7 @@ for ic in all_ics:
 
     # Collect unit items and OBE questions for this course
     unit_items = list(UnitItem.objects.filter(category__course=cat_course))
-    obe_questions = list(ic.obe_questions.all())
+    obe_questions = list(OBEQuestion.objects.filter(course=ic))
 
     for cs in ic.students.all():
         profile = get_student_profile(cs.reg_no)
@@ -459,12 +459,11 @@ for ic in all_ics:
         perf  = max(0.20, min(0.98, profile + noise))
 
         # Unit-level marks (existing StudentMark table)
-        existing_unit_marks = set(cs.marks.values_list('unit_item_id', flat=True))
+        existing_unit_marks = set(StudentMark.objects.filter(student=cs).values_list('unit_item_id', flat=True))
         for ui in unit_items:
             if ui.id in existing_unit_marks:
                 continue
             raw_score = perf * ui.total_marks
-            # Add per-unit noise
             raw_score += random.uniform(-ui.total_marks * 0.05, ui.total_marks * 0.05)
             score = round(max(0, min(ui.total_marks, raw_score)), 1)
             try:
@@ -474,7 +473,7 @@ for ic in all_ics:
                 pass
 
         # OBE question marks
-        existing_obe = set(cs.obe_marks.values_list('question_id', flat=True))
+        existing_obe = set(OBEStudentMark.objects.filter(student=cs).values_list('question_id', flat=True))
         for q in obe_questions:
             if q.id in existing_obe:
                 continue
@@ -534,15 +533,13 @@ p(f"  OBE Marks          : {OBEStudentMark.objects.count()}")
 p(f"  Semester Plans     : {SemesterPlan.objects.count()}")
 
 # Check attainment coverage: how many ICs have both students and OBE marks?
-ics_with_students = InstructorCourse.objects.annotate(sc=Count('students')).filter(sc__gt=0).count()
-ics_with_marks    = InstructorCourse.objects.annotate(mc=Count('obe_questions')).filter(mc__gt=0).count()
+ics_with_students = InstructorCourse.objects.filter(students__isnull=False).distinct().count()
+ics_with_marks    = InstructorCourse.objects.filter(obe_questions__isnull=False).distinct().count()
 p(f"\n  ICs with students  : {ics_with_students}")
 p(f"  ICs with questions : {ics_with_marks}")
 
 # Sample attainment check on first program with data
-prog_with_data = Program.objects.filter(
-    instructor_courses__students__isnull=False
-).distinct().first()
+prog_with_data = programs[0] if programs else None
 if prog_with_data:
     p(f"\n  Sample program for reports: {prog_with_data.code} — {prog_with_data.name}")
     ic_count = InstructorCourse.objects.filter(program=prog_with_data).count()
