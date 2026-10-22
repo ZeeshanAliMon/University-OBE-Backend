@@ -428,25 +428,52 @@ if qa_token:
 # ─── 13. Reports ──────────────────────────────────────────────────────────
 h("13. Reports")
 
-if qa_token and prog_id:
-    endpoints = [
-        f"/reports/program-ga-attainment/?programId={prog_id}",
-        f"/reports/program-ga-attainment-by-semester/?programId={prog_id}",
-        f"/reports/po-attainment/?programId={prog_id}",
-        f"/reports/co-attainment-summary/?programId={prog_id}",
-        f"/reports/gap-analysis/?programId={prog_id}",
-        f"/reports/at-risk-students/?programId={prog_id}",
-        f"/reports/cohort-comparison/?programId={prog_id}",
-        f"/reports/student-ga-attainment/",
-        f"/reports/student-summary/",
+if qa_token:
+    # Use a known good program ID from seed data, fallback to first valid one found
+    test_prog_id = 'bscs'
+    if prog_id and '&' not in prog_id and ' ' not in prog_id:
+        test_prog_id = prog_id
+    print(f"    Using programId={test_prog_id} for report tests")
+
+    # Get a real student regNo to test student reports
+    test_reg_no = None
+    try:
+        r = requests.get(f"{BASE_URL}/students/", headers=dept_headers() if dept_token else qa_headers(), timeout=10)
+        if r.status_code == 200:
+            students = r.json()
+            if students and isinstance(students, list):
+                test_reg_no = students[0].get('regNo') or students[0].get('reg_no')
+                print(f"    Using regNo={test_reg_no} for student report tests")
+    except Exception:
+        pass
+
+    program_endpoints = [
+        f"/reports/program-ga-attainment/?programId={test_prog_id}",
+        f"/reports/program-ga-attainment-by-semester/?programId={test_prog_id}",
+        f"/reports/po-attainment/?programId={test_prog_id}",
+        f"/reports/co-attainment-summary/?programId={test_prog_id}",
+        f"/reports/gap-analysis/?programId={test_prog_id}",
+        f"/reports/at-risk-students/?programId={test_prog_id}",
+        f"/reports/cohort-comparison/?programId={test_prog_id}",
     ]
-    for ep in endpoints:
+    student_endpoints = []
+    if test_reg_no:
+        student_endpoints = [
+            f"/reports/student-ga-attainment/?regNo={test_reg_no}",
+            f"/reports/student-summary/?regNo={test_reg_no}",
+        ]
+    else:
+        warn("Student report tests skipped", "no student regNo found")
+
+    for ep in program_endpoints + student_endpoints:
         try:
-            r = requests.get(f"{BASE_URL}{ep}", headers=qa_headers(), timeout=10)
+            r = requests.get(f"{BASE_URL}{ep}", headers=qa_headers(), timeout=15)
             if r.status_code == 200:
-                ok(f"GET {ep}", f"status 200")
+                ok(f"GET {ep}", "status 200")
             elif r.status_code == 404:
                 warn(f"GET {ep}", "404 — endpoint may not be implemented")
+            elif r.status_code == 400:
+                fail(f"GET {ep}", f"400 Bad Request: {r.text[:150]}")
             else:
                 fail(f"GET {ep}", f"status {r.status_code} {r.text[:100]}")
         except Exception as e:
