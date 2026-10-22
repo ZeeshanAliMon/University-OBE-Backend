@@ -294,9 +294,14 @@ class GraduateAttributeListView(APIView):
         # fixing it here too so the API itself returns correct order for
         # any consumer that doesn't re-sort client-side (server-rendered
         # exports, future integrations, etc).
-            def _natural_key(ga):
-                parts = re.split(r'(\d+)', ga.ga_id)
-                return [int(p) if p.isdigit() else p.lower() for p in parts]
+        #
+        # NOTE: this helper must live at function level, NOT inside the
+        # `if dept:` block above. It was previously nested there, so a
+        # request with no ?department= param raised UnboundLocalError (500)
+        # and the frontend's getAllData() silently received zero GAs.
+        def _natural_key(ga):
+            parts = re.split(r'(\d+)', ga.ga_id)
+            return [int(p) if p.isdigit() else p.lower() for p in parts]
 
         items = sorted(qs, key=_natural_key)
         return Response(GraduateAttributeSerializer(items, many=True).data)
