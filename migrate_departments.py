@@ -31,13 +31,27 @@ for fake_id, real_id in MIGRATIONS:
 
     print(f"\nMigrating: '{fake_id}' ({fake_dept.name}) → '{real_id}' ({real_dept.name})")
 
-    # GraduateAttributes
+    # GraduateAttributes — delete duplicates first
+    deleted_dupes = 0
+    for ga in GraduateAttribute.objects.filter(department=fake_dept):
+        if GraduateAttribute.objects.filter(ga_id=ga.ga_id, department=real_dept).exists():
+            ga.delete()
+            deleted_dupes += 1
+    if deleted_dupes:
+        print(f"  ✓ Deleted {deleted_dupes} duplicate GAs")
     n = GraduateAttribute.objects.filter(department=fake_dept).update(department=real_dept)
-    print(f"  ✓ GraduateAttributes: {n}")
+    print(f"  ✓ GraduateAttributes migrated: {n}")
 
-    # Courses
+    # Courses — delete duplicates first (same code+program already exists under real_dept)
+    deleted_dupes = 0
+    for course in Course.objects.filter(department=fake_dept):
+        if Course.objects.filter(code=course.code, department=real_dept, program=course.program).exists():
+            course.delete()
+            deleted_dupes += 1
+    if deleted_dupes:
+        print(f"  ✓ Deleted {deleted_dupes} duplicate courses")
     n = Course.objects.filter(department=fake_dept).update(department=real_dept)
-    print(f"  ✓ Courses: {n}")
+    print(f"  ✓ Courses migrated: {n}")
 
     # InstructorCourses
     n = InstructorCourse.objects.filter(department=fake_dept).update(department=real_dept)
