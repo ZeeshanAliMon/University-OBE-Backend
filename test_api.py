@@ -7,7 +7,7 @@ import requests
 import json
 import sys
 
-BASE_URL = "http://127.0.0.1:8000/api"  # change to your live URL if not running locally
+BASE_URL = "https://zeeshanbalti.pythonanywhere.com/api"
 
 # ─── Credentials ─────────────────────────────────────────────────────────────
 # Fill these in before running
