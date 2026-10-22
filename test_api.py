@@ -28,6 +28,9 @@ BOLD   = "\033[1m"
 
 results = []
 
+def assert_(cond, msg):
+    if not cond: raise AssertionError(msg)
+
 def h(title):
     print(f"\n{BOLD}{CYAN}{'─'*60}{RESET}")
     print(f"{BOLD}{CYAN}  {title}{RESET}")
@@ -140,9 +143,6 @@ try:
         fail("POST /auth/login/ (bad credentials → rejects)", f"got {r.status_code}")
 except Exception as e:
     fail("POST /auth/login/ (bad credentials)", str(e))
-
-def assert_(cond, msg):
-    if not cond: raise AssertionError(msg)
 
 def qa_headers():
     return {"Authorization": f"Bearer {qa_token}", "Content-Type": "application/json"}
