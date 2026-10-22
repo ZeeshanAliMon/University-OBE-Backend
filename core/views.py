@@ -607,7 +607,14 @@ class InstructorCourseView(APIView):
                 term = assignment.academic_year
 
                 prog_suffix = program.code.lower() if program else 'all'
-                term_suffix = f"-{term.lower().replace(' ', '')}" if term else ''
+                # Normalise academic_year to match frontend format:
+                # spaces → dashes, first letter capitalised (e.g. "Fall-2024")
+                if term:
+                    term_norm = term.replace(' ', '-')
+                    term_norm = term_norm[0].upper() + term_norm[1:] if term_norm else term_norm
+                    term_suffix = f"-{term_norm}"
+                else:
+                    term_suffix = ''
                 frontend_id = (
                     f"course-assigned-{course.code}-"
                     f"{profile.employee_id}-{prog_suffix}{term_suffix}"
