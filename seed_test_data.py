@@ -1,5 +1,5 @@
 """
-OBE System — Test Data Seed Script
+OBE System - Test Data Seed Script
 ===================================
 Run from the project root:
     python manage.py shell < seed_test_data.py
@@ -18,7 +18,7 @@ Creates:
   - 5 Courses per program (20 total), with subtype
   - Semester Plans (8 semesters per program)
   - AdmissionStudents (10 per program = 40 total)
-  - CourseAssignments (instructor → course)
+  - CourseAssignments (instructor -> course)
   - InstructorCourse with CLOs, MarksCategories, UnitItems
   - CourseStudents with sample marks
 
@@ -52,13 +52,13 @@ def make_user(username, email, first_name, last_name, role):
     if created:
         u.set_password(PASSWORD)
         u.save()
-        print(f"  ✓ Created user: {email} [{role}]")
+        print(f"  + Created user: {email} [{role}]")
     else:
-        print(f"  – Skipped existing user: {email}")
+        print(f"  - Skipped existing user: {email}")
     return u
 
 
-# ─── 1. Departments ───────────────────────────────────────────────────────────
+# --- 1. Departments -----------------------------------------------------------
 print("\n[1] Departments")
 
 def get_or_create_dept(dept_id, name, vision, mission):
@@ -79,7 +79,7 @@ def get_or_create_dept(dept_id, name, vision, mission):
     # Last resort: use any existing dept
     existing = Department.objects.first()
     if existing:
-        print(f"  ⚠ Could not create dept '{name}', using existing: {existing.name}")
+        print(f"  ! Could not create dept '{name}', using existing: {existing.name}")
         return existing
     raise Exception(f"No departments found and could not create '{name}'")
 
@@ -89,7 +89,7 @@ dept_cs = get_or_create_dept(
     'To be a leading computing department producing world-class graduates.',
     'To provide quality education in computing sciences through OBE.',
 )
-print(f"  ✓ {dept_cs.name}")
+print(f"  + {dept_cs.name}")
 
 dept_bus = get_or_create_dept(
     'business',
@@ -97,10 +97,10 @@ dept_bus = get_or_create_dept(
     'To cultivate ethical, innovative business leaders.',
     'To deliver outcome-based business education aligned with industry needs.',
 )
-print(f"  ✓ {dept_bus.name}")
+print(f"  + {dept_bus.name}")
 
 
-# ─── 2. Programs ──────────────────────────────────────────────────────────────
+# --- 2. Programs --------------------------------------------------------------
 print("\n[2] Programs")
 
 prog_bscs, _ = Program.objects.get_or_create(
@@ -112,7 +112,7 @@ prog_bscs, _ = Program.objects.get_or_create(
         'mission': 'Deliver rigorous CS education with OBE framework.',
     }
 )
-print(f"  ✓ {prog_bscs.code}")
+print(f"  + {prog_bscs.code}")
 
 prog_bsse, _ = Program.objects.get_or_create(
     code='BSSE',
@@ -123,7 +123,7 @@ prog_bsse, _ = Program.objects.get_or_create(
         'mission': 'Develop engineering skills through project-based OBE learning.',
     }
 )
-print(f"  ✓ {prog_bsse.code}")
+print(f"  + {prog_bsse.code}")
 
 prog_bba, _ = Program.objects.get_or_create(
     code='BBA',
@@ -134,7 +134,7 @@ prog_bba, _ = Program.objects.get_or_create(
         'mission': 'Provide outcome-based business education.',
     }
 )
-print(f"  ✓ {prog_bba.code}")
+print(f"  + {prog_bba.code}")
 
 prog_mba, _ = Program.objects.get_or_create(
     code='MBA',
@@ -145,10 +145,10 @@ prog_mba, _ = Program.objects.get_or_create(
         'mission': 'Deliver advanced business education through OBE.',
     }
 )
-print(f"  ✓ {prog_mba.code}")
+print(f"  + {prog_mba.code}")
 
 
-# ─── 3. Graduate Attributes ───────────────────────────────────────────────────
+# --- 3. Graduate Attributes ---------------------------------------------------
 print("\n[3] Graduate Attributes")
 
 cs_gas_data = [
@@ -176,7 +176,7 @@ for ga_id, name, desc in cs_gas_data:
         defaults={'name': name, 'description': desc, 'department': dept_cs}
     )
     cs_gas.append(ga)
-    print(f"  ✓ {ga_id}: {name}")
+    print(f"  + {ga_id}: {name}")
 
 bus_gas = []
 for ga_id, name, desc in bus_gas_data:
@@ -185,10 +185,10 @@ for ga_id, name, desc in bus_gas_data:
         defaults={'name': name, 'description': desc, 'department': dept_bus}
     )
     bus_gas.append(ga)
-    print(f"  ✓ {ga_id}: {name}")
+    print(f"  + {ga_id}: {name}")
 
 
-# ─── 4. Program Objectives + PO-GA Mappings ───────────────────────────────────
+# --- 4. Program Objectives + PO-GA Mappings -----------------------------------
 print("\n[4] Program Objectives")
 
 cs_pos = [
@@ -212,7 +212,7 @@ for code, desc in cs_pos:
             defaults={'description': desc}
         )
         cs_po_objs.append(po)
-        print(f"  ✓ {prog.code} {code}")
+        print(f"  + {prog.code} {code}")
 
 bus_po_objs = []
 for code, desc in bus_pos:
@@ -222,9 +222,9 @@ for code, desc in bus_pos:
             defaults={'description': desc}
         )
         bus_po_objs.append(po)
-        print(f"  ✓ {prog.code} {code}")
+        print(f"  + {prog.code} {code}")
 
-# PO → GA Mappings
+# PO -> GA Mappings
 print("\n[4b] PO-GA Mappings")
 mappings = [
     # (program, po_code, ga_id)
@@ -250,12 +250,12 @@ for prog, po_code, ga_id in mappings:
         po = ProgramObjective.objects.get(program=prog, code=po_code)
         ga = GraduateAttribute.objects.get(ga_id=ga_id)
         POGAMapping.objects.get_or_create(program_objective=po, graduate_attribute=ga)
-        print(f"  ✓ {prog.code} {po_code} → {ga_id}")
+        print(f"  + {prog.code} {po_code} -> {ga_id}")
     except Exception as e:
-        print(f"  ✗ {prog.code} {po_code} → {ga_id}: {e}")
+        print(f"  x {prog.code} {po_code} -> {ga_id}: {e}")
 
 
-# ─── 5. Users ─────────────────────────────────────────────────────────────────
+# --- 5. Users -----------------------------------------------------------------
 print("\n[5] Users & Profiles")
 
 # QA User
@@ -310,7 +310,7 @@ for username, email, first, last, dept, emp_id, designation in inst_data:
     instructors[username] = prof
 
 
-# ─── 6. Courses ───────────────────────────────────────────────────────────────
+# --- 6. Courses ---------------------------------------------------------------
 print("\n[6] Courses")
 
 courses_data = [
@@ -355,13 +355,13 @@ for code, title, ctype, subtype, dept, prog, ga_ids in courses_data:
     if created:
         gas = GraduateAttribute.objects.filter(ga_id__in=ga_ids)
         course.mapped_gas.set(gas)
-        print(f"  ✓ {code}: {title} [{subtype}]")
+        print(f"  + {code}: {title} [{subtype}]")
     else:
-        print(f"  – Skipped existing course: {code}")
+        print(f"  - Skipped existing course: {code}")
     course_objs[code] = course
 
 
-# ─── 7. Semester Plans ────────────────────────────────────────────────────────
+# --- 7. Semester Plans --------------------------------------------------------
 print("\n[7] Semester Plans")
 
 semester_plans = {
@@ -418,10 +418,10 @@ for prog, semesters in semester_plans.items():
             defaults={'course_codes': codes, 'updated_by': da}
         )
         if created:
-            print(f"  ✓ {prog.code} Semester {sem}: {codes}")
+            print(f"  + {prog.code} Semester {sem}: {codes}")
 
 
-# ─── 8. Admission Students ────────────────────────────────────────────────────
+# --- 8. Admission Students ----------------------------------------------------
 print("\n[8] Admission Students")
 
 students_data = []
@@ -447,10 +447,10 @@ for prog, dept in [(prog_bscs, dept_cs), (prog_bsse, dept_cs), (prog_bba, dept_b
         )
         if created:
             count += 1
-    print(f"  ✓ {prog.code}: {count} students created")
+    print(f"  + {prog.code}: {count} students created")
 
 
-# ─── 9. Course Assignments ────────────────────────────────────────────────────
+# --- 9. Course Assignments ----------------------------------------------------
 print("\n[9] Course Assignments")
 
 assignments_data = [
@@ -483,14 +483,14 @@ for inst_username, course_code, prog, academic_year in assignments_data:
             defaults={'assigned_by': da}
         )
         if created:
-            print(f"  ✓ {inst_username} → {course_code} ({prog.code}) [{academic_year}]")
+            print(f"  + {inst_username} -> {course_code} ({prog.code}) [{academic_year}]")
         else:
-            print(f"  – Skipped existing: {inst_username} → {course_code}")
+            print(f"  - Skipped existing: {inst_username} -> {course_code}")
     except Exception as e:
-        print(f"  ✗ {inst_username} → {course_code}: {e}")
+        print(f"  x {inst_username} -> {course_code}: {e}")
 
 
-# ─── 10. InstructorCourses with CLOs, Categories, Units, Students, Marks ──────
+# --- 10. InstructorCourses with CLOs, Categories, Units, Students, Marks ------
 print("\n[10] Instructor Courses (with CLOs, marks, students)")
 
 def make_instructor_course(inst_username, course_code, prog, academic_year, semester):
@@ -517,10 +517,10 @@ def make_instructor_course(inst_username, course_code, prog, academic_year, seme
         }
     )
     if not created:
-        print(f"    – Skipped existing InstructorCourse: {frontend_id}")
+        print(f"    - Skipped existing InstructorCourse: {frontend_id}")
         return ic
 
-    print(f"    ✓ InstructorCourse: {course_code} [{inst_username}] {academic_year}")
+    print(f"    + InstructorCourse: {course_code} [{inst_username}] {academic_year}")
 
     # CLOs
     gas = list(course.mapped_gas.all())
@@ -530,7 +530,7 @@ def make_instructor_course(inst_username, course_code, prog, academic_year, seme
         clo, _ = CLO.objects.get_or_create(
             course=ic, code=f"CLO-{i}",
             defaults={
-                'description': f"Students will demonstrate competency in {course.title} — Outcome {i}.",
+                'description': f"Students will demonstrate competency in {course.title} - Outcome {i}.",
                 'mapped_ga': ga,
                 'order': i,
             }
@@ -562,7 +562,7 @@ def make_instructor_course(inst_username, course_code, prog, academic_year, seme
                 defaults={
                     'passing': 5,
                     'total_marks': 10,
-                    'weightage': round(cat.percentage / units_count, 2),
+                    'weightage': round(100.0 / units_count, 2),   # share WITHIN the category; must sum to 100
                     'mapped_clos': clo_codes,
                 }
             )
@@ -605,12 +605,12 @@ for inst_username, course_code, prog, academic_year, semester in ic_data:
     try:
         make_instructor_course(inst_username, course_code, prog, academic_year, semester)
     except Exception as e:
-        print(f"  ✗ {inst_username} → {course_code}: {e}")
+        print(f"  x {inst_username} -> {course_code}: {e}")
 
 
-# ─── Summary ──────────────────────────────────────────────────────────────────
+# --- Summary ------------------------------------------------------------------
 print("\n" + "="*60)
-print("SEED COMPLETE — Test accounts (password: Test@1234):")
+print("SEED COMPLETE - Test accounts (password: Test@1234):")
 print("="*60)
 print(f"  QA Officer       : qa@iqra.edu.pk")
 print(f"  Dept Admin (CS)  : deptadmin.cs@iqra.edu.pk")

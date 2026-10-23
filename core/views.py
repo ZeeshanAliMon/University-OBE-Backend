@@ -2435,11 +2435,14 @@ class BatchGAAttainmentView(APIView):
             except Program.DoesNotExist:
                 return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Batch code is embedded in reg_no as "<BATCH>-<PROGRAM>-<NUM>" e.g.
-        # "SP23-BSCS-014" — matches getStudentBatchCode() on the frontend.
-        # __istartswith on reg_no is the DB-side equivalent of that parse.
+        # The batch code is a "-"-separated segment of reg_no. Two layouts are
+        # in use: "<BATCH>-<PROGRAM>-<NUM>" (e.g. "SP23-BSCS-014") and the
+        # university format "<CAMPUS>-<BATCH>-<NUM>" (e.g. "052-SP23-22144").
+        # A plain startswith only handled the first, so the second matched zero
+        # students even though the frontend's batch picker offered "SP23".
         students_qs = AdmissionStudent.objects.filter(
-            department=department, reg_no__istartswith=batch
+            models.Q(reg_no__istartswith=batch) | models.Q(reg_no__icontains=f'-{batch}-'),
+            department=department,
         )
         if program:
             students_qs = students_qs.filter(program=program)
@@ -2710,6 +2713,7 @@ class CourseAttainmentView(APIView):
         all_questions = []
         course_title  = ''
         prog_id_out   = program_id.lower() if program_id else None
+        clo_scores_all = {}   # clo code -> [one % per student]
 
         for ic in qs.prefetch_related(
             'students__obe_marks__question',
@@ -2719,8 +2723,17 @@ class CourseAttainmentView(APIView):
             course_title = ic.title
             if not prog_id_out and ic.program:
                 prog_id_out = ic.program.code.lower()
-            all_students.extend(list(ic.students.all()))
-            all_questions.extend(list(ic.obe_questions.all()))
+            ic_questions = list(ic.obe_questions.all())
+            all_questions.extend(ic_questions)
+            # Score every student against THEIR OWN section's questions only.
+            # A course can have several sections (one InstructorCourse each);
+            # pooling every section's questions into one denominator made a
+            # student who earned 58% on their section read as 29%, i.e. CLO
+            # attainment was divided by the number of sections.
+            for student in ic.students.all():
+                all_students.append(student)
+                for clo, pct in _clo_attainments_for_student(student, ic_questions).items():
+                    clo_scores_all.setdefault(clo, []).append(pct)
 
         class_size = len(all_students)
 
@@ -2730,13 +2743,6 @@ class CourseAttainmentView(APIView):
             for clo in q.mapped_clos:
                 clo_max_marks.setdefault(clo, 0.0)
                 clo_max_marks[clo] += q.max_marks
-
-        # Per-student CLO scores
-        clo_scores_all = {}
-        for student in all_students:
-            clo_attain = _clo_attainments_for_student(student, all_questions)
-            for clo, pct in clo_attain.items():
-                clo_scores_all.setdefault(clo, []).append(pct)
 
         # GA catalog for mapping
         catalog_course = Course.objects.filter(
