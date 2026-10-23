@@ -160,10 +160,19 @@ class CourseSerializer(serializers.ModelSerializer):
     )
     creditHours     = serializers.IntegerField(source='credit_hours', required=False)
     courseType      = serializers.CharField(source='subtype', read_only=True)
+    # courseType above is read-only (it's the display alias). Without a writable
+    # counterpart, CourseDetailView.patch's subtype mapping was silently dropped
+    # by the serializer: PATCHing a course's Theory/Lab type returned 200 OK and
+    # changed nothing, so a course stuck with the wrong type could never be
+    # corrected through the API.
+    subtype         = serializers.ChoiceField(
+        choices=Course.COURSE_SUBTYPE_CHOICES, write_only=True, required=False
+    )
 
     class Meta:
         model  = Course
-        fields = ['id', 'code', 'title', 'type', 'courseType', 'mappedGAs', 'mappedGAs_write',
+        fields = ['id', 'code', 'title', 'type', 'courseType', 'subtype',
+                  'mappedGAs', 'mappedGAs_write',
                   'departmentId', 'programId', 'creditHours']
 
     def get_id(self, obj):

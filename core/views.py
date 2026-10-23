@@ -463,11 +463,23 @@ class CourseDetailView(APIView):
         data = request.data.copy()
         if 'mappedGAs' in data:
             data['mappedGAs_write'] = data.pop('mappedGAs')
-        # Map any of the frontend subtype field names to the model field 'subtype'
-        if 'subtype' not in data:
-            raw_subtype = data.get('course_subtype') or data.get('courseSubtype') or data.get('courseType')
-            if raw_subtype:
-                data['subtype'] = str(raw_subtype).lower()
+        # Map any of the frontend subtype field names to the model field 'subtype'.
+        # Always normalise to lowercase: the model's choices are ('theory', 'lab')
+        # but the frontend sends the display form ('Theory' / 'Lab'). This used to
+        # lowercase only when 'subtype' was absent, which was harmless while the
+        # serializer ignored subtype entirely — now that it is writable, an
+        # un-normalised 'Theory' would fail ChoiceField validation and 400 the
+        # whole request.
+        raw_subtype = (
+            data.get('subtype')
+            or data.get('course_subtype')
+            or data.get('courseSubtype')
+            or data.get('courseType')
+        )
+        if raw_subtype:
+            data['subtype'] = str(raw_subtype).lower()
+        else:
+            data.pop('subtype', None)
         s = CourseSerializer(obj, data=data, partial=True)
         if s.is_valid():
             s.save()
@@ -829,9 +841,44 @@ class InstructorCourseView(APIView):
                     # nested under the InstructorCourse object, unchanged).
                     incoming_categories = c.get('categories', [])
                     incoming_units_data = c.get('unitsData', {})
+                    # Ignore malformed rows instead of raising KeyError (500).
+                    incoming_categories = [
+                        cat for cat in incoming_categories
+                        if isinstance(cat, dict) and cat.get('name')
+                    ]
                     incoming_cat_names  = [cat['name'] for cat in incoming_categories]
 
-                    catalog_course.markscategories.exclude(name__in=incoming_cat_names).delete()
+                    # DATA-LOSS GUARD: never infer deletion from absence.
+                    #
+                    # This block used to run
+                    #     markscategories.exclude(name__in=incoming_cat_names).delete()
+                    # which treats whatever the client sent as the complete
+                    # authoritative set and hard-deletes the remainder. Three things
+                    # made that destructive:
+                    #   1. MarksCategory -> UnitItem -> StudentMark all CASCADE, so
+                    #      deleting a category silently destroys entered student marks.
+                    #   2. These rows hang off the SHARED catalog Course (migration
+                    #      0011), so the blast radius is every instructor and every
+                    #      term teaching this course code.
+                    #   3. The frontend auto-saves on every state change, and filters
+                    #      categories by courseType (THEORY_CATEGORY_NAMES vs
+                    #      LAB_CATEGORY_NAMES). A course with the wrong/flipped type
+                    #      sends the other type's list, wiping the real one with no
+                    #      click and no error.
+                    # An empty/missing 'categories' wiped the entire structure.
+                    #
+                    # Now: an omitted category is only removed when it holds no marks
+                    # (safe cleanup of an unused structure). Anything carrying student
+                    # marks is preserved and must be deleted deliberately.
+                    if incoming_cat_names:
+                        for stale_cat in catalog_course.markscategories.exclude(
+                            name__in=incoming_cat_names
+                        ):
+                            has_marks = StudentMark.objects.filter(
+                                unit_item__category=stale_cat
+                            ).exists()
+                            if not has_marks:
+                                stale_cat.delete()
 
                     cat_obj_map  = {}   # cat_name -> MarksCategory instance
                     unit_obj_map = {}   # (cat_name, unit_no) -> UnitItem instance
@@ -848,9 +895,19 @@ class InstructorCourseView(APIView):
                         )
                         cat_obj_map[cat_name] = cat_obj
 
-                        incoming_units    = incoming_units_data.get(cat_name, [])
+                        incoming_units = [
+                            u for u in incoming_units_data.get(cat_name, [])
+                            if isinstance(u, dict) and u.get('unitNo') is not None
+                        ]
                         incoming_unit_nos = [u['unitNo'] for u in incoming_units]
-                        cat_obj.unit_items.exclude(unit_no__in=incoming_unit_nos).delete()
+                        # Same guard as above: UnitItem -> StudentMark CASCADEs, so an
+                        # omitted unit is only dropped when it carries no marks.
+                        if incoming_unit_nos:
+                            for stale_unit in cat_obj.unit_items.exclude(
+                                unit_no__in=incoming_unit_nos
+                            ):
+                                if not stale_unit.student_marks.exists():
+                                    stale_unit.delete()
 
                         for unit_data in incoming_units:
                             unit_no  = unit_data['unitNo']
@@ -867,9 +924,20 @@ class InstructorCourseView(APIView):
                             unit_obj_map[(cat_name, unit_no)] = unit_obj
 
                     # ── Sync OBE Questions ────────────────────────────────────────────
-                    incoming_questions = c.get('obeQuestions', [])
+                    incoming_questions = [
+                        q for q in c.get('obeQuestions', [])
+                        if isinstance(q, dict) and q.get('id')
+                    ]
                     incoming_q_ids     = [q['id'] for q in incoming_questions]
-                    course.obe_questions.exclude(frontend_id__in=incoming_q_ids).delete()
+                    # Same data-loss guard as the categories block above:
+                    # OBEQuestion -> OBEStudentMark CASCADEs, so an omitted question
+                    # is only removed when no student has a mark recorded against it.
+                    if incoming_q_ids:
+                        for stale_q in course.obe_questions.exclude(
+                            frontend_id__in=incoming_q_ids
+                        ):
+                            if not stale_q.student_marks.exists():
+                                stale_q.delete()
 
                     q_obj_map = {}   # frontend_id -> OBEQuestion
                     for order, q_data in enumerate(incoming_questions):
