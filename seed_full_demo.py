@@ -1,5 +1,5 @@
 """
-OBE System — Full Demo Data Seed Script
+OBE System - Full Demo Data Seed Script
 ========================================
 Fills in EVERYTHING needed to test all features end-to-end:
 
@@ -13,8 +13,15 @@ Fills in EVERYTHING needed to test all features end-to-end:
   - Enters realistic random marks for every student on every question
   - Runs all reports endpoints in-process to verify data flows correctly
 
-Run:
-    python manage.py shell < seed_full_demo.py
+Run (works on Windows, Mac and Linux):
+    python manage.py seed_full_demo
+
+Do NOT use "python manage.py shell < seed_full_demo.py" on Windows: Django only
+executes piped input on non-Windows systems, so on Windows the file is fed
+line-by-line into the interactive IPython prompt and breaks.
+
+Needs departments, programs, instructors and admission students to exist
+first (python manage.py seed_test_data creates a complete set).
 
 Password for all accounts: Test@1234
 """
@@ -37,15 +44,15 @@ from core.models import (
 ACADEMIC_YEAR = 'Fall-2024'
 ATTAINMENT_THRESHOLD = 50.0
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# --- Helpers ------------------------------------------------------------------
 
 def p(msg): print(f"  {msg}")
-def h(msg): print(f"\n{'─'*60}\n  {msg}\n{'─'*60}")
+def h(msg): print(f"\n{'-'*60}\n  {msg}\n{'-'*60}")
 
-def skipped(label): p(f"– {label} (already exists)")
-def created(label): p(f"✓ {label}")
+def skipped(label): p(f"- {label} (already exists)")
+def created(label): p(f"+ {label}")
 
-# ─── 1. Inventory what's already in the DB ────────────────────────────────────
+# --- 1. Inventory what's already in the DB ------------------------------------
 
 h("1. Checking existing data")
 
@@ -66,23 +73,39 @@ p(f"Students     : {len(students)}")
 p(f"Dept Admins  : {len(da_profiles)}")
 
 if not depts:
-    print("\n  ✗ No departments found. Run seed_test_data.py first.")
+    print("\n  x No departments found. Run seed_test_data.py first.")
     exit(1)
 if not programs:
-    print("\n  ✗ No programs found. Run seed_test_data.py first.")
+    print("\n  x No programs found. Run seed_test_data.py first.")
     exit(1)
 if not instructors:
-    print("\n  ✗ No instructors found. Run seed_test_data.py first.")
+    print("\n  x No instructors found. Run seed_test_data.py first.")
     exit(1)
 
-# ─── 2. Ensure every program has courses ──────────────────────────────────────
+# --- 2. Ensure every program has courses --------------------------------------
 
 h("2. Ensuring courses exist for every program")
 
-# Map dept → GAs for quick lookup
+# Map dept -> GAs for quick lookup
 dept_gas = {}
 for ga in gas:
     dept_gas.setdefault(ga.department_id, []).append(ga)
+
+
+def gas_for_program(prog):
+    """GAs this program should use.
+
+    GAs are either program-specific (ga.program set, e.g. GA-1-BSCS) or
+    department-wide (ga.program is None). Using the whole department list
+    would map a BSSE course to BSCS GAs, leaving the BSSE program with no
+    attainment data. Prefer the program's own GAs, then department-wide ones.
+    """
+    own = sorted((g for g in gas if g.program_id == prog.id), key=lambda g: g.pk)
+    if own:
+        return own
+    dept_all = sorted(dept_gas.get(prog.department_id, []), key=lambda g: g.pk)
+    dept_level = [g for g in dept_all if g.program_id is None]
+    return dept_level or dept_all
 
 # course template: (code_suffix, title, subtype, credit_hours)
 COURSE_TEMPLATES = [
@@ -96,11 +119,11 @@ COURSE_TEMPLATES = [
     ('601', 'Elective: Special Topics',  'theory', 3),
 ]
 
-prog_courses = {}   # prog.id → list of Course objects
+prog_courses = {}   # prog.id -> list of Course objects
 
 for prog in programs:
     dept = prog.department
-    prog_gas = dept_gas.get(dept.id, [])
+    prog_gas = gas_for_program(prog)
     prog_courses[prog.id] = []
 
     prefix = prog.code.upper().replace('BS', '').replace('MS', '')[:3]
@@ -109,7 +132,7 @@ for prog in programs:
 
     for suffix, title_suffix, subtype, credits in COURSE_TEMPLATES:
         code = f"{prefix}{suffix}"
-        full_title = f"{prog.code} — {title_suffix}"
+        full_title = f"{prog.code} - {title_suffix}"
         try:
             course, created_now = Course.objects.get_or_create(
                 code=code, department=dept, program=prog,
@@ -129,17 +152,21 @@ for prog in programs:
                 created(f"Course {code}: {full_title} [{subtype}]")
             else:
                 skipped(f"Course {code}")
+                # Repair: a seeded course mapped only to GAs of OTHER programs
+                if prog_gas and not course.mapped_gas.filter(pk__in=[g.pk for g in prog_gas]).exists():
+                    course.mapped_gas.set(prog_gas[:2])
+                    p(f"  repaired GA mapping for {code}")
             prog_courses[prog.id].append(course)
         except Exception as e:
-            p(f"✗ Course {code}: {e}")
+            p(f"x Course {code}: {e}")
 
 # Reload courses
 courses = list(Course.objects.all())
 p(f"\n  Total courses now: {len(courses)}")
 
-# ─── 3. Assign instructors to courses ─────────────────────────────────────────
+# --- 3. Assign instructors to courses -----------------------------------------
 
-h("3. Course Assignments (instructor → course → program)")
+h("3. Course Assignments (instructor -> course -> program)")
 
 # Group instructors by department
 dept_instructors = {}
@@ -156,7 +183,7 @@ for prog in programs:
     dept = prog.department
     inst_list = dept_instructors.get(dept.id, [])
     if not inst_list:
-        p(f"  ⚠ No instructors for {dept.name} — skipping assignments")
+        p(f"  ! No instructors for {dept.name} - skipping assignments")
         continue
     da = dept_admin_map.get(dept.id)
     p_courses = prog_courses.get(prog.id, [])
@@ -174,11 +201,11 @@ for prog in programs:
             if was_created:
                 assignments_created += 1
         except Exception as e:
-            p(f"  ✗ {inst.user.username} → {course.code}: {e}")
+            p(f"  x {inst.user.username} -> {course.code}: {e}")
 
 p(f"  Created {assignments_created} new course assignments")
 
-# ─── 4. Create InstructorCourse records ───────────────────────────────────────
+# --- 4. Create InstructorCourse records ---------------------------------------
 
 h("4. InstructorCourse records")
 
@@ -187,7 +214,7 @@ SEMESTER_MAP = {
     '301': '5th', '302': '5th', '401': '7th', '501': '7th', '601': '7th',
 }
 
-ic_map = {}   # (inst.id, course.code, prog.id) → InstructorCourse
+ic_map = {}   # (inst.id, course.code, prog.id) -> InstructorCourse
 ic_created = 0
 
 for assignment in CourseAssignment.objects.select_related('instructor', 'course', 'program').filter(academic_year=ACADEMIC_YEAR):
@@ -231,7 +258,7 @@ for assignment in CourseAssignment.objects.select_related('instructor', 'course'
         if was_created:
             ic_created += 1
     except Exception as e:
-        p(f"  ✗ IC {frontend_id}: {e}")
+        p(f"  x IC {frontend_id}: {e}")
         traceback.print_exc()
 
 p(f"  Created {ic_created} new InstructorCourse records")
@@ -242,7 +269,7 @@ all_ics = list(InstructorCourse.objects.filter(
     academic_year=ACADEMIC_YEAR, status='active'
 ).select_related('catalog_course', 'program', 'department', 'instructor'))
 
-# ─── 5. Marks Categories + Unit Items ─────────────────────────────────────────
+# --- 5. Marks Categories + Unit Items -----------------------------------------
 
 h("5. Marks Categories & Unit Items")
 
@@ -256,6 +283,7 @@ CATEGORIES = [
 
 cats_created = 0
 units_created = 0
+weights_repaired = 0
 
 for ic in all_ics:
     cat_course = ic.catalog_course
@@ -268,22 +296,37 @@ for ic in all_ics:
         )
         if cat_new:
             cats_created += 1
+        # weightage = this unit's share WITHIN its category; the units of a
+        # category must sum to 100 (frontend sends 50/50, or 100 for a single
+        # unit). The grade formula is (score/total) * (weightage/100) * cat%.
+        # An earlier version of this script used pct/unit_count, which made
+        # every unit tiny: a perfect student scored only 34.5% overall.
+        correct_w = round(100.0 / unit_count, 2)
+        buggy_w   = round(pct / unit_count, 2)
         for u in range(1, unit_count + 1):
-            _, unit_new = UnitItem.objects.get_or_create(
+            unit, unit_new = UnitItem.objects.get_or_create(
                 category=cat, unit_no=u,
                 defaults={
                     'passing':     passing,
                     'total_marks': marks_per_unit,
-                    'weightage':   round(pct / unit_count, 2),
+                    'weightage':   correct_w,
                     'mapped_clos': [],
                 }
             )
             if unit_new:
                 units_created += 1
+            elif abs(unit.weightage - buggy_w) < 0.01 and abs(buggy_w - correct_w) > 0.01:
+                # Repair rows written by the old buggy formula. Only touches
+                # values that exactly match the bug pattern, never real edits.
+                unit.weightage = correct_w
+                unit.save(update_fields=['weightage'])
+                weights_repaired += 1
 
 p(f"  Created {cats_created} categories, {units_created} unit items")
+if weights_repaired:
+    p(f"  Repaired {weights_repaired} unit weightages left over from the old buggy formula")
 
-# ─── 6. CLOs mapped to GAs ────────────────────────────────────────────────────
+# --- 6. CLOs mapped to GAs ----------------------------------------------------
 
 h("6. CLOs (3 per course, each mapped to a GA)")
 
@@ -294,12 +337,21 @@ CLO_TEMPLATES = [
 ]
 
 clos_created = 0
+clos_remapped = 0
 
 for ic in all_ics:
-    dept_id = ic.department_id
-    ic_gas  = dept_gas.get(dept_id, [])
+    ic_gas = gas_for_program(ic.program) if ic.program else dept_gas.get(ic.department_id, [])
     if not ic_gas:
         continue
+
+    # Repair: an existing CLO mapped to a GA that belongs to a DIFFERENT
+    # program is invalid, so re-point it at this program's GA.
+    for existing in ic.clos.select_related('mapped_ga'):
+        g = existing.mapped_ga
+        if g is not None and g.program_id and ic.program_id and g.program_id != ic.program_id:
+            existing.mapped_ga = ic_gas[existing.order % len(ic_gas)]
+            existing.save(update_fields=['mapped_ga'])
+            clos_remapped += 1
 
     existing_clo_codes = set(ic.clos.values_list('code', flat=True))
 
@@ -320,16 +372,18 @@ for ic in all_ics:
             pass  # already exists with unique_together
 
 p(f"  Created {clos_created} new CLOs")
+if clos_remapped:
+    p(f"  Re-mapped {clos_remapped} CLOs that pointed at another program's GA")
 
-# ─── 7. OBE Questions mapped to CLOs ──────────────────────────────────────────
+# --- 7. OBE Questions mapped to CLOs ------------------------------------------
 
 h("7. OBE Questions")
 
 # Question structure per course:
-# Assignments: 3 units × 2 questions each = 6 questions
-# Quizzes:     3 units × 2 questions each = 6 questions
-# Mid Term:    1 unit  × 5 questions      = 5 questions
-# Final:       1 unit  × 5 questions      = 5 questions
+# Assignments: 3 units x 2 questions each = 6 questions
+# Quizzes:     3 units x 2 questions each = 6 questions
+# Mid Term:    1 unit  x 5 questions      = 5 questions
+# Final:       1 unit  x 5 questions      = 5 questions
 # Total: 22 questions per course
 
 QUESTION_STRUCTURE = {
@@ -390,7 +444,7 @@ for ic in all_ics:
 
 p(f"  Created {q_created} new OBE questions")
 
-# ─── 8. Enroll students into courses ──────────────────────────────────────────
+# --- 8. Enroll students into courses ------------------------------------------
 
 h("8. Student Enrollment into Courses")
 
@@ -426,14 +480,14 @@ for ic in all_ics:
 
 p(f"  Enrolled {cs_created} new students into courses")
 
-# ─── 9. Enter marks for every student ─────────────────────────────────────────
+# --- 9. Enter marks for every student -----------------------------------------
 
 h("9. Student Marks (unit-level & OBE question-level)")
 
 marks_created = 0
 obe_marks_created = 0
 
-# Performance profiles — makes data interesting for reports
+# Performance profiles - makes data interesting for reports
 def get_student_profile(reg_no):
     """Returns a performance multiplier based on reg_no so same student is consistently good/average/weak."""
     num = sum(ord(c) for c in reg_no)
@@ -489,7 +543,7 @@ for ic in all_ics:
 p(f"  Created {marks_created} unit marks")
 p(f"  Created {obe_marks_created} OBE question marks")
 
-# ─── 10. Semester Plans ───────────────────────────────────────────────────────
+# --- 10. Semester Plans -------------------------------------------------------
 
 h("10. Semester Plans")
 
@@ -518,7 +572,7 @@ for prog in programs:
 
 p(f"  Created {sp_created} new semester plans")
 
-# ─── 11. Quick verification: spot-check report data ───────────────────────────
+# --- 11. Quick verification: spot-check report data ---------------------------
 
 h("11. Verification")
 
@@ -541,7 +595,7 @@ p(f"  ICs with questions : {ics_with_marks}")
 # Sample attainment check on first program with data
 prog_with_data = programs[0] if programs else None
 if prog_with_data:
-    p(f"\n  Sample program for reports: {prog_with_data.code} — {prog_with_data.name}")
+    p(f"\n  Sample program for reports: {prog_with_data.code} - {prog_with_data.name}")
     ic_count = InstructorCourse.objects.filter(program=prog_with_data).count()
     s_count  = CourseStudent.objects.filter(course__program=prog_with_data).count()
     q_count  = OBEQuestion.objects.filter(course__program=prog_with_data).count()
@@ -551,7 +605,73 @@ if prog_with_data:
     p(f"    Questions  : {q_count}")
     p(f"    OBE Marks  : {m_count}")
 
-# ─── Summary ──────────────────────────────────────────────────────────────────
+# --- 12. Report readiness check (calls the real endpoints in-process) ---------
+
+h("12. Report readiness (what the QA 'More Reports' tab will show)")
+
+if not students:
+    p("!! There are NO admission students in the database, so nothing could be")
+    p("!! enrolled and every report will be empty. Add students (or run")
+    p("!! seed_test_data first), then run this script again.")
+
+import re
+from django.contrib.auth import get_user_model
+from rest_framework.test import APIClient
+
+_User = get_user_model()
+_viewer = (_User.objects.filter(role='qa').first()
+           or _User.objects.filter(role='admin').first()
+           or _User.objects.filter(role='dept_admin').first())
+
+if _viewer is None:
+    p("(no QA / admin user found - skipping the live report check)")
+else:
+    _client = APIClient()
+    _client.force_authenticate(user=_viewer)
+
+    def _check(label, url, list_key):
+        try:
+            r = _client.get(url)
+            if r.status_code != 200:
+                p(f"x {label:<28} HTTP {r.status_code}")
+                return
+            data = r.json()
+            n = len(data.get(list_key, [])) if isinstance(data, dict) else len(data)
+            p(f"{'+' if n else '-'} {label:<28} {n} rows" + ("" if n else "   <- EMPTY"))
+        except Exception as exc:
+            p(f"x {label:<28} ERROR {type(exc).__name__}: {exc}")
+
+    _prog = next((pr for pr in programs if CourseStudent.objects.filter(course__program=pr).exists()), None)
+    if _prog is None:
+        p("-  no program has enrolled students; nothing to check")
+    else:
+        pid = _prog.code.lower()
+        did = _prog.department.dept_id
+        p(f"Checking program '{pid}' / department '{did}':")
+        _check("GA attainment (program)",  f"/api/reports/program-ga-attainment/?programId={pid}", "attributes")
+        _check("GA attainment (semester)", f"/api/reports/program-ga-attainment-by-semester/?programId={pid}", "semesters")
+        _ic = InstructorCourse.objects.filter(program=_prog, students__isnull=False).first()
+        if _ic:
+            _check("CLO attainment (course)", f"/api/reports/course-attainment/?courseCode={_ic.code}&programId={pid}", "clos")
+        _check("CO attainment summary",    f"/api/reports/co-attainment-summary/?programId={pid}", "courses")
+        _check("PO attainment",            f"/api/reports/po-attainment/?programId={pid}", "pos")
+        _check("At-risk students",         f"/api/reports/at-risk-students/?programId={pid}", "students")
+        _check("Curriculum gap analysis",  f"/api/reports/gap-analysis/?programId={pid}", "attributes")
+        _check("Instructor performance",   f"/api/reports/instructor-performance/?departmentId={did}", "instructors")
+        _check("Cohort comparison",        f"/api/reports/cohort-comparison/?programId={pid}", "cohorts")
+
+        _batches = sorted({m.group(1).lower()
+                           for r in AdmissionStudent.objects.filter(program=_prog).values_list('reg_no', flat=True)
+                           for m in [re.search(r'([A-Za-z]{2}\d{2})', r)] if m})
+        if _batches:
+            _check(f"GA attainment (batch {_batches[0]})",
+                   f"/api/reports/batch-ga-attainment/?batch={_batches[0]}&departmentId={did}", "attributes")
+        else:
+            p("-  GA attainment (batch)       no batch code (e.g. SP23 / FA24) found in the")
+            p("                                student registration numbers, so the batch report")
+            p("                                has nothing to select. Not a bug in the seed.")
+
+# --- Summary ------------------------------------------------------------------
 
 print(f"""
 {'='*60}
@@ -561,20 +681,20 @@ SEED COMPLETE
 All features now have data to test:
 
   QA Dashboard:
-    ✓ Departments, Programs, GAs, Courses
-    ✓ CLO Attainment Report (select a batch)
-    ✓ PLO/GA Attainment Report
-    ✓ More Reports → all 10 report types
+    + Departments, Programs, GAs, Courses
+    + CLO Attainment Report (select a batch)
+    + PLO/GA Attainment Report
+    + More Reports -> all 10 report types
 
   Dept Admin Dashboard:
-    ✓ Teachers assigned to courses
-    ✓ Students enrolled in courses
-    ✓ Semester Plans configured
+    + Teachers assigned to courses
+    + Students enrolled in courses
+    + Semester Plans configured
 
   Instructor Dashboard:
-    ✓ Courses with categories, units, CLOs
-    ✓ OBE Questions mapped to CLOs
-    ✓ Students with marks already entered
+    + Courses with categories, units, CLOs
+    + OBE Questions mapped to CLOs
+    + Students with marks already entered
 
   Reports to test (use programId from DB):
     Programs: {', '.join(p.code.lower() for p in programs[:5])}
