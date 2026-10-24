@@ -34,6 +34,7 @@ from .views import (
     StudentCoursesView,
     AdmissionStudentListView, AdmissionStudentDetailView,
     CLOListView, CLODetailView,
+    InstructorCourseStudentView,
     DeptAdminProfileView,
     # Reports
     ProgramGAAttainmentView,
@@ -74,6 +75,7 @@ urlpatterns = [
     # CLO management per instructor course
     path('instructor/courses/<str:frontend_id>/clos/',           CLOListView.as_view(),   name='clo_list'),
     path('instructor/courses/<str:frontend_id>/clos/<int:clo_id>/', CLODetailView.as_view(), name='clo_detail'),
+    path('instructor/courses/<str:frontend_id>/students/',         InstructorCourseStudentView.as_view(), name='instructor_course_students'),
 
     path('teachers/',                          TeacherListView.as_view(),          name='teacher_list'),
     path('admin/teachers/',                    TeacherOnboardingView.as_view(),    name='teacher_onboard'),
