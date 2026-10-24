@@ -4,17 +4,45 @@ import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# SECRET_KEY: previously a literal committed to git history — anyone with repo
-# access (or who found this in the public GitHub repo) has always been able to
-# read it. Now sourced from env var; the literal below is kept ONLY as a local-
-# dev fallback so `manage.py runserver` still works without extra setup.
-# ACTION NEEDED: set DJANGO_SECRET_KEY in the PythonAnywhere env config, and
-# rotate this value (generate a fresh one) since the old one is permanently
-# compromised by having been in git history.
-SECRET_KEY = os.environ.get(
-    'DJANGO_SECRET_KEY',
-    'django-insecure-q(r5cb59^oj(27g8&#d68c5!l!!h+r7s+2*#m-mfkq9toc6k1k',
-)
+# SECRET_KEY
+# This also signs every JWT login token (SIMPLE_JWT has no separate SIGNING_KEY),
+# so whoever knows it can mint a valid token for any user — including admin.
+#
+# It used to fall back to a literal committed to this repo whenever the
+# DJANGO_SECRET_KEY env var was missing, so a deployment that never set the
+# variable was signing tokens with a publicly known key.
+#
+# Resolution order now:
+#   1. DJANGO_SECRET_KEY env var, if set.
+#   2. A random key generated on first start and stored in .django_secret_key
+#      next to manage.py (git-ignored, owner-read-only). Every later start reuses
+#      it, so sessions survive restarts — and no manual setup is needed.
+# The committed literal is gone; it is compromised by git history and must
+# never be used again.
+def _load_or_create_secret_key():
+    env_key = os.environ.get('DJANGO_SECRET_KEY', '').strip()
+    if env_key:
+        return env_key
+    key_file = BASE_DIR / '.django_secret_key'
+    try:
+        existing = key_file.read_text().strip()
+        if existing:
+            return existing
+    except FileNotFoundError:
+        pass
+    import secrets
+    new_key = secrets.token_urlsafe(64)
+    try:
+        # O_EXCL: if two worker processes start at once, only one writes; the
+        # other falls through and reads the winner's key, so both agree.
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(new_key)
+        return new_key
+    except FileExistsError:
+        return key_file.read_text().strip()
+
+SECRET_KEY = _load_or_create_secret_key()
 
 # DEBUG: was hardcoded True, meaning any unhandled 500 (a bad request, a bug in
 # a new endpoint, anything) rendered Django's debug page — full stack trace,
@@ -24,10 +52,16 @@ SECRET_KEY = os.environ.get(
 # config rather than editing this file again.
 DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
 
-# Kept as a wildcard since the actual PythonAnywhere hostname isn't known here —
-# narrowing this blindly could break the live deployment. Recommend replacing
-# "*" with the real hostname (e.g. "yourapp.pythonanywhere.com") once confirmed.
-ALLOWED_HOSTS = ["*"]
+# ALLOWED_HOSTS: was ["*"], which accepts any Host header (enables host-header
+# injection, e.g. poisoned password-reset links and cache entries). The API's
+# real host is known — the frontend's BASE_URL points at it. Extra hosts (a
+# custom domain later) can be added without a code change via the env var,
+# comma-separated: DJANGO_ALLOWED_HOSTS=api.example.com,other.example.com
+ALLOWED_HOSTS = [
+    'zeeshanbalti.pythonanywhere.com',
+    'localhost',
+    '127.0.0.1',
+] + [h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if h.strip()]
 
 INSTALLED_APPS = [
     'django.contrib.admin',

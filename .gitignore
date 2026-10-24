@@ -25,3 +25,6 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Auto-generated Django secret key (see obe/settings.py) — never commit
+.django_secret_key
