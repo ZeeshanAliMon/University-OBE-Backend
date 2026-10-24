@@ -379,18 +379,24 @@ if clos_remapped:
 
 h("7. OBE Questions")
 
-# Question structure per course:
-# Assignments: 3 units x 2 questions each = 6 questions
-# Quizzes:     3 units x 2 questions each = 6 questions
-# Mid Term:    1 unit  x 5 questions      = 5 questions
-# Final:       1 unit  x 5 questions      = 5 questions
-# Total: 22 questions per course
+# Question structure per course: ONE question per unit.
+#
+# This used to seed 2-5 questions per unit (22 per course). That meant an
+# instructor opening "Set Marks Unit" was met with a pre-filled list of
+# 8+ questions they never created and had to delete by hand. Question
+# breakdown is the instructor's to define: seed a single question per unit
+# and let them add the rest with the "Add Question" button.
+#
+# Assignments: 3 units x 1 question = 3 questions
+# Quizzes:     3 units x 1 question = 3 questions
+# Mid Term:    1 unit  x 1 question = 1 question
+# Final:       1 unit  x 1 question = 1 question
 
 QUESTION_STRUCTURE = {
-    'Assignments': (3, 2, 5.0),   # (units, q_per_unit, marks_per_q)
-    'Quizzes':     (3, 2, 5.0),
-    'Mid Term':    (1, 5, 5.0),
-    'Final Exam':  (1, 5, 10.0),
+    'Assignments': (3, 1, 5.0),   # (units, q_per_unit, marks_per_q)
+    'Quizzes':     (3, 1, 5.0),
+    'Mid Term':    (1, 1, 5.0),
+    'Final Exam':  (1, 1, 10.0),
 }
 
 CLO_ROTATION = ['CLO-1', 'CLO-2', 'CLO-3', 'CLO-1', 'CLO-2']
@@ -404,7 +410,7 @@ for ic in all_ics:
     q_order = 0
 
     for cat in cat_course.markscategories.all():
-        units, q_per_unit, marks = QUESTION_STRUCTURE.get(cat.name, (1, 2, 5.0))
+        units, q_per_unit, marks = QUESTION_STRUCTURE.get(cat.name, (1, 1, 5.0))
         for unit_no in range(1, units + 1):
             try:
                 unit_obj = UnitItem.objects.get(category=cat, unit_no=unit_no)
