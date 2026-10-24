@@ -1957,70 +1957,55 @@ class StudentCoursesView(APIView):
                 for m in enrollment.marks.all()
             }
 
-            # ── 2. Weighted marks with full context ──────────────────────────
-            # Each unit tells frontend: raw score, total marks, weights, contribution
+            # ── 2-4. Totals, units, grade, breakdown ─────────────────────────
+            # All from _sheet_course_total — the same calculation as the
+            # instructor's mark sheet. This used to be a separate formula (unit
+            # weightage, unit-level marks only), so the student could be shown a
+            # different grade from the sheet. Response field names are unchanged.
+            sheet = _sheet_course_total(enrollment)
+            exact_total = sheet['total']
+            total_percentage = round(exact_total, 2)
+
+            # Grade the exact total, as the sheet does.
+            grade_letter, grade_points = _get_grade(exact_total, ic)
+
             weighted_marks = {}
             units_data = {}
-            total_percentage = 0.0
-
-            all_marks = list(enrollment.marks.select_related('unit_item__category').all())
-            for m in all_marks:
-                ui  = m.unit_item
-                cat = ui.category
-                key = f"{cat.name}-{ui.unit_no}"
-
-                contribution = 0.0
-                if ui.total_marks > 0 and cat.percentage > 0:
-                    contribution = (m.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage
-                    total_percentage += contribution
-
-                weighted_marks[key] = {
-                    'obtained':      m.score,          # raw score e.g. 8.0
-                    'totalMarks':    ui.total_marks,   # max for this unit e.g. 10.0
-                    'weightage':     ui.weightage,     # unit weight in category e.g. 50.0
-                    'catPercentage': cat.percentage,   # category weight in total e.g. 10.0
-                    'contribution':  round(contribution, 4),  # actual % added to total
-                    # contribution formula: (obtained/totalMarks) * (weightage/100) * catPercentage
-                }
-
-                # unitsData grouped by category name
-                if cat.name not in units_data:
-                    units_data[cat.name] = []
-                units_data[cat.name].append({
-                    'unitNo':        ui.unit_no,
-                    'totalMarks':    ui.total_marks,
-                    'weightage':     ui.weightage,
-                    'passing':       ui.passing,
-                    'obtainedMarks': m.score,
-                    'contribution':  round(contribution, 4),
+            for (cat_name, unit_no), info in sheet['units'].items():
+                ui = info['unitItem']
+                cat_pct = sheet['categories'][cat_name]['total']
+                key = f"{cat_name}-{unit_no}"
+                has_unit_mark = ui is not None and key in student_marks
+                if has_unit_mark or info['obtained'] > 0:
+                    weighted_marks[key] = {
+                        'obtained':      info['obtained'],
+                        'totalMarks':    info['totalMarks'],
+                        'weightage':     ui.weightage if ui else 0,
+                        'catPercentage': cat_pct,
+                        'contribution':  round(info['contribution'], 4),
+                    }
+                # EVERY unit, with its questions. This used to list only units
+                # that already had a mark, and no questions, so the student
+                # dashboard recomputed from partial data (a missing unit
+                # defaulted to "out of 10").
+                units_data.setdefault(cat_name, []).append({
+                    'unitNo':        unit_no,
+                    'totalMarks':    ui.total_marks if ui else 10,
+                    'weightage':     ui.weightage if ui else 0,
+                    'passing':       ui.passing if ui else 0,
+                    'obtainedMarks': info['obtained'],
+                    'contribution':  round(info['contribution'], 4),
+                    'questions': [
+                        {'id': q.frontend_id, 'name': q.question_name,
+                         'maxMarks': q.max_marks, 'mappedCLOs': q.mapped_clos or []}
+                        for q in info['questions']
+                    ],
                 })
 
-            total_percentage = round(total_percentage, 2)
-
-            # ── 3. Grade ─────────────────────────────────────────────────────
-            grade_letter, grade_points = _get_grade(total_percentage, ic)
-
-            # ── 4. Category breakdown (for display table) ────────────────────
-            # "Assignments: 9.0 out of 10 percentage points"
-            category_breakdown = {}
-            for m in all_marks:
-                ui  = m.unit_item
-                cat = ui.category
-                if cat.name not in category_breakdown:
-                    category_breakdown[cat.name] = {
-                        'obtained':    0.0,
-                        'total':       cat.percentage,   # max possible % from this category
-                        'weight':      cat.percentage,
-                    }
-                if ui.total_marks > 0:
-                    category_breakdown[cat.name]['obtained'] += round(
-                        (m.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage, 4
-                    )
-            # Round obtained values
-            for cat_name in category_breakdown:
-                category_breakdown[cat_name]['obtained'] = round(
-                    category_breakdown[cat_name]['obtained'], 2
-                )
+            category_breakdown = {
+                name: {'obtained': round(c['obtained'], 2), 'total': c['total'], 'weight': c['total']}
+                for name, c in sheet['categories'].items()
+            }
 
             # ── 5. OBE Questions ─────────────────────────────────────────────
             all_obe_questions = list(ic.obe_questions.all())
@@ -2097,7 +2082,9 @@ class StudentCoursesView(APIView):
             # grade_letter is always a string from _get_grade (e.g. 'F' when 0%).
             # Return null instead of 'F' when the student genuinely has no marks,
             # so the frontend can distinguish "no data yet" from a real F grade.
-            has_any_marks = bool(student_marks)
+            # Per-question (OBE) marks count too — a student marked only at
+            # question level used to be reported as having no marks at all.
+            has_any_marks = bool(student_marks) or enrollment.obe_marks.exists()
             final_grade   = grade_letter if has_any_marks else None
             final_points  = grade_points if has_any_marks else None
             final_pct     = total_percentage if has_any_marks else None
@@ -2202,37 +2189,93 @@ def _get_grade(percentage: float, instructor_course) -> tuple:
     return _apply_scale(percentage, READY1_SCALE)
 
 
+def _sheet_course_total(course_student) -> dict:
+    """
+    A student's weighted course total, computed EXACTLY as the instructor's
+    official mark sheet computes it (frontend utils/grading.ts,
+    computeCourseAggregate). The two are kept line-for-line equivalent.
+
+    The backend used to use a different formula — each unit weighted by its
+    Unit Weightage %, counting only unit-level StudentMark rows and ignoring
+    per-question OBE marks — so the grade a student saw (and the grade written
+    to the transcript at finalisation) could differ from the mark sheet the
+    instructor signed: e.g. "B" on the sheet, "C+" for the student.
+
+    Per category (weight > 0, units > 0), over units 1..category.units:
+      - unit with questions: each question adds its maxMarks to the maximum;
+        obtained = the question's mark if it is > 0, else (single-question unit)
+        the unit-level mark, else the question's mark or 0
+      - unit without questions: maximum = unit total_marks (10 if the unit row
+        doesn't exist); obtained = the unit-level mark
+      contribution = obtained / maximum * category percentage
+    total = sum of contributions (0-100). Not rounded — round only for display,
+    so grading uses the exact value as the sheet does.
+
+    Returns {'total': float,
+             'categories': {name: {'obtained': float, 'total': percentage}},
+             'units': {(cat_name, unit_no): {'totalMarks', 'obtained', 'contribution',
+                                              'unitItem', 'questions'}}}
+    """
+    ic = course_student.course
+    result = {'total': 0.0, 'categories': {}, 'units': {}}
+    if not ic.catalog_course_id:
+        return result
+
+    unit_marks = {m.unit_item_id: m.score for m in course_student.marks.all()}
+    question_marks = {om.question_id: om.score for om in course_student.obe_marks.all()}
+
+    for cat in ic.catalog_course.markscategories.order_by('order').all():
+        if not (cat.percentage > 0):
+            continue
+        max_sum = 0.0
+        obtained_sum = 0.0
+        per_unit = []
+        if cat.units > 0:
+            units_by_no = {ui.unit_no: ui for ui in cat.unit_items.all()}
+            for u in range(1, cat.units + 1):
+                ui = units_by_no.get(u)
+                questions = list(ui.questions.order_by('order').all()) if ui else []
+                unit_max = 0.0
+                unit_got = 0.0
+                if questions:
+                    for q in questions:
+                        unit_max += q.max_marks or 0
+                        val = question_marks.get(q.id)
+                        if val is not None and float(val) > 0:
+                            unit_got += float(val)
+                        elif len(questions) == 1:
+                            unit_got += float(unit_marks.get(ui.id, 0) or 0)
+                        else:
+                            unit_got += float(val or 0)
+                else:
+                    unit_max += ui.total_marks if ui else 10
+                    unit_got += float(unit_marks.get(ui.id, 0) or 0) if ui else 0.0
+                max_sum += unit_max
+                obtained_sum += unit_got
+                per_unit.append((u, ui, unit_max, unit_got, questions))
+
+        contribution = (obtained_sum / max_sum) * cat.percentage if max_sum > 0 else 0.0
+        result['total'] += contribution
+        result['categories'][cat.name] = {'obtained': contribution, 'total': cat.percentage}
+        for u, ui, unit_max, unit_got, questions in per_unit:
+            result['units'][(cat.name, u)] = {
+                'totalMarks':   unit_max,
+                'obtained':     unit_got,
+                # this unit's share of the category contribution; sums to it exactly
+                'contribution': (unit_got / max_sum) * cat.percentage if max_sum > 0 else 0.0,
+                'unitItem':     ui,
+                'questions':    questions,
+            }
+    return result
+
+
 def _student_total_percentage(course_student) -> float:
     """
-    Weighted total percentage using:
-      sum of: (score / total_marks) × (unit_weightage / 100) × (category_percentage)
-    across all units, where category_percentage is in 0-100 range.
-
-    Each StudentMark row represents one unit's score. The contribution is:
-      - (score / total_marks): how well did the student do on THIS unit (0-100 scale)
-      - (weightage / 100): how much does this unit matter within its category (0-1 scale, weightage stored 0-100)
-      - category_percentage: how much does the category matter overall (already 0-100, NOT 0-1)
-
-    So: (0-1) * (0-1) * (0-100) = (0-100) ✓
-
-    CRITICAL BUG FOUND & FIXED: The formula was missing the multiplication by category_percentage
-    ENTIRELY. It was just:
-      total += (score / total_marks) * (weightage / 100)
-    which gives 0-1 scale (0-100 if multiplied by 100), but never multiplied by cat.percentage,
-    so every contribution was independent of its category weight. A student scoring 100% on a
-    10% category got the same contribution as 100% on a 40% category.
+    Weighted total percentage — the mark sheet's calculation, rounded to 2dp
+    for display and averaging. Grade from _sheet_course_total(...)['total']
+    instead, so a total like 73.996 isn't rounded up into the next grade.
     """
-    marks_qs = course_student.marks.select_related('unit_item__category')
-    total = 0.0
-    for mark in marks_qs:
-        ui  = mark.unit_item
-        cat = ui.category
-        if ui.total_marks > 0 and cat.percentage > 0:
-            # Contribution = (unit's score as 0-100) * (unit's weight in category) * (category's weight in total)
-            # All multiplied together to give a contribution in 0-100 scale
-            unit_contribution = (mark.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage
-            total += unit_contribution
-    return round(total, 2)
+    return round(_sheet_course_total(course_student)['total'], 2)
 
 
 def _clo_attainments_for_student(course_student, questions_qs):
@@ -2981,8 +3024,9 @@ class StudentSummaryView(APIView):
 
         for cs in course_students:
             ic          = cs.course
-            student_pct = _student_total_percentage(cs)
-            grade_letter, grade_points = _get_grade(student_pct, ic)
+            exact_pct   = _sheet_course_total(cs)['total']
+            student_pct = round(exact_pct, 2)
+            grade_letter, grade_points = _get_grade(exact_pct, ic)
 
 
             # Debug: marks breakdown
@@ -4441,8 +4485,9 @@ class FinalizeCourseView(APIView):
         results_created = []
         with transaction.atomic():
             for student in ic.students.all():
-                pct = _student_total_percentage(student)
-                grade_letter, grade_points = _get_grade(pct, ic)
+                exact_pct = _sheet_course_total(student)['total']
+                pct = round(exact_pct, 2)
+                grade_letter, grade_points = _get_grade(exact_pct, ic)
                 clo_pcts_raw = _clo_attainments_for_student(student, questions)
 
                 # Store enriched CLO blob so FinalResultsView returns the same
