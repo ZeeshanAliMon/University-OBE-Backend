@@ -4522,3 +4522,71 @@ class FinalResultsView(APIView):
         } for r in qs.order_by('-finalized_at')]
 
         return Response({'results': results, 'count': len(results)})
+
+
+class InstructorCourseStudentView(APIView):
+    """
+    POST /api/instructor/courses/<frontend_id>/students/
+    An instructor adds students to one of THEIR OWN courses.
+
+    Payload: { "students": [ { "regNo": "...", "name": "..." }, ... ] }
+
+    Why this exists: the instructor UI's "Add Student" used to call
+    POST /api/admin/enroll/, which is dept-admin only, so every instructor
+    request got a 403. The frontend swallowed it and kept the student in
+    browser storage only — the student looked enrolled but never reached the
+    server, vanished on another device, and couldn't be given real marks.
+
+    This is deliberately ADD-ONLY. /api/admin/enroll/ is a full sync that
+    deletes anyone missing from the list (and CourseStudent -> marks
+    CASCADE), so exposing that to instructors would let a stale browser list
+    wipe enrolled students and their marks. Removing students stays a dept
+    admin action.
+    """
+    permission_classes = [IsInstructor]
+
+    def post(self, request, frontend_id):
+        profile = get_instructor_profile(request.user)
+        if not profile:
+            return Response({'error': 'Instructor profile not found'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        ic = InstructorCourse.objects.filter(
+            instructor=profile, frontend_id=frontend_id
+        ).first()
+        if not ic:
+            # Same response whether the course doesn't exist or belongs to
+            # someone else, so course IDs can't be probed.
+            return Response({'error': 'Course not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        if ic.status == 'closed':
+            return Response(
+                {'error': f'Course is closed (finalized {ic.closed_at}) — students cannot be added.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        students = request.data.get('students', [])
+        if not isinstance(students, list) or not students:
+            return Response({'error': 'students must be a non-empty list'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        added, already = [], []
+        for s in students:
+            if not isinstance(s, dict):
+                continue
+            reg_no = str(s.get('regNo', '')).strip().upper()
+            if not reg_no:
+                continue
+            name = str(s.get('name', '')).strip() or reg_no
+            _, created = CourseStudent.objects.get_or_create(
+                course=ic, reg_no=reg_no, defaults={'name': name},
+            )
+            (added if created else already).append(reg_no)
+
+        if not added and not already:
+            return Response({'error': 'No valid registration numbers supplied'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({'courseId': frontend_id, 'added': added, 'alreadyEnrolled': already},
+                        status=status.HTTP_201_CREATED if added else status.HTTP_200_OK)
