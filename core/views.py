@@ -315,19 +315,52 @@ class GraduateAttributeListView(APIView):
         dept_id = d['departmentId']
         prog_id = d.get('programId', '')
 
-        if GraduateAttribute.objects.filter(ga_id=ga_id).exists():
-            ga = GraduateAttribute.objects.get(ga_id=ga_id)
-            return Response(GraduateAttributeSerializer(ga).data, status=status.HTTP_200_OK)
         try:
             department = Department.objects.get(dept_id=dept_id)
         except Department.DoesNotExist:
             return Response({"error": f'Department "{dept_id}" not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # An unknown programId used to be swallowed (`except DoesNotExist: pass`)
+        # and the GA saved with NO program. The frontend posted a new program's
+        # GAs before creating the program, so every seeded GA silently became
+        # department-wide and appeared under every program in the department.
+        # A GA asked for a specific program must actually get that program.
         program = None
         if prog_id:
-            try:
-                program = Program.objects.get(code__iexact=prog_id)
-            except Program.DoesNotExist:
-                pass
+            program = Program.objects.filter(code__iexact=prog_id).first()
+            if not program:
+                return Response(
+                    {"error": f'Program "{prog_id}" not found — create the program before its Graduate Attributes.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if program.department_id != department.id:
+                return Response(
+                    {"error": f'Program "{prog_id}" does not belong to department "{dept_id}".'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        existing = GraduateAttribute.objects.filter(ga_id__iexact=ga_id).first()
+        if existing:
+            # Used to return the stored record untouched, so a changed name or
+            # description was ignored and a GA left without its program (above)
+            # could never be linked to it.
+            if existing.department_id != department.id:
+                # ga_id is globally unique; never let one department overwrite
+                # another department's attribute.
+                return Response(
+                    {"error": f'GA "{ga_id}" already exists in another department.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            existing.name = d['name']
+            # The write serializer defaults description to '', so only apply it
+            # when the client actually sent one — otherwise it would be blanked.
+            if 'description' in request.data:
+                existing.description = d.get('description', '')
+            if program is not None:
+                existing.program = program
+            existing.save()
+            return Response(GraduateAttributeSerializer(existing).data, status=status.HTTP_200_OK)
+
         ga = GraduateAttribute.objects.create(
             ga_id=ga_id, name=d['name'],
             description=d.get('description', ''),
