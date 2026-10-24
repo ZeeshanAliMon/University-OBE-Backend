@@ -3016,53 +3016,67 @@ class StudentSummaryView(APIView):
 # CLO MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _resolve_ga(ga_identifier):
+def _resolve_ga(ga_identifier, course=None):
     """
-    Flexibly resolve a GA identifier string to a GraduateAttribute instance.
+    Resolve a GA identifier to a GraduateAttribute, scoped to `course`.
 
-    Accepts any of these formats (case-insensitive):
-      'BSCS8'   → ga_id exact match
-      'GA-8'    → strips 'GA-' prefix, looks for ga_id ending in '8'
-      'GA8'     → strips 'GA' prefix, same
-      'CS8'     → program-prefixed format
-      '8'       → bare number, matches any ga_id ending in '8'
+    `course` is the InstructorCourse the CLO belongs to. When given, only GAs
+    from that course's department (and program, where the GA has one) are
+    eligible, so a CLO can never be mapped to another program's or another
+    department's attribute.
 
-    Returns the GraduateAttribute or None if not found.
-    The frontend sends whatever the dropdown gives it — this function
-    handles all variants so the DB schema (BSCS1..BSCS12) doesn't need
-    to match the frontend label format exactly.
+    The previous version fell back to matching on the digits alone: 'GA1-CS'
+    became '1' and resolved to 'BSCS1' — a different program's GA — and when
+    several matched it tried a fixed prefix list and finally returned
+    *whichever row came first*, even from another department. Attainment
+    reports then credited the wrong GA with no error anywhere.
+
+    Resolution order:
+      1. Exact ga_id match (case-insensitive), within scope.
+      2. Legacy shorthand ('GA-8', 'GA8', '8') -> the attribute numbered 8 in
+         this course's own program/department — but ONLY if exactly one such
+         attribute exists. Ambiguity returns None instead of guessing.
     """
     if not ga_identifier:
         return None
-
     ga_id = str(ga_identifier).strip()
+    if not ga_id:
+        return None
 
-    # 1. Exact match first (fastest path — covers BSCS8, CS8, etc.)
-    try:
-        return GraduateAttribute.objects.get(ga_id__iexact=ga_id)
-    except GraduateAttribute.DoesNotExist:
-        pass
+    scope = GraduateAttribute.objects.all()
+    if course is not None:
+        scope = scope.filter(department_id=course.department_id)
+        if getattr(course, 'program_id', None):
+            # GAs tied to this program, plus department-wide ones with no program.
+            scope = scope.filter(
+                models.Q(program_id=course.program_id) | models.Q(program__isnull=True)
+            )
 
-    # 2. Extract the numeric suffix — covers GA-8, GA8, BSCS8 etc.
-    digits = ''.join(re.findall(r'\d+', ga_id))
-    if not digits:
-        return None  # no number found — can't match
+    # 1. Exact match within scope.
+    exact = scope.filter(ga_id__iexact=ga_id).first()
+    if exact:
+        return exact
 
-    # 3. Look for any GA whose ga_id ends with that number
-    #    e.g. digits='8' matches 'BSCS8', 'CS8', 'GA8'
-    candidates = GraduateAttribute.objects.filter(ga_id__iregex=rf'[A-Za-z]+{digits}$')
-    if candidates.count() == 1:
-        return candidates.first()
-
-    # 4. Multiple candidates — try common prefixes in order
-    for prefix in ('BSCS', 'CS', 'SE', 'EE', 'CE', 'GA'):
-        try:
-            return GraduateAttribute.objects.get(ga_id__iexact=f'{prefix}{digits}')
-        except GraduateAttribute.DoesNotExist:
-            continue
-
-    # 5. Last resort — return first candidate if any exist
-    return candidates.first() or None
+    # 2. Legacy numeric shorthand — only meaningful with a course to scope it,
+    #    and only when the identifier is a single number ('GA-8', 'GA8', '8').
+    #    A multi-number id such as 'GA1-CS2' is not shorthand; don't mangle it.
+    if course is None:
+        return None
+    # If this is a real GA id that simply belongs to another program or
+    # department, refuse it — reinterpreting its number as "this program's
+    # GA n" is exactly the wrong-attribute mapping this function exists to stop.
+    if GraduateAttribute.objects.filter(ga_id__iexact=ga_id).exists():
+        return None
+    numbers = re.findall(r'\d+', ga_id)
+    if len(numbers) != 1:
+        return None
+    digits = numbers[0].lstrip('0') or '0'
+    candidates = [
+        g for g in scope
+        if (re.findall(r'\d+', g.ga_id) or [None])[-1] is not None
+        and (re.findall(r'\d+', g.ga_id)[-1].lstrip('0') or '0') == digits
+    ]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 class CLOListView(APIView):
@@ -3142,7 +3156,7 @@ class CLOListView(APIView):
 
         ga = None
         if ga_id:
-            ga = _resolve_ga(ga_id)
+            ga = _resolve_ga(ga_id, course=course)
             if not ga:
                 # Log and continue with no GA rather than blocking the instructor.
                 # The instructor can remap later once GAs are seeded.
@@ -3229,7 +3243,7 @@ class CLODetailView(APIView):
         if 'mappedGA' in data:
             ga_id = data.get('mappedGA') or data.get('mapped_ga') or ''
             if ga_id:
-                ga = _resolve_ga(ga_id)
+                ga = _resolve_ga(ga_id, course=clo.course)
                 if ga:
                     clo.mapped_ga = ga
                 else:
