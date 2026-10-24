@@ -143,6 +143,11 @@ class LoginView(APIView):
             try:
                 user_data['regNo']        = user.student_profile.reg_no
                 user_data['departmentId'] = user.student_profile.department.dept_id
+                # Without this the student dashboard could never resolve the
+                # student's program, and fell back to hardcoded text
+                # ("Bachelor of Science", "BS (Computer Science)") for everyone.
+                if user.student_profile.program_id:
+                    user_data['programId'] = user.student_profile.program.code.lower()
             except Exception:
                 pass
 
@@ -2092,7 +2097,11 @@ class StudentCoursesView(APIView):
             result.append({
                 'id':                ic.frontend_id,
                 'code':              ic.code,
-                'title':             f"{ic.title} ({ic.program.code})" if ic.program else ic.title,
+                # Plain course title. The program code used to be appended
+                # ("Programming Fundamentals (BSCS)") on every student screen and
+                # transcript; the program is shown once, in the header, instead.
+                'title':             ic.title,
+                'programId':         ic.program.code.lower() if ic.program else None,
                 'creditHours':       ic.credit_hours,
                 'is_finalized':      getattr(ic, 'is_closed', False),  # True once course is closed/finalized
                 'categories':        categories,
