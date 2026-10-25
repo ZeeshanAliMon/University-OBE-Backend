@@ -1444,15 +1444,52 @@ class CourseAssignmentView(APIView):
 
             data = []
 
-            for a in qs:
+            # Each assignment's gradebook is the InstructorCourse whose
+            # frontend_id is built exactly as in post() below. Return that id,
+            # the term, the open/closed state and the enrolled students, so the
+            # admin screen can enroll into the REAL course after a re-login.
+            # Without these the frontend had to guess the id (defaulting the
+            # term to Fall-2024 and the program to the catalog's), which missed
+            # the real course, got a 404, and "self-healed" by creating a
+            # bogus duplicate assignment and enrolling students into THAT —
+            # so enrollments appeared to vanish after logout.
+            assignments = list(qs)
+            def _frontend_id(a):
+                prog_suffix = a.program.code.lower() if a.program else 'all'
+                term_suffix = (
+                    f'-{a.academic_year.lower().replace(" ", "")}'
+                    if a.academic_year else ''
+                )
+                return (
+                    f'course-assigned-{a.course.code}-'
+                    f'{a.instructor.employee_id}-{prog_suffix}{term_suffix}'
+                )
 
+            ids = [_frontend_id(a) for a in assignments]
+            ic_by_id = {
+                ic.frontend_id.lower(): ic
+                for ic in InstructorCourse.objects.filter(
+                    frontend_id__in=ids
+                ).prefetch_related('students')
+            }
+
+            for a, fid in zip(assignments, ids):
+                ic = ic_by_id.get(fid.lower())
                 data.append({
+                    'id': fid,
+                    'courseId': fid,
                     'teacherId': a.instructor.employee_id,
                     'teacherName': a.instructor.user.get_full_name() or a.instructor.user.username,
                     'courseCode': a.course.code,
                     'courseTitle': a.course.title,
                     'programId': a.program.code.lower() if a.program else None,
                     'programName': a.program.name if a.program else None,
+                    'academicYear': a.academic_year or '',
+                    'status': ic.status if ic else 'active',
+                    'students': [
+                        {'regNo': st.reg_no, 'name': st.name}
+                        for st in (ic.students.all() if ic else [])
+                    ],
                 })
 
             return Response(data)
@@ -1573,6 +1610,7 @@ class CourseAssignmentView(APIView):
                     'programId': assignment.program.code.lower() if assignment.program else None,
                     'academicYear': academic_year,
                     'courseId': frontend_id,
+                    'id': frontend_id,
                 },
                 status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
             )
