@@ -4196,9 +4196,15 @@ class StudentEnrollmentView(APIView):
         if not isinstance(students, list):
             return Response({'error': 'students must be a list'}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            ic = InstructorCourse.objects.get(frontend_id__iexact=course_id)
-        except InstructorCourse.DoesNotExist:
+        # The id may differ only in letter case from the stored one (the admin
+        # screen used to send "...-Fall-2024" while the stored id is
+        # "...-fall-2024"), and BOTH spellings can exist as separate rows.
+        # .get(frontend_id__iexact=...) raised MultipleObjectsReturned for
+        # that (an uncaught 500, surfaced as "Enrollment sync failed"), so
+        # prefer the exact id, else the oldest case-insensitive match.
+        candidates = InstructorCourse.objects.filter(frontend_id__iexact=course_id)
+        ic = candidates.filter(frontend_id=course_id).first() or candidates.order_by('id').first()
+        if ic is None:
             return Response(
                 {'error': f'Course "{course_id}" not found'},
                 status=status.HTTP_404_NOT_FOUND
