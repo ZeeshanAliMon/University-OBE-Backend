@@ -1,22 +1,34 @@
 """
-OBE Backend API Test Suite
-Mocks the frontend's apiService.ts and tests every endpoint.
+OBE Backend API smoke check — runs against a RUNNING server over HTTP.
+
+Not a Django unit test (renamed from test_api.py so `manage.py test` no longer
+picks it up and hits the live site). Some checks WRITE data (e.g. PATCH a
+department), so point it at a local or staging server, not production.
+
+Usage:
+    LIVE_API_BASE_URL=http://127.0.0.1:8000/api \
+    QA_EMAIL=... QA_PASSWORD=... \
+    DEPT_EMAIL=... DEPT_PASSWORD=... \
+    INST_EMAIL=... INST_PASSWORD=... \
+    python live_api_smoke_check.py
 """
 
+import os
 import requests
 import json
 import sys
 
-BASE_URL = "https://zeeshanbalti.pythonanywhere.com/api"
+BASE_URL = os.environ.get("LIVE_API_BASE_URL", "").rstrip("/")
+if not BASE_URL:
+    sys.exit("Set LIVE_API_BASE_URL (e.g. http://127.0.0.1:8000/api). Refusing to guess a server.")
 
-# ─── Credentials ─────────────────────────────────────────────────────────────
-# Fill these in before running
-QA_EMAIL       = "qa@iqra.edu.pk"
-QA_PASSWORD    = "Test@1234"
-DEPT_EMAIL     = "deptadmin.cs@iqra.edu.pk"
-DEPT_PASSWORD  = "Test@1234"
-INST_EMAIL     = "ahmed@iqra.edu.pk"
-INST_PASSWORD  = "Test@1234"
+# ─── Credentials (from environment — never hard-code passwords here) ─────────
+QA_EMAIL       = os.environ.get("QA_EMAIL", "")
+QA_PASSWORD    = os.environ.get("QA_PASSWORD", "")
+DEPT_EMAIL     = os.environ.get("DEPT_EMAIL", "")
+DEPT_PASSWORD  = os.environ.get("DEPT_PASSWORD", "")
+INST_EMAIL     = os.environ.get("INST_EMAIL", "")
+INST_PASSWORD  = os.environ.get("INST_PASSWORD", "")
 
 # ─── Colours ──────────────────────────────────────────────────────────────────
 GREEN  = "\033[92m"

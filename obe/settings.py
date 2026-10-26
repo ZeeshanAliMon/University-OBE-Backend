@@ -52,6 +52,26 @@ SECRET_KEY = _load_or_create_secret_key()
 # config rather than editing this file again.
 DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
 
+# ─── HTTPS hardening ──────────────────────────────────────────────────────────
+# Off by default so local http://localhost development keeps working.
+# At deploy time set DJANGO_HTTPS=True in the PythonAnywhere environment:
+#   • every http:// request is redirected to https:// (PythonAnywhere's proxy
+#     sends X-Forwarded-Proto, which SECURE_PROXY_SSL_HEADER trusts)
+#   • session/CSRF cookies are sent over HTTPS only
+#   • browsers are told to use HTTPS for 30 days (HSTS)
+# Optional: DJANGO_SSL_REDIRECT=False to skip the redirect (e.g. if you use
+# PythonAnywhere's own "Force HTTPS" switch), DJANGO_HSTS_SECONDS to change HSTS.
+HTTPS_ENABLED = os.environ.get('DJANGO_HTTPS', 'False') == 'True'
+if HTTPS_ENABLED:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = os.environ.get('DJANGO_SSL_REDIRECT', 'True') == 'True'
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = int(os.environ.get('DJANGO_HSTS_SECONDS', str(30 * 24 * 3600)))
+    # includeSubdomains / preload are deliberately off: the site lives on a
+    # shared pythonanywhere.com host name and can't join the browser preload list.
+    SILENCED_SYSTEM_CHECKS = ['security.W005', 'security.W021']
+
 # ALLOWED_HOSTS: was ["*"], which accepts any Host header (enables host-header
 # injection, e.g. poisoned password-reset links and cache entries). The API's
 # real host is known — the frontend's BASE_URL points at it. Extra hosts (a
