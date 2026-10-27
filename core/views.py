@@ -2281,7 +2281,14 @@ def _sheet_course_total(course_student) -> dict:
             units_by_no = {ui.unit_no: ui for ui in cat.unit_items.all()}
             for u in range(1, cat.units + 1):
                 ui = units_by_no.get(u)
-                questions = list(ui.questions.order_by('order').all()) if ui else []
+                # Only THIS offering's questions. Units hang off the shared catalog
+                # course, so a course taught in several terms/sections has every
+                # offering's questions on the same unit; counting the others would
+                # add their marks to this student's maximum (totals roughly halved).
+                questions = sorted(
+                    (q for q in ui.questions.all() if q.course_id == ic.id),
+                    key=lambda q: (q.order, q.id),
+                ) if ui else []
                 unit_max = 0.0
                 unit_got = 0.0
                 if questions:

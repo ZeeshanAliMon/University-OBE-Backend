@@ -212,6 +212,12 @@ class UnitItemSerializer(serializers.ModelSerializer):
         fields = ['unitNo', 'passing', 'totalMarks', 'weightage', 'mappedCLOs', 'questions']
 
     def get_questions(self, obj):
+        # When serialized for one InstructorCourse, show only that offering's
+        # questions: the unit is shared by every term/section of the course.
+        ic = self.context.get('instructor_course')
+        questions = obj.questions.all()
+        if ic is not None:
+            questions = [q for q in questions if q.course_id == ic.id]
         return [
             {
                 'id':         q.frontend_id,
@@ -219,7 +225,7 @@ class UnitItemSerializer(serializers.ModelSerializer):
                 'maxMarks':   q.max_marks,
                 'mappedCLOs': q.mapped_clos,
             }
-            for q in obj.questions.order_by('order').all()
+            for q in sorted(questions, key=lambda q: (q.order, q.id))
         ]
 
 
@@ -355,7 +361,9 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
         if not obj.catalog_course_id:
             return result
         for cat in obj.catalog_course.markscategories.all():
-            result[cat.name] = UnitItemSerializer(cat.unit_items.all(), many=True).data
+            result[cat.name] = UnitItemSerializer(
+                cat.unit_items.all(), many=True, context={'instructor_course': obj}
+            ).data
         return result
 
     def get_students(self, obj):
