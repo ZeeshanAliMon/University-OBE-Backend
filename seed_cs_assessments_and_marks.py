@@ -33,10 +33,16 @@ sets up a course and enters marks by hand:
                   most students 55-90%, a few weak students (at-risk report).
                   Marks are reproducible (same SEED -> same marks).
 
+LEFTOVER WEIGHTAGES
+    If a course's weightages are unusable (not adding to 100%, or set on names
+    the Instructor dashboard doesn't show, e.g. "Final Exam" from the old demo
+    seed) AND the course has no marks anywhere, the standard plan replaces
+    them: those leftover categories are set to 0% (not deleted; undo restores
+    them).
+
 SKIPPED (and listed, with the reason)
     * course closed / no CS students / already has marks
-    * weightages set up but not adding to 100%, or using names the
-      Instructor dashboard doesn't show
+    * weightages unusable AND the course already has marks somewhere
     * course not linked to a catalog course
 
 USAGE (run from the folder that has manage.py; back up db.sqlite3 first)
@@ -183,7 +189,8 @@ def run_undo():
 
     # Marks entered by people AFTER the seeding on seeded questions/units would
     # be lost too — refuse unless FORCE=1.
-    extra_obe = [om for om in OBEStudentMark.objects.filter(question_id__in=c['questions'])
+    extra_obe = [om for om in OBEStudentMark.objects.filter(
+                     question_id__in=list(c['questions']) + [int(k) for k in u.get('questions', {})])
                  if (om.student_id, om.question_id) not in obe_pairs]
     extra_sm = [sm for sm in StudentMark.objects.filter(unit_item_id__in=c['units'])
                 if (sm.student_id, sm.unit_item_id) not in sm_pairs]
@@ -192,7 +199,8 @@ def run_undo():
     print(f"Seeded questions          : {len(c['questions'])}")
     print(f"Seeded units / categories : {len(c['units'])} / {len(c['categories'])}")
     print(f"Seeded CLOs               : {len(c['clos'])}")
-    print(f"Settings to restore       : {len(u['categories'])} categories, {len(u['units'])} units, {len(u['courses'])} courses")
+    print(f"Settings to restore       : {len(u['categories'])} categories, {len(u['units'])} units, "
+          f"{len(u.get('questions', {}))} questions, {len(u['courses'])} courses")
     if extra_obe or extra_sm:
         print(f"\n!! {len(extra_obe) + len(extra_sm)} marks were entered AFTER seeding on seeded questions/units.")
         print("   Undo would delete them too. Re-run with FORCE=1 if that is what you want.")
@@ -213,6 +221,8 @@ def run_undo():
             OBEStudentMark.objects.filter(id__in=[x.id for x in extra_obe]).delete()
             StudentMark.objects.filter(id__in=[x.id for x in extra_sm]).delete()
         OBEQuestion.objects.filter(id__in=c['questions']).delete()
+        for pk, prev in u.get('questions', {}).items():
+            OBEQuestion.objects.filter(pk=int(pk)).update(**prev)
         for pk, prev in u['units'].items():
             UnitItem.objects.filter(pk=int(pk)).update(**prev)
         UnitItem.objects.filter(id__in=c['units']).delete()
@@ -293,6 +303,7 @@ def run_seed():
             skipped.append((label, 'already has marks'))
             continue
         lab = is_lab(ic)
+        replace_note = None
         allowed = LAB_CATEGORY_NAMES if lab else THEORY_CATEGORY_NAMES
         cats = list(cc.markscategories.all())
         weighted = [c for c in cats if c.percentage > 0]
@@ -309,23 +320,24 @@ def run_seed():
             total = sum(c.percentage for c in weighted)
             bad_names = [c.name for c in weighted if c.name not in allowed]
             no_units = [c.name for c in weighted if c.units <= 0]
+            problem = None
             if bad_names:
-                skipped.append((label, f'weightage set on categories the {"Lab" if lab else "Theory"} sheet does not show: {", ".join(bad_names)}'))
-                continue
-            if abs(total - 100) > 0.5:
-                skipped.append((label, f'weightages add up to {total:g}%, not 100%'))
-                continue
-            if no_units:
-                skipped.append((label, f'weighted categories with 0 units: {", ".join(no_units)}'))
-                continue
-            mode = 'existing'
-
-        if mode == 'new':
-            # Brand-new plan: none of its units may already hold questions.
-            plan_names = [n for n, _, _ in (LAB_PLAN if lab else THEORY_PLAN)]
-            if OBEQuestion.objects.filter(course=ic, category_name__in=plan_names).exists():
-                skipped.append((label, 'has questions but no weightage set - please review by hand'))
-                continue
+                problem = f'weightage on categories the {"Lab" if lab else "Theory"} sheet does not show: {", ".join(bad_names)}'
+            elif abs(total - 100) > 0.5:
+                problem = f'weightages add up to {total:g}%, not 100%'
+            elif no_units:
+                problem = f'weighted categories with 0 units: {", ".join(no_units)}'
+            if problem is None:
+                mode = 'existing'
+            else:
+                structure_has_marks = (
+                    StudentMark.objects.filter(unit_item__category__course=cc).exists()
+                    or OBEStudentMark.objects.filter(question__unit_item__category__course=cc).exists())
+                if structure_has_marks:
+                    skipped.append((label, problem + ' - and the course already has marks, so it is left for you'))
+                    continue
+                mode = 'new'
+                replace_note = ', '.join(f'{c.name} {c.percentage:g}%' for c in weighted)
 
         planned_catalogs.setdefault(cc.pk, lab)
         existing_clos = list(ic.clos.order_by('order', 'code'))
@@ -333,7 +345,7 @@ def run_seed():
         if not existing_clos and not gas:
             warn_no_ga.append(f'{ic.code} {ic.title}')
 
-        plans.append(dict(ic=ic, lab=lab, mode=mode, cs_roster=cs_roster,
+        plans.append(dict(ic=ic, lab=lab, mode=mode, cs_roster=cs_roster, replace_note=replace_note,
                           non_cs=len(roster) - len(cs_roster), existing_clos=existing_clos, gas=gas))
 
     first_mode = {}
@@ -357,6 +369,8 @@ def run_seed():
         clos = (f"{len(p['existing_clos'])} existing CLOs" if p['existing_clos']
                 else f"{len(LAB_CLOS if p['lab'] else THEORY_CLOS)} new CLOs")
         extra = f", {p['non_cs']} non-CS on roster left blank" if p['non_cs'] else ''
+        if p.get('replace_note'):
+            extra += f"\n              replaces leftover weightages ({p['replace_note']}) with the standard plan"
         print(f"  {ic.code:<9} {ic.title[:36]:<36} {ic.academic_year or '-':<11} "
               f"{'Lab' if p['lab'] else 'Theory':<6} {({'new': 'standard plan', 'existing': 'keeps your weightages', 'sibling': 'same plan as other term'}[p['mode']]):<23} "
               f"{len(p['cs_roster']):>3} students, {clos}{extra}")
@@ -393,14 +407,16 @@ def run_seed():
     log = {
         'created': {'clos': [], 'categories': [], 'units': [], 'questions': [],
                     'student_marks': [], 'obe_marks': []},
-        'updated': {'categories': {}, 'units': {}, 'courses': {}},
+        'updated': {'categories': {}, 'units': {}, 'courses': {}, 'questions': {}},
         'program': prog.code, 'seed': SEED, 'at': datetime.now().isoformat(timespec='seconds'),
     }
     C, U = log['created'], log['updated']
 
+    seeded_ic_pks = set()
     with transaction.atomic():
         for p in plans:
             ic, lab = p['ic'], p['lab']
+            seeded_ic_pks.add(ic.pk)
             cc = ic.catalog_course
             rng = random.Random(f'{SEED}|course|{ic.pk}')
             used_qids = set(OBEQuestion.objects.filter(course=ic).values_list('frontend_id', flat=True))
@@ -429,6 +445,11 @@ def run_seed():
             if mode == 'new':
                 plan = LAB_PLAN if lab else THEORY_PLAN
                 order_names = LAB_CATEGORY_NAMES if lab else THEORY_CATEGORY_NAMES
+                plan_names = {n for n, _, _ in plan}
+                # Leftover weightages on categories outside the plan -> 0% (kept, not deleted)
+                for old in cc.markscategories.filter(percentage__gt=0).exclude(name__in=plan_names):
+                    U['categories'][str(old.pk)] = {'percentage': old.percentage, 'units': old.units, 'order': old.order}
+                    MarksCategory.objects.filter(pk=old.pk).update(percentage=0)
                 for name, pct, units in plan:
                     cat = cc.markscategories.filter(name=name).first()
                     vals = {'percentage': pct, 'units': len(units), 'order': order_names.index(name)}
@@ -462,15 +483,13 @@ def run_seed():
                             ui = UnitItem.objects.create(category=cat, unit_no=n, passing=5, total_marks=10,
                                                          weightage=weights[n - 1], mapped_clos=[])
                             C['units'].append(ui.pk)
-                        has_q = OBEQuestion.objects.filter(course=ic, unit_item=ui).exists()
-                        if has_q:
-                            unit_layout.append((cat.name, ui, None))
-                            continue
                         # Another term of this course already has questions on this
                         # unit: use the same layout (marks + CLO), with our own ids.
                         sib = None
-                        for other in (InstructorCourse.objects.filter(catalog_course=cc).exclude(pk=ic.pk)
-                                      .order_by('-academic_year', 'id')):
+                        others = list(InstructorCourse.objects.filter(catalog_course=cc).exclude(pk=ic.pk)
+                                      .order_by('-academic_year', 'id'))
+                        others.sort(key=lambda o: 0 if o.pk in seeded_ic_pks else 1)
+                        for other in others:
                             qs_other = list(OBEQuestion.objects.filter(course=other, unit_item=ui).order_by('order', 'id'))
                             if qs_other:
                                 sib = qs_other
@@ -488,10 +507,16 @@ def run_seed():
             rot = 0
             unit_questions = []   # (UnitItem, [OBEQuestion])
             for cat_name, ui, maxima in unit_layout:
-                if maxima is None:
-                    qs = list(OBEQuestion.objects.filter(course=ic, unit_item=ui).order_by('order'))
-                    unit_questions.append((ui, qs))
+                target_total = float(sum(m for m, _ in maxima))
+                own = list(OBEQuestion.objects.filter(course=ic, unit_item=ui).order_by('order', 'id'))
+                if own and abs(sum(q.max_marks or 0 for q in own) - target_total) < 0.01:
+                    # This term's own (unmarked) questions already match the unit: keep them.
+                    unit_questions.append((ui, own))
+                    UnitItem.objects.filter(pk=ui.pk).update(
+                        mapped_clos=sorted({c for q in own for c in (q.mapped_clos or [])}))
                     continue
+                if len(own) > len(maxima):
+                    maxima = [(m, None) for m in split_total(target_total, len(own))]
                 qs = []
                 for j, (mx, want_clo) in enumerate(maxima, start=1):
                     if want_clo and want_clo in clo_codes:
@@ -499,12 +524,21 @@ def run_seed():
                     else:
                         clo_code = clo_codes[rot % len(clo_codes)]
                     rot += 1
-                    q = OBEQuestion.objects.create(
-                        course=ic, unit_item=ui, frontend_id=new_qid(rng, used_qids),
-                        category_name=cat_name, unit_no=ui.unit_no, question_name=f'Question {j}',
-                        max_marks=float(mx), mapped_clos=[clo_code], order=order)
-                    order += 1
-                    C['questions'].append(q.pk)
+                    if j <= len(own):
+                        # Leftover unmarked question that doesn't fit the unit:
+                        # bring it in line with the plan (old values logged for undo).
+                        q = own[j - 1]
+                        U['questions'][str(q.pk)] = {'max_marks': q.max_marks, 'mapped_clos': q.mapped_clos,
+                                                     'question_name': q.question_name}
+                        q.max_marks, q.mapped_clos, q.question_name = float(mx), [clo_code], f'Question {j}'
+                        q.save(update_fields=['max_marks', 'mapped_clos', 'question_name'])
+                    else:
+                        q = OBEQuestion.objects.create(
+                            course=ic, unit_item=ui, frontend_id=new_qid(rng, used_qids),
+                            category_name=cat_name, unit_no=ui.unit_no, question_name=f'Question {j}',
+                            max_marks=float(mx), mapped_clos=[clo_code], order=order)
+                        order += 1
+                        C['questions'].append(q.pk)
                     qs.append(q)
                 mapped = sorted({c for q in qs for c in (q.mapped_clos or [])})
                 if mode == 'existing' and str(ui.pk) not in U['units'] and ui.pk not in C['units']:
