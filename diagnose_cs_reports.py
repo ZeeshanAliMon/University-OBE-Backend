@@ -13,7 +13,6 @@ Prints:
 """
 import inspect
 from collections import defaultdict
-from django.conf import settings
 from core.models import (Program, GraduateAttribute, Course, CLO, POGAMapping,
                          InstructorCourse, AdmissionStudent, OBEStudentMark, User)
 import core.views as V
@@ -41,22 +40,22 @@ print(f'(GAs in other departments: {other})')
 
 print('\n2. GA ATTAINMENT REPORT computed now (same endpoint the QA page calls)')
 print('-' * 78)
-from rest_framework.test import APIClient
+from rest_framework.test import APIRequestFactory, force_authenticate
 qa = User.objects.filter(role='qa').first()
-host = next((h for h in settings.ALLOWED_HOSTS if h and '*' not in h), 'localhost')
-cl = APIClient(SERVER_NAME=host)
-cl.force_authenticate(qa)
-r = cl.get(f'/api/reports/program-ga-attainment/?programId={prog.code.lower()}')
-if r.status_code == 200:
-    for a in r.json()['attributes']:
+try:
+    req = APIRequestFactory().get('/api/reports/program-ga-attainment/', {'programId': prog.code.lower()})
+    force_authenticate(req, user=qa)
+    r = V.ProgramGAAttainmentView.as_view()(req)
+    for a in r.data['attributes']:
         print(f"  {a['id']:<14}{a['averageAttainment']:>7.1f}%   courses {a['contributingCoursesCount']}")
-else:
-    print('  status', r.status_code, r.content[:200])
+except Exception as e:
+    print('  could not compute:', type(e).__name__, e)
 
 print('\n3. OFFERINGS (code, term, roster, CS students, students with marks, avg total)')
 print('-' * 78)
 cs_regs = {x.strip().upper() for x in AdmissionStudent.objects.filter(program=prog).values_list('reg_no', flat=True)}
 rows = 0
+unmarked = []
 for ic in InstructorCourse.objects.filter(program=prog).order_by('code', 'academic_year', 'id'):
     studs = list(ic.students.all())
     if not studs:
@@ -68,5 +67,9 @@ for ic in InstructorCourse.objects.filter(program=prog).order_by('code', 'academ
     print(f'  {ic.code:<9}{(ic.academic_year or "-"):<13}{ic.status:<7} roster {len(studs):>3}  CS {n_cs:>3}  '
           f'marked {len(marked):>3}  avg {avg:5.1f}  id {ic.frontend_id}')
     rows += 1
+    if not marked:
+        unmarked.append((ic, len(studs)))
 print(f'({rows} offerings with students)')
+print(f'\nOfferings WITH students but NO marks: {len(unmarked)} '
+      f'({sum(n for _, n in unmarked)} student rows) - the GA report counts each of these students as 0%.')
 print('=' * 78)
