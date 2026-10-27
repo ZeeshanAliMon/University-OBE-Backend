@@ -38,38 +38,41 @@ for g in gas:
 other = GraduateAttribute.objects.exclude(department=dept).count()
 print(f'(GAs in other departments: {other})')
 
-print('\n2. GA ATTAINMENT REPORT computed now (same endpoint the QA page calls)')
-print('-' * 78)
-from rest_framework.test import APIRequestFactory, force_authenticate
-qa = User.objects.filter(role='qa').first()
-try:
-    req = APIRequestFactory().get('/api/reports/program-ga-attainment/', {'programId': prog.code.lower()})
-    force_authenticate(req, user=qa)
-    r = V.ProgramGAAttainmentView.as_view()(req)
-    for a in r.data['attributes']:
-        print(f"  {a['id']:<14}{a['averageAttainment']:>7.1f}%   courses {a['contributingCoursesCount']}")
-except Exception as e:
-    print('  could not compute:', type(e).__name__, e)
-
-print('\n3. OFFERINGS (code, term, roster, CS students, students with marks, avg total)')
+import sys, time
+t0 = time.time()
+print('\n2. OFFERINGS (code, term, roster, CS students, students with marks, avg total)')
+print('   computing every student total exactly like the report does - this takes a few minutes,')
+print('   one line per course; please let it finish.')
 print('-' * 78)
 cs_regs = {x.strip().upper() for x in AdmissionStudent.objects.filter(program=prog).values_list('reg_no', flat=True)}
-rows = 0
+course_pcts = defaultdict(list)   # course code -> every student's total (pooled, as the report does)
 unmarked = []
+rows = 0
 for ic in InstructorCourse.objects.filter(program=prog).order_by('code', 'academic_year', 'id'):
-    studs = list(ic.students.all())
+    studs = list(ic.students.prefetch_related('marks', 'obe_marks').all())
     if not studs:
         continue
     marked = set(OBEStudentMark.objects.filter(student__course=ic).values_list('student_id', flat=True))
-    totals = [V._sheet_course_total(s)['total'] for s in studs]
+    totals = [round(V._sheet_course_total(s)['total'], 2) for s in studs]
+    course_pcts[ic.code].extend(totals)
     n_cs = sum(1 for s in studs if s.reg_no.strip().upper() in cs_regs)
-    avg = sum(totals) / len(totals)
     print(f'  {ic.code:<9}{(ic.academic_year or "-"):<13}{ic.status:<7} roster {len(studs):>3}  CS {n_cs:>3}  '
-          f'marked {len(marked):>3}  avg {avg:5.1f}  id {ic.frontend_id}')
+          f'marked {len(marked):>3}  avg {sum(totals) / len(totals):5.1f}  [{int(time.time() - t0)}s]')
+    sys.stdout.flush()
     rows += 1
     if not marked:
         unmarked.append((ic, len(studs)))
 print(f'({rows} offerings with students)')
-print(f'\nOfferings WITH students but NO marks: {len(unmarked)} '
+print(f'Offerings WITH students but NO marks: {len(unmarked)} '
       f'({sum(n for _, n in unmarked)} student rows) - the GA report counts each of these students as 0%.')
+
+print('\n3. GA ATTAINMENT as the report computes it (from the totals above)')
+print('-' * 78)
+course_avg = {c: sum(v) / len(v) for c, v in course_pcts.items() if v}
+for g in GraduateAttribute.objects.filter(Q(department=dept, program__isnull=True) | Q(program=prog)).order_by('ga_id'):
+    codes = [c.code for c in Course.objects.filter(code__in=course_avg.keys(), mapped_gas=g)]
+    vals = [course_avg[c] for c in codes]
+    avg = sum(vals) / len(vals) if vals else 0.0
+    print(f'  {g.ga_id:<10} {avg:5.1f}%  from {len(vals):>2} courses')
+print(f'\nDone in {int(time.time() - t0)}s.')
 print('=' * 78)
