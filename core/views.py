@@ -3402,6 +3402,51 @@ class CLODetailView(APIView):
 ATTAINMENT_THRESHOLD = 50.0
 
 
+def _ga_question_items(ic):
+    """
+    Graded questions of one offering grouped by the GA of their CLO
+    (question -> first mapped CLO -> CLO.mapped_ga). Only the offering's own
+    questions on units of weighted assessment categories count, as on the
+    mark sheet. Returns (ga_items, ga_objs, ga_clos, graded_count, unmapped)
+    where ga_items[ga_id] = [(unit_item, question, questions_in_unit), ...].
+    """
+    clo_ga = {c.code.strip().upper(): c.mapped_ga for c in ic.clos.select_related('mapped_ga').all()}
+    graded = []
+    if ic.catalog_course_id:
+        for cat in ic.catalog_course.markscategories.filter(percentage__gt=0).order_by('order'):
+            for ui in cat.unit_items.filter(unit_no__lte=cat.units).order_by('unit_no'):
+                own = sorted((q for q in ui.questions.all() if q.course_id == ic.id), key=lambda q: (q.order, q.id))
+                for q in own:
+                    graded.append((ui, q, len(own)))
+    ga_items, ga_objs, ga_clos = {}, {}, {}
+    unmapped = 0
+    for ui, q, n in graded:
+        clo = (q.mapped_clos or [None])[0]
+        ga = clo_ga.get(str(clo).strip().upper()) if clo else None
+        if ga is None:
+            unmapped += 1
+            continue
+        ga_items.setdefault(ga.ga_id, []).append((ui, q, n))
+        ga_objs[ga.ga_id] = ga
+        ga_clos.setdefault(ga.ga_id, set()).add(str(clo).strip().upper())
+    return ga_items, ga_objs, ga_clos, len(graded), unmapped
+
+
+def _ga_questions_passed(course_student, items, threshold):
+    """How many of `items` the student passed (score >= threshold% of the question)."""
+    unit_marks = {m.unit_item_id: m.score for m in course_student.marks.all()}
+    q_marks = {om.question_id: om.score for om in course_student.obe_marks.all()}
+    passed = 0
+    for ui, q, n in items:
+        val = q_marks.get(q.id)
+        if (val is None or float(val) <= 0) and n == 1:
+            val = unit_marks.get(ui.id, val)   # single-question unit: unit mark, as the sheet does
+        val = float(val or 0)
+        if (q.max_marks or 0) > 0 and (val / q.max_marks) * 100 >= threshold:
+            passed += 1
+    return passed
+
+
 class CourseGAStudentAttainmentView(APIView):
     """
     GET /api/reports/course-ga-students/?courseCode=CMC111&programId=bscs
@@ -3448,30 +3493,7 @@ class CourseGAStudentAttainmentView(APIView):
                 continue
             course_title = course_title or ic.title
 
-            clo_ga = {c.code.strip().upper(): c.mapped_ga
-                      for c in ic.clos.select_related('mapped_ga').all()}
-
-            # Graded questions of this offering, in mark-sheet order.
-            graded = []   # (unit_item, question, questions_in_unit)
-            if ic.catalog_course_id:
-                for cat in ic.catalog_course.markscategories.filter(percentage__gt=0).order_by('order'):
-                    for ui in cat.unit_items.filter(unit_no__lte=cat.units).order_by('unit_no'):
-                        own = sorted((q for q in ui.questions.all() if q.course_id == ic.id),
-                                     key=lambda q: (q.order, q.id))
-                        for q in own:
-                            graded.append((ui, q, len(own)))
-
-            ga_items, ga_objs, ga_clos = {}, {}, {}
-            unmapped = 0
-            for ui, q, n in graded:
-                clo = (q.mapped_clos or [None])[0]
-                ga = clo_ga.get(str(clo).strip().upper()) if clo else None
-                if ga is None:
-                    unmapped += 1
-                    continue
-                ga_items.setdefault(ga.ga_id, []).append((ui, q, n))
-                ga_objs[ga.ga_id] = ga
-                ga_clos.setdefault(ga.ga_id, set()).add(str(clo).strip().upper())
+            ga_items, ga_objs, ga_clos, graded_count, unmapped = _ga_question_items(ic)
 
             # GAs QA mapped to the course but with no questions yet are listed too.
             if ic.catalog_course_id:
@@ -3483,22 +3505,13 @@ class CourseGAStudentAttainmentView(APIView):
             pct_sum = {g: 0.0 for g in ga_ids}
             student_rows = []
             for st in students:
-                unit_marks = {m.unit_item_id: m.score for m in st.marks.all()}
-                q_marks = {om.question_id: om.score for om in st.obe_marks.all()}
                 row = {}
                 for g in ga_ids:
                     items = ga_items.get(g, [])
                     if not items:
                         row[g] = None
                         continue
-                    passed = 0
-                    for ui, q, n in items:
-                        val = q_marks.get(q.id)
-                        if (val is None or float(val) <= 0) and n == 1:
-                            val = unit_marks.get(ui.id, val)
-                        val = float(val or 0)
-                        if (q.max_marks or 0) > 0 and (val / q.max_marks) * 100 >= threshold:
-                            passed += 1
+                    passed = _ga_questions_passed(st, items, threshold)
                     pct = round(passed / len(items) * 100, 1)
                     ok = pct >= threshold
                     row[g] = {'passed': passed, 'total': len(items), 'percent': pct, 'attained': ok}
@@ -3528,7 +3541,7 @@ class CourseGAStudentAttainmentView(APIView):
                 'status': ic.status,
                 'instructor': ic.instructor.user.get_full_name() or ic.instructor.user.username,
                 'studentCount': n_students,
-                'questionCount': len(graded),
+                'questionCount': graded_count,
                 'unmappedQuestionCount': unmapped,
                 'gas': gas_out,
                 'students': student_rows,
@@ -3541,6 +3554,70 @@ class CourseGAStudentAttainmentView(APIView):
             'questionPassThreshold': threshold,
             'gaAttainmentThreshold': threshold,
             'offerings': offerings,
+        })
+
+
+class StudentGAQuestionAttainmentView(APIView):
+    """
+    GET /api/reports/student-ga-questions/?regNo=052-FA23-22040
+
+    READ-ONLY. One student's GA attainment across ALL their courses, with the
+    same rule as the course report: a question is passed at >= 50% of its
+    marks; GA attainment = questions passed / questions for that GA (summed
+    over every course); the GA is attained at >= 50%. Also per course.
+    """
+    permission_classes = [IsStaffReport]
+
+    def get(self, request):
+        reg_no = request.query_params.get('regNo', '').strip()
+        if not reg_no:
+            return Response({'error': 'regNo is required'}, status=status.HTTP_400_BAD_REQUEST)
+        enrolments = list(CourseStudent.objects.filter(reg_no__iexact=reg_no)
+                          .select_related('course__instructor__user', 'course__program', 'course__catalog_course')
+                          .prefetch_related('marks', 'obe_marks')
+                          .order_by('course__academic_year', 'course__code'))
+        adm = AdmissionStudent.objects.filter(reg_no__iexact=reg_no).select_related('program').first()
+        if not enrolments and not adm:
+            return Response({'error': f'Student "{reg_no}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        threshold = ATTAINMENT_THRESHOLD
+        totals = {}      # ga_id -> {'passed', 'total', 'courses': set, 'title'}
+        courses_out = []
+        for cs in enrolments:
+            ic = cs.course
+            ga_items, ga_objs, _clos, graded_count, unmapped = _ga_question_items(ic)
+            per_ga = {}
+            for g, items in ga_items.items():
+                passed = _ga_questions_passed(cs, items, threshold)
+                pct = round(passed / len(items) * 100, 1)
+                per_ga[g] = {'passed': passed, 'total': len(items), 'percent': pct, 'attained': pct >= threshold}
+                t = totals.setdefault(g, {'passed': 0, 'total': 0, 'courses': set(), 'title': ga_objs[g].name})
+                t['passed'] += passed
+                t['total'] += len(items)
+                t['courses'].add(ic.code)
+            courses_out.append({
+                'courseCode': ic.code, 'courseTitle': ic.title, 'academicYear': ic.academic_year,
+                'status': ic.status,
+                'instructor': ic.instructor.user.get_full_name() or ic.instructor.user.username,
+                'questionCount': graded_count, 'unmappedQuestionCount': unmapped,
+                'gas': per_ga,
+            })
+
+        gas_out = []
+        for g in sorted(totals.keys(), key=CourseGAStudentAttainmentView._ga_sort_key):
+            t = totals[g]
+            pct = round(t['passed'] / t['total'] * 100, 1) if t['total'] else 0.0
+            gas_out.append({'id': g, 'title': t['title'], 'passed': t['passed'], 'total': t['total'],
+                            'percent': pct, 'attained': pct >= threshold, 'courseCount': len(t['courses'])})
+
+        return Response({
+            'regNo': adm.reg_no if adm else (enrolments[0].reg_no if enrolments else reg_no),
+            'name': adm.name if adm else (enrolments[0].name if enrolments else ''),
+            'programId': adm.program.code.lower() if adm and adm.program_id else None,
+            'questionPassThreshold': threshold,
+            'gaAttainmentThreshold': threshold,
+            'gas': gas_out,
+            'courses': courses_out,
         })
 
 
