@@ -11,14 +11,13 @@ bash setup.sh
 python manage.py runserver
 ```
 
-`setup.sh` installs dependencies, runs migrations, and seeds the database.
+`setup.sh` installs dependencies and runs migrations. It does not add any data.
 
 ## After pulling changes
 
 ```bash
 git pull
 python manage.py migrate   # only if new migration files exist
-python manage.py seed      # only if you want to reset all data
 python manage.py runserver
 ```
 
@@ -46,7 +45,6 @@ All users log in with their **email** and password.
 ```bash
 python manage.py makemigrations core --name="describe_what_changed"
 python manage.py migrate
-python manage.py seed
 ```
 
 Commit the new migration file. Never delete old ones.
@@ -86,12 +84,6 @@ checklist so nothing gets forgotten on deployment day.
       stopgap), but `CORS_ALLOWED_ORIGINS` in `obe/settings.py` currently only
       lists localhost + dev tunnel domains. Add the real deployed frontend
       domain before going live, or every request from it will fail CORS.
-
-- [ ] **Remove/rotate the personal dev credentials in
-      `core/management/commands/seed.py`** (e.g. `zeeshan@ali.com`,
-      `mon@admin.com` and similar accounts with known passwords). Confirm this
-      command is never run against the production database — these exist
-      purely for local dev/demo convenience.
 
 - [ ] **Set `DEFAULT_TEMP_PASSWORD` via env var** rather than relying on the
       hardcoded fallback in `obe/settings.py`, and rotate it periodically —
