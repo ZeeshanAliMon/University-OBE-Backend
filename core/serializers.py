@@ -193,6 +193,7 @@ class CourseSerializer(serializers.ModelSerializer):
         instance.title   = validated_data.get('title',   instance.title)
         instance.type    = validated_data.get('type',    instance.type)
         instance.subtype = validated_data.get('subtype', instance.subtype)
+        instance.credit_hours = validated_data.get('credit_hours', instance.credit_hours)
         instance.save()
         if mapped_gas_ids is not None:
             instance.mapped_gas.set(GraduateAttribute.objects.filter(ga_id__in=mapped_gas_ids))
@@ -264,7 +265,9 @@ class CourseStudentSerializer(serializers.ModelSerializer):
         """
         return {
             f"{m.unit_item.category.name}-{m.unit_item.unit_no}": m.score
-            for m in obj.marks.select_related('unit_item__category').all()
+            # .all() so prefetch_instructor_course's prefetch is used (a new
+            # select_related() queryset re-queried once per student).
+            for m in obj.marks.all()
         }
 
 
@@ -282,7 +285,20 @@ class GradeScaleSerializer(serializers.ModelSerializer):
         fields = ['grade', 'percentage', 'points']
 
     def get_percentage(self, obj):
-        return str(obj.min_percentage)
+        # Only the min bound is stored; rebuild the "X% - Y%" / "Below X%"
+        # string the frontend sends and parses (see DEFAULT_CUSTOM_GRADES),
+        # using the next higher tier's min as this tier's upper bound.
+        def fmt(v):
+            return str(int(v)) if float(v).is_integer() else str(v)
+
+        higher = sorted(
+            g.min_percentage for g in obj.course.grade_scale.all()
+            if g.min_percentage > obj.min_percentage
+        )
+        if obj.min_percentage <= 0 and higher:
+            return f'Below {fmt(higher[0])}%'
+        upper = fmt(higher[0] - 1) if higher else '100'
+        return f'{fmt(obj.min_percentage)}% - {upper}%'
 
     def get_points(self, obj):
         return str(obj.points)
@@ -368,7 +384,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
 
     def get_students(self, obj):
         return CourseStudentSerializer(
-            obj.students.prefetch_related('marks__unit_item__category').all(),
+            obj.students.all(),
             many=True
         ).data
 
@@ -381,7 +397,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
         Shape: { "regNo": { "questionFrontendId": score } }
         """
         result = {}
-        for student in obj.students.prefetch_related('obe_marks__question').all():
+        for student in obj.students.all():
             q_marks = {
                 om.question.frontend_id: om.score
                 for om in student.obe_marks.all()

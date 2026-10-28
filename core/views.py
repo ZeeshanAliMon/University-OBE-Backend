@@ -5,6 +5,7 @@ from django.db import models
 from django.db import IntegrityError
 from django.db import transaction
 from django.utils import timezone
+import logging
 import traceback
 import re
 from rest_framework             import status
@@ -34,6 +35,7 @@ from .serializers import (
 )
 from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin, IsDeptAdminOrQA, IsStaffReport, IsInstructorOrStaffReport
 
+logger = logging.getLogger(__name__)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -429,13 +431,20 @@ class CourseListView(APIView):
             except Program.DoesNotExist:
                 pass
 
-        course = Course.objects.create(
-            code=d['code'], title=d['title'],
-            type=d.get('type', 'core'),
-            subtype=d.get('subtype', 'theory'),
-            department=department, program=program,
-            credit_hours=d.get('creditHours', 3)
-        )
+        try:
+            with transaction.atomic():
+                course = Course.objects.create(
+                    code=d['code'], title=d['title'],
+                    type=d.get('type', 'core'),
+                    subtype=d.get('subtype', 'theory'),
+                    department=department, program=program,
+                    credit_hours=d.get('creditHours', 3)
+                )
+        except IntegrityError:
+            return Response(
+                {'error': f'Course "{d["code"]}" already exists for this department and program'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         if mapped_gas:
             course.mapped_gas.set(GraduateAttribute.objects.filter(ga_id__in=mapped_gas))
 
@@ -521,7 +530,8 @@ class CourseDetailView(APIView):
         s = CourseSerializer(obj, data=data, partial=True)
         if s.is_valid():
             s.save()
-            return Response(CourseSerializer(self._get(request,slug)).data)
+            obj.refresh_from_db()
+            return Response(CourseSerializer(obj).data)
         return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, slug):
@@ -606,7 +616,7 @@ class InstructorCourseView(APIView):
 
 
 
-    def get(self, request):
+    def get(self, request, frontend_id=None):
         try:
 
             role = request.user.role
@@ -755,7 +765,7 @@ class InstructorCourseView(APIView):
             traceback.print_exc()
             raise
 
-    def post(self, request):
+    def post(self, request, frontend_id=None):
         profile = get_instructor_profile(request.user)
         if not profile:
             return Response(
@@ -1050,8 +1060,12 @@ class InstructorCourseView(APIView):
                                 incoming_unit_pks.add(unit_obj.pk)
                                 mark_rows.append((unit_obj, score))
 
-                        # Delete marks for units no longer in payload
-                        student.marks.exclude(unit_item__in=incoming_unit_pks).delete()
+                        # Delete marks for units no longer in payload. Limited to
+                        # units this payload sent: categories/units omitted from it
+                        # are preserved by the guard above, and so are their marks.
+                        student.marks.filter(
+                            unit_item__in=[u.pk for u in unit_obj_map.values()]
+                        ).exclude(unit_item__in=incoming_unit_pks).delete()
 
                         for unit_obj, score in mark_rows:
                             StudentMark.objects.update_or_create(
@@ -1076,7 +1090,7 @@ class InstructorCourseView(APIView):
                                 )
 
                     saved.append(course)
-            except (KeyError, ValueError, TypeError) as e:
+            except (KeyError, ValueError, TypeError, AttributeError, IntegrityError) as e:
                 # Previously unhandled — a malformed entry anywhere in
                 # this course (missing required key, wrong type) crashed
                 # the ENTIRE batch save with a raw 500, silently discarding
@@ -1392,7 +1406,7 @@ class AdmissionStudentDetailView(APIView):
         # Deleting the User cascades to Student automatically (Student.user is
         # OneToOneField with on_delete=CASCADE), so we only need to delete User.
         from .models import Student as StudentProfile
-        linked = StudentProfile.objects.filter(reg_no=reg_no).select_related('user').first()
+        linked = StudentProfile.objects.filter(reg_no=student.reg_no).select_related('user').first()
         if linked:
             linked.user.delete()  # cascades → Student profile deleted automatically
 
@@ -1615,6 +1629,8 @@ class CourseAssignmentView(APIView):
                 status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
             )
 
+        except (InstructorProfile.DoesNotExist, Program.DoesNotExist, Course.DoesNotExist) as e:
+            return Response({'error': str(e)}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             traceback.print_exc()
             return Response(
@@ -1640,6 +1656,8 @@ class CourseAssignmentView(APIView):
         )
         if program_id:
             qs = qs.filter(program__code__iexact=program_id)
+        if academic_year:
+            qs = qs.filter(academic_year__iexact=academic_year)
         deleted, _ = qs.delete()
         if not deleted:
             return Response({'error': 'Assignment not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -1976,7 +1994,7 @@ class StudentCoursesView(APIView):
             reg_no = request.user.email.split('@')[0]
 
         enrollments = CourseStudent.objects.filter(
-            reg_no=reg_no
+            reg_no__iexact=reg_no
         ).select_related(
             'course__department',
             'course__program',
@@ -2141,7 +2159,7 @@ class StudentCoursesView(APIView):
                 'title':             ic.title,
                 'programId':         ic.program.code.lower() if ic.program else None,
                 'creditHours':       ic.credit_hours,
-                'is_finalized':      getattr(ic, 'is_closed', False),  # True once course is closed/finalized
+                'is_finalized':      ic.is_locked,  # True once course is closed/finalized
                 'categories':        categories,
 
                 # ── Standardized mark keys (snake_case) ──────────────────────
@@ -2271,7 +2289,9 @@ def _sheet_course_total(course_student) -> dict:
     unit_marks = {m.unit_item_id: m.score for m in course_student.marks.all()}
     question_marks = {om.question_id: om.score for om in course_student.obe_marks.all()}
 
-    for cat in ic.catalog_course.markscategories.order_by('order').all():
+    # MarksCategory.Meta.ordering is ['order']; plain .all() keeps that order
+    # and, unlike .order_by(), can use SHEET_TOTAL_PREFETCH.
+    for cat in ic.catalog_course.markscategories.all():
         if not (cat.percentage > 0):
             continue
         max_sum = 0.0
@@ -2321,6 +2341,16 @@ def _sheet_course_total(course_student) -> dict:
                 'questions':    questions,
             }
     return result
+
+
+# Everything _sheet_course_total reads, for an InstructorCourse queryset. Without
+# it every student re-queries their marks and the course's categories/units/
+# questions — tens of thousands of queries per program report.
+SHEET_TOTAL_PREFETCH = (
+    'students__marks',
+    'students__obe_marks',
+    'catalog_course__markscategories__unit_items__questions',
+)
 
 
 def _student_total_percentage(course_student) -> float:
@@ -2397,7 +2427,7 @@ class ProgramGAAttainmentView(APIView):
 
         instructor_courses = InstructorCourse.objects.filter(
             program=program
-        ).prefetch_related('students__marks__unit_item__category')
+        ).select_related('catalog_course').prefetch_related(*SHEET_TOTAL_PREFETCH)
 
         # DATA-LOSS FIX: a course can have multiple InstructorCourse offerings
         # (different academic_years, different instructors/sections). This
@@ -2412,7 +2442,7 @@ class ProgramGAAttainmentView(APIView):
         course_all_pcts  = {}
         course_title_map = {}
         for ic in instructor_courses:
-            students = list(ic.students.prefetch_related('marks__unit_item__category').all())
+            students = list(ic.students.all())
             if not students:
                 continue
             percentages = [_student_total_percentage(s) for s in students]
@@ -2519,11 +2549,11 @@ class ProgramGAAttainmentBySemesterView(APIView):
         # count rather than by offering count.
         instructor_courses = InstructorCourse.objects.filter(
             program=program
-        ).prefetch_related('students__marks__unit_item__category')
+        ).select_related('catalog_course').prefetch_related(*SHEET_TOTAL_PREFETCH)
 
         course_all_pcts = {}
         for ic in instructor_courses:
-            students = list(ic.students.prefetch_related('marks__unit_item__category').all())
+            students = list(ic.students.all())
             if not students:
                 continue
             percentages = [_student_total_percentage(s) for s in students]
@@ -2670,7 +2700,7 @@ class BatchGAAttainmentView(APIView):
         ic_qs = InstructorCourse.objects.filter(department=department)
         if program:
             ic_qs = ic_qs.filter(program=program)
-        ic_qs = ic_qs.prefetch_related('students__marks__unit_item__category')
+        ic_qs = ic_qs.select_related('catalog_course').prefetch_related(*SHEET_TOTAL_PREFETCH)
 
         # code -> list of per-student percentages, restricted to this batch
         course_student_pcts = {}
@@ -3242,21 +3272,11 @@ class CLOListView(APIView):
             if not profile:
                 return None
             try:
-                # Primary: exact ownership match
+                # Exact ownership match. InstructorCourse.instructor is non-null,
+                # so there is no "unassigned course" case to fall back to.
                 return InstructorCourse.objects.get(frontend_id=frontend_id, instructor=profile)
             except InstructorCourse.DoesNotExist:
-                # Fallback: course exists but instructor FK may not be set yet
-                # (e.g. newly dept-admin-assigned course). Allow by frontend_id alone
-                # so the instructor can still define CLOs for their assigned course.
-                try:
-                    course = InstructorCourse.objects.get(frontend_id=frontend_id)
-                    # Bind the instructor FK if missing so future requests match
-                    if course.instructor is None:
-                        course.instructor = profile
-                        course.save(update_fields=['instructor'])
-                    return course
-                except InstructorCourse.DoesNotExist:
-                    return None
+                return None
 
         return None
 
@@ -3290,11 +3310,11 @@ class CLOListView(APIView):
             ga = _resolve_ga(ga_id, course=course)
             if not ga:
                 # Log and continue with no GA rather than blocking the instructor.
-                # The instructor can remap later once GAs are seeded.
+                # The instructor can remap later once GAs are added.
                 logger.warning(
                     f'CLO POST: Graduate Attribute "{ga_id}" not found — '
                     f'CLO will be saved without GA mapping. '
-                    f'Run: python manage.py seed_graduate_attributes'
+                    f'Add the Graduate Attributes for this program first.'
                 )
 
         clo = CLO.objects.create(
@@ -3340,17 +3360,6 @@ class CLODetailView(APIView):
                     pk=clo_id, course__frontend_id=frontend_id, course__instructor=profile
                 )
             except CLO.DoesNotExist:
-                pass
-            # Fallback: course exists, instructor FK may be unset
-            try:
-                clo = CLO.objects.select_related('mapped_ga', 'course').get(
-                    pk=clo_id, course__frontend_id=frontend_id
-                )
-                if clo.course.instructor is None:
-                    clo.course.instructor = profile
-                    clo.course.save(update_fields=['instructor'])
-                return clo
-            except CLO.DoesNotExist:
                 return None
 
         return None
@@ -3382,7 +3391,7 @@ class CLODetailView(APIView):
                     logging.getLogger(__name__).warning(
                         f'CLO PATCH: Graduate Attribute "{ga_id}" not found — '
                         f'GA mapping unchanged. '
-                        f'Run: python manage.py seed_graduate_attributes'
+                        f'Add the Graduate Attributes for this program first.'
                     )
             else:
                 clo.mapped_ga = None
@@ -4520,9 +4529,11 @@ class StudentEnrollmentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        try:
-            ic = InstructorCourse.objects.get(frontend_id=course_id, department=admin_dept)
-        except InstructorCourse.DoesNotExist:
+        # Same case-insensitive lookup as post() so an id that enrolled a
+        # student can also remove them.
+        candidates = InstructorCourse.objects.filter(frontend_id__iexact=course_id, department=admin_dept)
+        ic = candidates.filter(frontend_id=course_id).first() or candidates.order_by('id').first()
+        if ic is None:
             return Response({'error': f'Course "{course_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
         if ic.status == 'closed':
