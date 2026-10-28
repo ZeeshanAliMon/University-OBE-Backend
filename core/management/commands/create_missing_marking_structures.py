@@ -3,7 +3,6 @@ Management command to create missing MarksCategories for courses
 Usage: python manage.py create_missing_marking_structures
 """
 
-import json
 from django.core.management.base import BaseCommand
 from core.models import Course, MarksCategory, UnitItem
 
@@ -59,7 +58,7 @@ class Command(BaseCommand):
                             total_marks=total_marks,
                             weightage=weightage,
                             passing=total_marks * 0.5,
-                            mapped_clos=json.dumps([])
+                            mapped_clos=[]
                         )
                         units_created += 1
             except Exception as e:
