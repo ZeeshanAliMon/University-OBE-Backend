@@ -306,6 +306,9 @@ class GradeScaleSerializer(serializers.ModelSerializer):
 
 class InstructorCourseSerializer(serializers.ModelSerializer):
     id                    = serializers.CharField(source='frontend_id')
+    # Version token: sent back on save so an older copy (another tab or
+    # computer) can't overwrite newer marks. See InstructorCourseView.post.
+    updatedAt             = serializers.DateTimeField(source='updated_at', read_only=True)
     courseType            = serializers.CharField(source='course_type')
     departmentId          = serializers.SerializerMethodField()
     departmentName        = serializers.CharField(source='department.name',  read_only=True)
@@ -347,7 +350,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
             'selectedGradingSystem', 'customGradingSystem',
             'categories', 'unitsData', 'clos',
             'students', 'obeQuestions', 'obe_marks', 'obeMarks',
-            'status',
+            'status', 'updatedAt',
         ]
 
     def get_departmentId(self, obj):
