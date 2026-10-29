@@ -5,6 +5,8 @@ from django.db import models
 from django.db import IntegrityError
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+import datetime
 import logging
 import traceback
 import re
@@ -49,6 +51,23 @@ def get_instructor_profile(user):
         return user.instructor_profile
     except Exception:
         return None
+
+
+def _course_student_has_marks(course_student):
+    """True if this roster row has any unit or per-question mark. Such rows are
+    never deleted by roster syncs -- deleting them would delete the marks."""
+    return course_student.marks.exists() or course_student.obe_marks.exists()
+
+
+_TERM_SEASON_RANK = {'spring': 1, 'summer': 2, 'fall': 3, 'autumn': 3}
+
+
+def _term_sort_key(term):
+    """Chronological sort key for academic years like "Fall-2024" / "spring 2023"."""
+    m = re.search(r'([a-z]+)\W*(\d{4})', str(term or '').lower())
+    if not m:
+        return (0, 0, str(term or ''))
+    return (int(m.group(2)), _TERM_SEASON_RANK.get(m.group(1), 0), str(term))
 
 
 def get_admin_department(user):
@@ -743,16 +762,17 @@ class InstructorCourseView(APIView):
 
             all_ics = InstructorCourse.objects.filter(instructor=profile)
 
-            latest_term = (
+            # Latest by date, not alphabetically ("Spring-2023" sorts after
+            # "Fall-2024" as text, which hid every newer offering).
+            terms = set(
                 all_ics.exclude(academic_year='')
-                .order_by('-academic_year')
                 .values_list('academic_year', flat=True)
-                .first()
             )
+            latest_term = max(terms, key=_term_sort_key) if terms else None
 
 
             if latest_term:
-                all_ics = all_ics.filter(academic_year=latest_term)
+                all_ics = all_ics.filter(academic_year__iexact=latest_term)
 
             qs = prefetch_instructor_course(all_ics.order_by('created_at'))
 
@@ -761,7 +781,7 @@ class InstructorCourseView(APIView):
 
             return Response(data)
 
-        except Exception as e:
+        except Exception:
             traceback.print_exc()
             raise
 
@@ -797,6 +817,21 @@ class InstructorCourseView(APIView):
                     'error': f'Course "{frontend_id}" is closed (finalized {existing.closed_at}) and cannot be edited.'
                 })
                 continue
+
+            # Refuse an older copy: if the course was saved after the version
+            # this client loaded (e.g. from another tab or computer), writing
+            # this payload would put older marks back over newer ones.
+            sent_version = parse_datetime(str(c.get('updatedAt') or ''))
+            if existing and sent_version:
+                if timezone.is_naive(sent_version):
+                    sent_version = timezone.make_aware(sent_version, datetime.timezone.utc)
+                if existing.updated_at > sent_version:
+                    errors.append({
+                        'index': idx,
+                        'stale': True,
+                        'error': f'Course "{existing.code}" was changed in another tab or on another computer. Reload the page to get the latest marks before editing.'
+                    })
+                    continue
 
             try:
                 department = Department.objects.get(dept_id=dept_id)
@@ -2175,6 +2210,7 @@ class StudentCoursesView(APIView):
                 'gradePoints':       final_points,        # Float or null
                 'obeQuestions':      obe_questions,       # questions with CLO mappings
                 'cloAttainments':    clo_attainments,    # CLO % (never recalculate!)
+                'gaAttainments':     _student_ga_attainments(enrollment),  # GA by questions passed
             })
 
         return Response(result)
@@ -2425,46 +2461,32 @@ class ProgramGAAttainmentView(APIView):
             models.Q(program=program)
         ).order_by('ga_id')
 
+        # GA attainment by questions passed (question -> CLO -> GA), the same
+        # method as the QA "GA by Course" / "GA by Student" reports. Every
+        # offering of a course code is pooled (weighted by student count);
+        # averageMarks is the course's average GA attainment over its marked
+        # students.
         instructor_courses = InstructorCourse.objects.filter(
             program=program
-        ).select_related('catalog_course').prefetch_related(*SHEET_TOTAL_PREFETCH)
+        ).select_related('catalog_course').prefetch_related(*GA_QUESTION_PREFETCH)
 
-        # DATA-LOSS FIX: a course can have multiple InstructorCourse offerings
-        # (different academic_years, different instructors/sections). This
-        # used to do course_avg_map[ic.code] = ... inside the loop, which
-        # silently OVERWRITES on each iteration — only the last-processed
-        # offering's average survived, every earlier offering's data was
-        # discarded with no error. Now pools every student's percentage
-        # across every offering of that course code first, then averages
-        # once — this also weights correctly by student count instead of
-        # by offering count (a 50-student section and a 5-student section
-        # no longer count equally).
-        course_all_pcts  = {}
+        course_ga_pcts   = {}   # code -> ga_id -> [student percent]
         course_title_map = {}
         for ic in instructor_courses:
             students = list(ic.students.all())
             if not students:
                 continue
-            percentages = [_student_total_percentage(s) for s in students]
-            course_all_pcts.setdefault(ic.code, []).extend(percentages)
+            for g, pcts in _offering_ga_student_pcts(ic, students).items():
+                course_ga_pcts.setdefault(ic.code, {}).setdefault(g, []).extend(pcts)
             course_title_map[ic.code] = ic.title
 
-        course_avg_map = {
-            code: round(sum(pcts) / len(pcts), 2)
-            for code, pcts in course_all_pcts.items() if pcts
-        }
-
-        course_codes    = list(course_avg_map.keys())
-        catalog_courses = Course.objects.filter(code__in=course_codes).prefetch_related('mapped_gas')
-
         ga_courses = {}
-        for course in catalog_courses:
-            avg = course_avg_map.get(course.code, 0.0)
-            for ga in course.mapped_gas.all():
-                ga_courses.setdefault(ga.ga_id, []).append({
-                    'code':         course.code,
-                    'title':        course_title_map.get(course.code, course.title),
-                    'averageMarks': avg,
+        for code in sorted(course_ga_pcts):
+            for g, pcts in course_ga_pcts[code].items():
+                ga_courses.setdefault(g, []).append({
+                    'code':         code,
+                    'title':        course_title_map.get(code, code),
+                    'averageMarks': round(sum(pcts) / len(pcts), 2),
                 })
 
         attributes = []
@@ -2495,10 +2517,9 @@ class ProgramGAAttainmentBySemesterView(APIView):
     """
     GET /api/reports/program-ga-attainment-by-semester/?programId=bscs
 
-    Same computation as ProgramGAAttainmentView (course.mapped_gas +
-    average student percentage per course — NOT the CLO-level mapping
-    used elsewhere), but grouped by curriculum semester (1st..8th) instead
-    of flattened across the whole program. "Semester" here means the
+    Same computation as ProgramGAAttainmentView (questions passed via
+    question -> CLO -> GA), but grouped by curriculum semester (1st..8th)
+    instead of flattened across the whole program. "Semester" here means the
     SemesterPlan curriculum slot a course belongs to (e.g. CMC111 is a
     1st-semester course) — NOT InstructorCourse.academic_year, which is
     the calendar term (e.g. "Fall-2026") a particular offering ran in.
@@ -2549,25 +2570,15 @@ class ProgramGAAttainmentBySemesterView(APIView):
         # count rather than by offering count.
         instructor_courses = InstructorCourse.objects.filter(
             program=program
-        ).select_related('catalog_course').prefetch_related(*SHEET_TOTAL_PREFETCH)
+        ).select_related('catalog_course').prefetch_related(*GA_QUESTION_PREFETCH)
 
-        course_all_pcts = {}
+        course_ga_pcts = {}   # code -> ga_id -> [student percent]
         for ic in instructor_courses:
             students = list(ic.students.all())
             if not students:
                 continue
-            percentages = [_student_total_percentage(s) for s in students]
-            course_all_pcts.setdefault(ic.code, []).extend(percentages)
-
-        course_avg_map = {
-            code: round(sum(pcts) / len(pcts), 2)
-            for code, pcts in course_all_pcts.items() if pcts
-        }
-
-        catalog_courses = Course.objects.filter(
-            code__in=list(course_avg_map.keys())
-        ).prefetch_related('mapped_gas')
-        course_ga_map = {c.code: [ga.ga_id for ga in c.mapped_gas.all()] for c in catalog_courses}
+            for g, pcts in _offering_ga_student_pcts(ic, students).items():
+                course_ga_pcts.setdefault(ic.code, {}).setdefault(g, []).extend(pcts)
 
         semester_plans = SemesterPlan.objects.filter(program=program)
         # Preserve curriculum order (1st..8th), only including configured semesters.
@@ -2578,13 +2589,12 @@ class ProgramGAAttainmentBySemesterView(APIView):
         for sem in semester_order:
             if sem not in plans_by_semester:
                 continue
-            sem_course_codes = [c for c in plans_by_semester[sem] if c in course_avg_map]
-
+            sem_course_codes = [c for c in plans_by_semester[sem] if c in course_ga_pcts]
             ga_courses = {}
             for code in sem_course_codes:
-                avg = course_avg_map[code]
-                for ga_id in course_ga_map.get(code, []):
-                    ga_courses.setdefault(ga_id, []).append({'code': code, 'averageMarks': avg})
+                for ga_id, pcts in course_ga_pcts[code].items():
+                    ga_courses.setdefault(ga_id, []).append(
+                        {'code': code, 'averageMarks': round(sum(pcts) / len(pcts), 2)})
 
             attributes = []
             for ga in gas:
@@ -2620,9 +2630,9 @@ class BatchGAAttainmentView(APIView):
 
     GA attainment for one admitted batch/cohort (e.g. all SP23 students),
     identified by the batch code embedded in AdmissionStudent.reg_no
-    (e.g. "SP23-BSCS-014" -> batch "sp23"). Same course.mapped_gas /
-    per-student-percentage computation as ProgramGAAttainmentView, but
-    filtered to students in this batch instead of grouped by program.
+    (e.g. "SP23-BSCS-014" -> batch "sp23"). Same questions-passed
+    computation as ProgramGAAttainmentView, but filtered to students in
+    this batch instead of grouped by program.
 
     programId is optional — omit it to see the batch across every program
     in the department (matches "all sp23 students" as literally requested,
@@ -2694,36 +2704,21 @@ class BatchGAAttainmentView(APIView):
         gas = gas_qs.order_by('ga_id')
 
         # Pull every InstructorCourse in this department (optionally scoped
-        # to one program) that has at least one of this batch's students,
-        # and compute each such student's course percentage exactly like
-        # ProgramGAAttainmentView / _student_total_percentage do.
+        # to one program) and score this batch's students by questions passed.
         ic_qs = InstructorCourse.objects.filter(department=department)
         if program:
             ic_qs = ic_qs.filter(program=program)
-        ic_qs = ic_qs.select_related('catalog_course').prefetch_related(*SHEET_TOTAL_PREFETCH)
+        ic_qs = ic_qs.select_related('catalog_course').prefetch_related(*GA_QUESTION_PREFETCH)
 
-        # code -> list of per-student percentages, restricted to this batch
-        course_student_pcts = {}
+        # ga_id -> list of individual student percentages (questions passed,
+        # per student per course), restricted to this batch.
+        ga_student_pcts = {}
         for ic in ic_qs:
             batch_students = [s for s in ic.students.all() if s.reg_no.strip().upper() in reg_nos]
             if not batch_students:
                 continue
-            pcts = [_student_total_percentage(s) for s in batch_students]
-            course_student_pcts.setdefault(ic.code, []).extend(pcts)
-
-        catalog_courses = Course.objects.filter(
-            code__in=list(course_student_pcts.keys())
-        ).prefetch_related('mapped_gas')
-
-        # ga_id -> list of individual student percentages (not per-course
-        # averages) — pass/fail is evaluated per student per GA, matching
-        # how the existing QA batch report already counts pass/fail per
-        # student rather than per course.
-        ga_student_pcts = {}
-        for course in catalog_courses:
-            pcts = course_student_pcts.get(course.code, [])
-            for ga in course.mapped_gas.all():
-                ga_student_pcts.setdefault(ga.ga_id, []).extend(pcts)
+            for g, pcts in _offering_ga_student_pcts(ic, batch_students).items():
+                ga_student_pcts.setdefault(g, []).extend(pcts)
 
         attributes = []
         for ga in gas:
@@ -3113,13 +3108,6 @@ class StudentSummaryView(APIView):
             grade_letter, grade_points = _get_grade(exact_pct, ic)
 
 
-            # Debug: marks breakdown
-            all_marks = cs.marks.select_related('unit_item__category').all()
-            for m in all_marks:
-                ui  = m.unit_item
-                cat = ui.category
-                contrib = (m.score / ui.total_marks) * (ui.weightage / 100) * cat.percentage if ui.total_marks > 0 else 0
-
             questions = list(ic.obe_questions.all())
             clo_pcts = _clo_attainments_for_student(cs, questions)
 
@@ -3419,11 +3407,17 @@ def _ga_question_items(ic):
     mark sheet. Returns (ga_items, ga_objs, ga_clos, graded_count, unmapped)
     where ga_items[ga_id] = [(unit_item, question, questions_in_unit), ...].
     """
-    clo_ga = {c.code.strip().upper(): c.mapped_ga for c in ic.clos.select_related('mapped_ga').all()}
+    # .all() + Python filters (same rows/order: Meta orderings are 'order' and
+    # 'unit_no') so GA_QUESTION_PREFETCH is used instead of per-unit queries.
+    clo_ga = {c.code.strip().upper(): c.mapped_ga for c in ic.clos.all()}
     graded = []
     if ic.catalog_course_id:
-        for cat in ic.catalog_course.markscategories.filter(percentage__gt=0).order_by('order'):
-            for ui in cat.unit_items.filter(unit_no__lte=cat.units).order_by('unit_no'):
+        for cat in ic.catalog_course.markscategories.all():
+            if not (cat.percentage > 0):
+                continue
+            for ui in cat.unit_items.all():
+                if ui.unit_no > cat.units:
+                    continue
                 own = sorted((q for q in ui.questions.all() if q.course_id == ic.id), key=lambda q: (q.order, q.id))
                 for q in own:
                     graded.append((ui, q, len(own)))
@@ -3454,6 +3448,51 @@ def _ga_questions_passed(course_student, items, threshold):
         if (q.max_marks or 0) > 0 and (val / q.max_marks) * 100 >= threshold:
             passed += 1
     return passed
+
+
+# Everything _ga_question_items / _ga_questions_passed read, for an
+# InstructorCourse queryset.
+GA_QUESTION_PREFETCH = (
+    'students__marks',
+    'students__obe_marks',
+    'clos__mapped_ga',
+    'catalog_course__markscategories__unit_items__questions',
+)
+
+
+def _offering_ga_student_pcts(ic, students, threshold=None):
+    """
+    GA attainment of each student of one offering, by questions passed
+    (question -> CLO -> GA; same rule as the QA "GA by Course" report).
+    Returns {ga_id: [percent per student]}. Students with no marks at all in
+    this offering are left out, so unmarked rosters don't pull averages to 0.
+    """
+    threshold = ATTAINMENT_THRESHOLD if threshold is None else threshold
+    ga_items = _ga_question_items(ic)[0]
+    marked = [s for s in students if list(s.marks.all()) or list(s.obe_marks.all())]
+    out = {}
+    for g, items in ga_items.items():
+        if marked:
+            out[g] = [round(_ga_questions_passed(s, items, threshold) / len(items) * 100, 1) for s in marked]
+    return out
+
+
+def _student_ga_attainments(course_student, threshold=None):
+    """
+    One student's GA attainment in one course by questions passed -- the same
+    rule as the QA "GA by Course" / "GA by Student" reports. Returns
+    [{gaId, gaTitle, passed, total, percent, attained}], sorted by GA.
+    """
+    threshold = ATTAINMENT_THRESHOLD if threshold is None else threshold
+    ga_items, ga_objs = _ga_question_items(course_student.course)[:2]
+    out = []
+    for g in sorted(ga_items, key=CourseGAStudentAttainmentView._ga_sort_key):
+        items = ga_items[g]
+        passed = _ga_questions_passed(course_student, items, threshold)
+        pct = round(passed / len(items) * 100, 1)
+        out.append({'gaId': g, 'gaTitle': ga_objs[g].name, 'passed': passed,
+                    'total': len(items), 'percent': pct, 'attained': pct >= threshold})
+    return out
 
 
 class CourseGAStudentAttainmentView(APIView):
@@ -4470,48 +4509,56 @@ class StudentEnrollmentView(APIView):
 
         # True sync / idempotent overwrite:
         # The incoming list IS the desired roster. Add new students, remove
-        # students no longer in the list (but preserve their marks data).
+        # students no longer in the list -- except anyone who already has
+        # marks: a missing or mistyped list must never delete marks, so those
+        # students are kept and reported back in 'kept'.
+        # Reg numbers are matched ignoring case and surrounding spaces, so an
+        # existing row stored as "fa24-..." is reused, not duplicated+deleted.
+        def _norm(r):
+            return str(r or '').strip().upper()
+
+        existing = {}
+        for cs in CourseStudent.objects.filter(course=ic):
+            existing.setdefault(_norm(cs.reg_no), cs)
+
         incoming_reg_nos = set()
-        for s in students:
-            reg_no = s.get('regNo', '').strip().upper()
-            if reg_no:
-                incoming_reg_nos.add(reg_no)
-
-        # Empty list = clear all enrollments (admin removed everyone)
-        if not incoming_reg_nos:
-            removed = CourseStudent.objects.filter(course=ic).delete()[0]
-            return Response({
-                'courseId': course_id,
-                'enrolled': [],
-                'removed':  removed,
-                'message':  'All students removed from course',
-            })
-
-        # Add new students
         enrolled = []
         for s in students:
-            reg_no = s.get('regNo', '').strip().upper()
-            name   = s.get('name', '').strip()
-            if not reg_no:
+            if not isinstance(s, dict):
                 continue
-            _, created = CourseStudent.objects.get_or_create(
-                course=ic, reg_no=reg_no,
-                defaults={'name': name or reg_no}
-            )
-            if created:
+            reg_no = _norm(s.get('regNo'))
+            name   = str(s.get('name') or '').strip()
+            if not reg_no or reg_no in incoming_reg_nos:
+                continue
+            incoming_reg_nos.add(reg_no)
+            if reg_no not in existing:
+                existing[reg_no] = CourseStudent.objects.create(
+                    course=ic, reg_no=reg_no, name=name or reg_no
+                )
                 enrolled.append(reg_no)
 
-        # Remove students no longer in the list (preserves marks for remaining)
-        removed_qs = CourseStudent.objects.filter(course=ic).exclude(reg_no__in=incoming_reg_nos)
-        removed    = list(removed_qs.values_list('reg_no', flat=True))
-        removed_qs.delete()
+        removed = []
+        kept    = []
+        for key, cs in existing.items():
+            if key in incoming_reg_nos:
+                continue
+            if _course_student_has_marks(cs):
+                kept.append(cs.reg_no)
+            else:
+                removed.append(cs.reg_no)
+                cs.delete()
 
         return Response({
             'courseId': course_id,
             'enrolled': enrolled,
             'removed':  removed,
-            'total':    len(incoming_reg_nos),
-            'message':  f'{len(enrolled)} added, {len(removed)} removed, {len(incoming_reg_nos)} total enrolled',
+            'kept':     kept,
+            'total':    len(incoming_reg_nos) + len(kept),
+            'message':  (
+                f'{len(enrolled)} added, {len(removed)} removed, '
+                f'{len(incoming_reg_nos) + len(kept)} total enrolled'
+                + (f' ({len(kept)} kept because they have marks)' if kept else '')
+            ),
         }, status=status.HTTP_200_OK)
 
     def delete(self, request):
@@ -4542,12 +4589,16 @@ class StudentEnrollmentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        deleted, _ = CourseStudent.objects.filter(
-            course=ic, reg_no=reg_no,
-        ).delete()
-
-        if not deleted:
+        rows = [cs for cs in CourseStudent.objects.filter(course=ic, reg_no__iexact=reg_no)]
+        if not rows:
             return Response({'error': 'Enrollment not found'}, status=status.HTTP_404_NOT_FOUND)
+        if any(_course_student_has_marks(cs) for cs in rows):
+            return Response(
+                {'error': f'{reg_no} already has marks in this course, so they cannot be removed.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        for cs in rows:
+            cs.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
