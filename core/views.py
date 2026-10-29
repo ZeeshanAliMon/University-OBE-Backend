@@ -70,6 +70,23 @@ def _term_sort_key(term):
     return (int(m.group(2)), _TERM_SEASON_RANK.get(m.group(1), 0), str(term))
 
 
+def _plan_semester(program_id, course_code, _cache=None):
+    """Curriculum semester ('1st'..'8th') of a course, from its program's
+    semester plan. Offerings are created with a blank semester, so without
+    this every course looked like it belonged to the same semester."""
+    if not program_id or not course_code:
+        return ''
+    if _cache is None:
+        _cache = {}
+    if program_id not in _cache:
+        _cache[program_id] = {
+            str(code).strip().upper(): plan.semester
+            for plan in SemesterPlan.objects.filter(program_id=program_id)
+            for code in (plan.course_codes or [])
+        }
+    return _cache[program_id].get(str(course_code).strip().upper(), '')
+
+
 def get_admin_department(user):
     """
     Returns the Department a dept_admin user manages, or None.
@@ -164,6 +181,14 @@ class LoginView(APIView):
             try:
                 user_data['regNo']        = user.student_profile.reg_no
                 user_data['departmentId'] = user.student_profile.department.dept_id
+                # Current semester as set by Admission; the dashboard used to
+                # guess it from the batch in the reg number.
+                admitted = AdmissionStudent.objects.filter(
+                    reg_no__iexact=user.student_profile.reg_no
+                ).first()
+                if admitted:
+                    user_data['semester'] = admitted.semester
+                    user_data['batch']    = admitted.batch
                 # Without this the student dashboard could never resolve the
                 # student's program, and fell back to hardcoded text
                 # ("Bachelor of Science", "BS (Computer Science)") for everyone.
@@ -2044,6 +2069,7 @@ class StudentCoursesView(APIView):
         )
 
         result = []
+        plan_cache = {}
         for enrollment in enrollments:
             ic = enrollment.course
 
@@ -2193,6 +2219,8 @@ class StudentCoursesView(APIView):
                 # transcript; the program is shown once, in the header, instead.
                 'title':             ic.title,
                 'programId':         ic.program.code.lower() if ic.program else None,
+                'academicYear':      ic.academic_year,
+                'semester':          ic.semester or _plan_semester(ic.program_id, ic.code, plan_cache),
                 'creditHours':       ic.credit_hours,
                 'is_finalized':      ic.is_locked,  # True once course is closed/finalized
                 'categories':        categories,
@@ -4855,7 +4883,7 @@ class FinalizeCourseView(APIView):
                         instructor_name=instructor_name,
                         department=ic.department,
                         program=ic.program,
-                        semester=ic.semester,
+                        semester=ic.semester or _plan_semester(ic.program_id, ic.code),
                         credit_hours=ic.credit_hours,
                         final_percentage=pct,
                         grade_letter=grade_letter,
@@ -4938,6 +4966,7 @@ class FinalResultsView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        plan_cache = {}
         results = [{
             'regNo':           r.student_reg_no,
             'studentName':     r.student_name,
@@ -4945,7 +4974,7 @@ class FinalResultsView(APIView):
             'courseTitle':     r.course_title,
             'instructorName':  r.instructor_name,
             'academicYear':    r.academic_year,
-            'semester':        r.semester,
+            'semester':        r.semester or _plan_semester(r.program_id, r.course_code, plan_cache),
             'creditHours':     r.credit_hours,
             'finalPercentage': r.final_percentage,
             'grade':           r.grade_letter,
