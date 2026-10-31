@@ -51,6 +51,7 @@ from .views import (
     CohortComparisonView,
     AtRiskStudentsView,
     GapAnalysisView,
+    CLOCQIReportView,
 )
 
 urlpatterns = [
@@ -113,6 +114,7 @@ urlpatterns = [
     path('reports/cohort-comparison/',     CohortComparisonView.as_view(),     name='report_cohort_comparison'),
     path('reports/at-risk-students/',      AtRiskStudentsView.as_view(),       name='report_at_risk_students'),
     path('reports/gap-analysis/',          GapAnalysisView.as_view(),          name='report_gap_analysis'),
+    path('reports/clo-cqi/',               CLOCQIReportView.as_view(),         name='report_clo_cqi'),
 ]
 
 

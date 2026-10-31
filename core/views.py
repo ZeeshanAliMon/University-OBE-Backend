@@ -2500,10 +2500,14 @@ class ProgramGAAttainmentView(APIView):
 
         course_ga_pcts   = {}   # code -> ga_id -> [student percent]
         course_title_map = {}
+        program_reg_nos  = set()   # marked students across the programme
         for ic in instructor_courses:
             students = list(ic.students.all())
             if not students:
                 continue
+            program_reg_nos.update(
+                s.reg_no.strip().upper() for s in students if list(s.marks.all()) or list(s.obe_marks.all())
+            )
             for g, pcts in _offering_ga_student_pcts(ic, students).items():
                 course_ga_pcts.setdefault(ic.code, {}).setdefault(g, []).extend(pcts)
             course_title_map[ic.code] = ic.title
@@ -2515,6 +2519,7 @@ class ProgramGAAttainmentView(APIView):
                     'code':         code,
                     'title':        course_title_map.get(code, code),
                     'averageMarks': round(sum(pcts) / len(pcts), 2),
+                    'studentCount': len(pcts),
                 })
 
         attributes = []
@@ -2534,6 +2539,9 @@ class ProgramGAAttainmentView(APIView):
         return Response({
             'programId':          program.code.lower(),
             'programName':        program.name,
+            'programCode':        program.code.upper(),
+            'departmentName':     program.department.name,
+            'studentCount':       len(program_reg_nos),
             'attainmentThreshold': ATTAINMENT_THRESHOLD,
             'attributes':         attributes,
         })
@@ -2723,7 +2731,7 @@ class BatchGAAttainmentView(APIView):
         if not reg_nos:
             return Response({
                 'batch': batch, 'departmentId': dept_id, 'studentCount': 0,
-                'attainmentThreshold': ATTAINMENT_THRESHOLD, 'attributes': [],
+                'attainmentThreshold': ATTAINMENT_THRESHOLD, 'attributes': [], 'students': [],
             })
 
         gas_qs = GraduateAttribute.objects.filter(department=department)
@@ -2741,12 +2749,40 @@ class BatchGAAttainmentView(APIView):
         # ga_id -> list of individual student percentages (questions passed,
         # per student per course), restricted to this batch.
         ga_student_pcts = {}
+        # reg_no -> ga_id -> [questions passed, questions] over all their
+        # courses, for the per-student progress table (same rule as the QA
+        # "GA by Student" report: GA % = passed / total questions for the GA).
+        student_ga_totals = {}
         for ic in ic_qs:
             batch_students = [s for s in ic.students.all() if s.reg_no.strip().upper() in reg_nos]
             if not batch_students:
                 continue
             for g, pcts in _offering_ga_student_pcts(ic, batch_students).items():
                 ga_student_pcts.setdefault(g, []).extend(pcts)
+            ga_items = _ga_question_items(ic)[0]
+            for st in batch_students:
+                if not (list(st.marks.all()) or list(st.obe_marks.all())):
+                    continue   # unmarked roster rows don't count, as in _offering_ga_student_pcts
+                per_ga = student_ga_totals.setdefault(st.reg_no.strip().upper(), {})
+                for g, items in ga_items.items():
+                    t = per_ga.setdefault(g, [0, 0])
+                    t[0] += _ga_questions_passed(st, items, ATTAINMENT_THRESHOLD)
+                    t[1] += len(items)
+
+        students_data = []
+        for adm in students_qs.select_related('program').order_by('reg_no'):
+            per_ga = student_ga_totals.get(adm.reg_no.upper(), {})
+            students_data.append({
+                'regNo':       adm.reg_no,
+                'name':        adm.name,
+                'programCode': adm.program.code.upper() if adm.program else '',
+                'programName': adm.program.name if adm.program else '',
+                'gaScores':    {
+                    ga.ga_id: (round(per_ga[ga.ga_id][0] / per_ga[ga.ga_id][1] * 100, 1)
+                               if per_ga.get(ga.ga_id) and per_ga[ga.ga_id][1] else None)
+                    for ga in gas
+                },
+            })
 
         attributes = []
         for ga in gas:
@@ -2767,9 +2803,12 @@ class BatchGAAttainmentView(APIView):
             'batch':               batch,
             'departmentId':        dept_id,
             'programId':           program.code.lower() if program else None,
+            'programName':         program.name if program else None,
+            'departmentName':      department.name,
             'studentCount':        len(reg_nos),
             'attainmentThreshold': ATTAINMENT_THRESHOLD,
             'attributes':          attributes,
+            'students':            students_data,
         })
 
 
@@ -2960,18 +2999,53 @@ class CourseAttainmentView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        # Every offering of the course (term + instructor), before narrowing —
+        # the frontend fills its Term / Instructor pickers from this.
+        offerings = [
+            {
+                'id':           ic.pk,
+                'academicYear': ic.academic_year,
+                'instructorId': ic.instructor_id,
+                'instructor':   ic.instructor.user.get_full_name() or ic.instructor.user.username,
+            }
+            for ic in qs.select_related('instructor__user').order_by('academic_year', 'pk')
+        ]
+        if request.query_params.get('offeringsOnly'):
+            return Response({'courseCode': course_code, 'offerings': offerings})
+
+        academic_year = request.query_params.get('academicYear', '').strip()
+        instructor_id = request.query_params.get('instructorId', '').strip()
+        if academic_year:
+            qs = qs.filter(academic_year__iexact=academic_year)
+        if instructor_id.isdigit():
+            qs = qs.filter(instructor_id=int(instructor_id))
+        if not qs.exists():
+            return Response(
+                {'error': f'No offering of "{course_code}" for the selected term / instructor'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
         all_students  = []
         all_questions = []
         course_title  = ''
         prog_id_out   = program_id.lower() if program_id else None
         clo_scores_all = {}   # clo code -> [one % per student]
+        instructors    = []   # offering instructors, in order, de-duplicated
+        academic_years = []
+        program_obj    = None
 
-        for ic in qs.prefetch_related(
+        for ic in qs.select_related('instructor__user', 'program__department').prefetch_related(
             'students__obe_marks__question',
             'students__marks__unit_item__category',
             'obe_questions',
         ):
             course_title = ic.title
+            program_obj  = program_obj or ic.program
+            inst_name    = ic.instructor.user.get_full_name() or ic.instructor.user.username
+            if inst_name not in instructors:
+                instructors.append(inst_name)
+            if ic.academic_year and ic.academic_year not in academic_years:
+                academic_years.append(ic.academic_year)
             if not prog_id_out and ic.program:
                 prog_id_out = ic.program.code.lower()
             ic_questions = list(ic.obe_questions.all())
@@ -3057,6 +3131,12 @@ class CourseAttainmentView(APIView):
             'courseCode':          course_code,
             'courseTitle':         course_title,
             'programId':           prog_id_out,
+            'programName':         program_obj.name if program_obj else None,
+            'programCode':         program_obj.code.upper() if program_obj else None,
+            'departmentName':      program_obj.department.name if program_obj else None,
+            'instructors':         instructors,
+            'academicYears':       academic_years,
+            'offerings':           offerings,
             'attainmentThreshold': ATTAINMENT_THRESHOLD,
             'classSize':           class_size,
             'clos':                clos_result,
@@ -3652,7 +3732,7 @@ class StudentGAQuestionAttainmentView(APIView):
                           .select_related('course__instructor__user', 'course__program', 'course__catalog_course')
                           .prefetch_related('marks', 'obe_marks')
                           .order_by('course__academic_year', 'course__code'))
-        adm = AdmissionStudent.objects.filter(reg_no__iexact=reg_no).select_related('program').first()
+        adm = AdmissionStudent.objects.filter(reg_no__iexact=reg_no).select_related('program', 'department').first()
         if not enrolments and not adm:
             return Response({'error': f'Student "{reg_no}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -3675,6 +3755,8 @@ class StudentGAQuestionAttainmentView(APIView):
                 'courseCode': ic.code, 'courseTitle': ic.title, 'academicYear': ic.academic_year,
                 'status': ic.status,
                 'instructor': ic.instructor.user.get_full_name() or ic.instructor.user.username,
+                'creditHours': ic.credit_hours,
+                'grade': _get_grade(_sheet_course_total(cs)['total'], ic)[0],
                 'questionCount': graded_count, 'unmappedQuestionCount': unmapped,
                 'gas': per_ga,
             })
@@ -3690,6 +3772,13 @@ class StudentGAQuestionAttainmentView(APIView):
             'regNo': adm.reg_no if adm else (enrolments[0].reg_no if enrolments else reg_no),
             'name': adm.name if adm else (enrolments[0].name if enrolments else ''),
             'programId': adm.program.code.lower() if adm and adm.program_id else None,
+            'programCode': (adm.program.code.upper() if adm and adm.program_id
+                            else (enrolments[0].course.program.code.upper() if enrolments and enrolments[0].course.program else '')),
+            'programName': (adm.program.name if adm and adm.program_id
+                            else (enrolments[0].course.program.name if enrolments and enrolments[0].course.program else '')),
+            'departmentName': (adm.department.name if adm and adm.department_id
+                               else (enrolments[0].course.department.name if enrolments else '')),
+            'batch': adm.batch if adm else '',
             'questionPassThreshold': threshold,
             'gaAttainmentThreshold': threshold,
             'gas': gas_out,
@@ -3998,6 +4087,143 @@ class InstructorPerformanceView(APIView):
             })
 
         return Response({'departmentId': dept_id, 'instructors': result})
+
+
+class CLOCQIReportView(APIView):
+    """
+    GET /api/reports/clo-cqi/?departmentId=ee&programId=bsee&academicYear=Fall-2025&semester=3rd
+
+    CLO CQI (Continuous Quality Improvement) report — instructor-wise.
+    One entry per course offering with the number of students who passed /
+    failed each CLO (a student passes a CLO when their attainment on the
+    questions mapped to it is >= ATTAINMENT_THRESHOLD).
+
+    ?yearsOnly=1 returns just the academic years (for the term picker).
+
+    Response:
+    {
+      "departmentId": "ee",
+      "attainmentThreshold": 50.0,
+      "academicYears": ["Spring-2025", "Fall-2025", ...],
+      "courses": [
+        {
+          "courseCode": "EE-102", "courseTitle": "Linear Circuit Analysis",
+          "courseType": "Theory", "instructor": "Dr. ...",
+          "semester": "1st", "academicYear": "Fall-2025", "programCode": "BSEE",
+          "totalStudents": 27, "hasData": true,
+          "clos": [{ "code": "CLO-1", "description": "...", "passed": 18, "failed": 9 }]
+        }
+      ]
+    }
+    """
+    permission_classes = [IsStaffReport]
+
+    def get(self, request):
+        dept_id       = request.query_params.get('departmentId', '').strip()
+        program_id    = request.query_params.get('programId', '').strip()
+        academic_year = request.query_params.get('academicYear', '').strip()
+        semester      = request.query_params.get('semester', '').strip()
+
+        if not dept_id:
+            return Response({'error': 'departmentId is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            department = Department.objects.get(dept_id=dept_id)
+        except Department.DoesNotExist:
+            return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        base_qs = InstructorCourse.objects.filter(department=department)
+        if program_id:
+            base_qs = base_qs.filter(program__code__iexact=program_id)
+
+        def term_key(term):
+            # 'Spring-2025' < 'Fall-2025' < 'Spring-2026'; unknown formats sort last.
+            m = re.match(r'(spring|summer|fall)\D*(\d{4})', term, re.I)
+            return (int(m.group(2)), ['spring', 'summer', 'fall'].index(m.group(1).lower())) if m else (9999, 0)
+
+        academic_years = sorted({y for y in base_qs.values_list('academic_year', flat=True) if y}, key=term_key)
+        if request.query_params.get('yearsOnly'):
+            return Response({'departmentId': dept_id, 'academicYears': academic_years})
+
+        ic_qs = base_qs
+        if academic_year:
+            ic_qs = ic_qs.filter(academic_year__iexact=academic_year)
+        if semester:
+            ic_qs = ic_qs.filter(semester=semester)
+
+        offerings = list(
+            ic_qs.select_related('instructor__user', 'program')
+                 .prefetch_related('clos', 'obe_questions', 'students')
+                 .order_by('code', 'course_type')
+        )
+
+        # One query for every mark of every offering: { (student_pk, question_pk): score }
+        all_question_ids = [q.pk for ic in offerings for q in ic.obe_questions.all()]
+        score_of = {
+            (m.student_id, m.question_id): m.score
+            for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids)
+        }
+
+        def natural_key(code):
+            return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', str(code))]
+
+        courses_data = []
+        for ic in offerings:
+            questions = list(ic.obe_questions.all())
+            students  = list(ic.students.all())
+            descriptions = {c.code: c.description for c in ic.clos.all()}
+
+            clo_codes = set(descriptions)
+            for q in questions:
+                clo_codes.update(q.mapped_clos or [])
+
+            has_data = bool(questions) and any(
+                (st.pk, q.pk) in score_of for st in students for q in questions
+            )
+
+            clos_data = []
+            for code in sorted(clo_codes, key=natural_key):
+                clo_qs = [q for q in questions if code in (q.mapped_clos or [])]
+                total_max = sum(q.max_marks for q in clo_qs)
+                passed = failed = 0
+                if total_max > 0:
+                    for st in students:
+                        obtained = sum(score_of.get((st.pk, q.pk), 0.0) for q in clo_qs)
+                        if obtained / total_max * 100 >= ATTAINMENT_THRESHOLD:
+                            passed += 1
+                        else:
+                            failed += 1
+                clos_data.append({
+                    'code':        code,
+                    'description': descriptions.get(code, ''),
+                    'passed':      passed,
+                    'failed':      failed,
+                    'assessed':    total_max > 0,
+                })
+
+            user = ic.instructor.user
+            courses_data.append({
+                'id':            ic.pk,
+                'courseCode':    ic.code,
+                'courseTitle':   ic.title,
+                'courseType':    ic.course_type,
+                'instructor':    user.get_full_name() or user.username,
+                'semester':      ic.semester,
+                'academicYear':  ic.academic_year,
+                'programCode':   ic.program.code.upper() if ic.program else '',
+                'programName':   ic.program.name if ic.program else '',
+                'totalStudents': len(students),
+                'hasData':       has_data,
+                'clos':          clos_data,
+            })
+
+        return Response({
+            'departmentId':        dept_id,
+            'departmentName':      department.name,
+            'attainmentThreshold': ATTAINMENT_THRESHOLD,
+            'academicYears':       academic_years,
+            'courses':             courses_data,
+        })
 
 
 class CohortComparisonView(APIView):
