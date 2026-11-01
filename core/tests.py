@@ -202,17 +202,168 @@ class AuditRegressionTests(TestCase):
         self.assertEqual(again.status_code, 200, again.content)
         self.assertEqual(self.r1.marks.get(unit_item=self.unit).score, 7)
 
-    # ── Teachers see their latest term by date ───────────────────────────────
-    def test_teacher_sees_latest_term_by_date_not_alphabetically(self):
+    # ── Teachers see what they haven't handed in, whatever the term ──────────
+    def test_teacher_keeps_unsubmitted_course_when_new_term_starts(self):
         from core.models import InstructorCourse
         InstructorCourse.objects.create(
-            frontend_id='ic-old', instructor=self.pa, code='CS12', title='Course',
+            frontend_id='ic-new', instructor=self.pa, code='CS12', title='Course',
             department=self.dept, program=self.program, catalog_course=self.course,
-            academic_year='Spring-2023',
+            academic_year='Spring-2025',
         )
         r = self.client_for(self.ua).get('/api/instructor/courses/')
         self.assertEqual(r.status_code, 200, r.content)
-        self.assertEqual({c['academicYear'] for c in r.data}, {'Fall-2024'})
+        self.assertEqual({c['academicYear'] for c in r.data}, {'Fall-2024', 'Spring-2025'})
+
+    # ── Submitting final marks ───────────────────────────────────────────────
+    def _mark_absent(self, reg_no='R3', result_status='absent'):
+        return self.client_for(self.ua).patch('/api/instructor/courses/ic-a/student-status/',
+                                              {'regNo': reg_no, 'resultStatus': result_status}, format='json')
+
+    def _submit(self, **body):
+        return self.client_for(self.ua).post('/api/instructor/courses/ic-a/submit/', body, format='json')
+
+    def _second_quiz(self):
+        """Course now sets 2 quizzes; returns the second one's unit."""
+        self.cat.units = 2
+        self.cat.save()
+        self.unit.weightage = 50
+        self.unit.save()
+        return UnitItem.objects.create(category=self.cat, unit_no=2, total_marks=10, weightage=50, passing=5)
+
+    def test_missing_mark_blocks_until_student_marked_absent(self):
+        r = self._submit()
+        self.assertEqual(r.status_code, 400, r.content)
+        self.assertEqual(r.data['missing'], [{'regNo': 'R3', 'name': 'Three', 'items': ['Quiz 1']}])
+        self.assertEqual(self._mark_absent().status_code, 200)
+        self.assertEqual(self._submit().status_code, 200)
+
+    def test_quiz_nobody_was_marked_in_warns_and_can_be_accepted(self):
+        self._second_quiz()
+        self._mark_absent()
+        c = self.client_for(self.ua)
+        check = c.get('/api/instructor/courses/ic-a/submit/').data
+        self.assertEqual(check['missing'], [])
+        self.assertEqual(len(check['warnings']), 1)
+        self.assertIn('Quiz 2', check['warnings'][0])
+        self.assertEqual(self._submit().status_code, 409)                    # not accepted yet
+        self.assertEqual(self._submit(acknowledgeWarnings=True).status_code, 200)
+        self.ic.refresh_from_db()
+        self.assertIn('Quiz 2', self.ic.submission_warnings[0])
+
+    def test_student_missing_one_quiz_others_have_blocks(self):
+        from core.models import StudentMark
+        quiz2 = self._second_quiz()
+        self._mark_absent()
+        StudentMark.objects.create(student=self.r1, unit_item=quiz2, score=7)
+        check = self.client_for(self.ua).get('/api/instructor/courses/ic-a/submit/').data
+        self.assertEqual(check['warnings'], [])
+        self.assertEqual(check['missing'], [{'regNo': 'R2', 'name': 'Two', 'items': ['Quiz 2']}])
+
+    def test_all_zero_quiz_counts_as_not_marked(self):
+        from core.models import StudentMark
+        quiz2 = self._second_quiz()
+        self._mark_absent()
+        for s in (self.r1, self.r2):
+            StudentMark.objects.create(student=s, unit_item=quiz2, score=0)
+        check = self.client_for(self.ua).get('/api/instructor/courses/ic-a/submit/').data
+        self.assertEqual(len(check['warnings']), 1)
+
+    def test_submitted_course_is_read_only_and_moves_to_past_courses(self):
+        self._mark_absent()
+        self.assertEqual(self._submit().status_code, 200)
+        c = self.client_for(self.ua)
+        self.assertEqual(c.get('/api/instructor/courses/').data, [])
+        past = c.get('/api/instructor/past-courses/').data
+        self.assertEqual([(p['id'], p['state']) for p in past], [('ic-a', 'submitted')])
+        self.assertEqual({s['regNo']: s['grade'] for s in past[0]['students']}['R1'], self._grade_of_r1())
+        # Every way a teacher could still change it is refused.
+        self.assertEqual(self._save(None, 1).status_code, 400)
+        self.assertEqual(self.r1.marks.get(unit_item=self.unit).score, 8)
+        self.assertEqual(self._mark_absent('R2').status_code, 400)
+        self.assertEqual(self._submit().status_code, 400)
+        self.assertEqual(c.post('/api/instructor/courses/ic-a/students/',
+                                {'students': [{'regNo': 'R9', 'name': 'Nine'}]}, format='json').status_code, 400)
+        self.assertEqual(c.post('/api/instructor/courses/ic-a/clos/', {'code': 'CLO-9'}, format='json').status_code, 400)
+        self.assertEqual(c.delete('/api/instructor/courses/ic-a/').status_code, 400)
+        # The admin can't change the roster under it either.
+        self.assertEqual(self.client_for(self.da).post('/api/admin/enroll/', {'courseId': 'ic-a', 'students': []},
+                                                       format='json').status_code, 400)
+
+    def _grade_of_r1(self):
+        from core.views import _get_grade, _sheet_course_total
+        return _get_grade(_sheet_course_total(self.r1)['total'], self.ic)[0]
+
+    def test_other_teacher_cannot_submit(self):
+        c = self.client_for(self.ub)
+        self.assertEqual(c.post('/api/instructor/courses/ic-a/submit/', {}, format='json').status_code, 404)
+        self.assertEqual(c.patch('/api/instructor/courses/ic-a/student-status/',
+                                 {'regNo': 'R3', 'resultStatus': 'absent'}, format='json').status_code, 404)
+
+    def test_admin_sends_back_with_note_and_teacher_can_edit_again(self):
+        self._mark_absent()
+        self._submit()
+        admin = self.client_for(self.da)
+        self.assertEqual(admin.post('/api/admin/return-course/', {'courseId': 'ic-a'}, format='json').status_code, 400)
+        r = admin.post('/api/admin/return-course/', {'courseId': 'ic-a', 'note': 'Quiz 1 looks wrong'}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        teacher = self.client_for(self.ua).get('/api/instructor/courses/').data
+        self.assertEqual(teacher[0]['returnNote'], 'Quiz 1 looks wrong')
+        self.assertIsNone(teacher[0]['submittedAt'])
+        self.assertEqual(self._save(teacher[0]['updatedAt'], 9).status_code, 200)
+        self.assertEqual(self._submit().status_code, 200)
+        self.ic.refresh_from_db()
+        self.assertEqual(self.ic.return_note, '')
+
+    def test_other_department_admin_cannot_send_back(self):
+        from core.models import DeptAdminProfile
+        other = Department.objects.create(dept_id='EE', name='Electrical')
+        u = User.objects.create(username='ee@x.com', email='ee@x.com', role='dept_admin')
+        DeptAdminProfile.objects.create(user=u, employee_id='DA2', department=other)
+        self._mark_absent()
+        self._submit()
+        r = self.client_for(u).post('/api/admin/return-course/', {'courseId': 'ic-a', 'note': 'x'}, format='json')
+        self.assertEqual(r.status_code, 403)
+
+    def test_finalize_without_submission_needs_explicit_override(self):
+        admin = self.client_for(self.da)
+        r = admin.post('/api/admin/finalize-course/', {'courseId': 'ic-a'}, format='json')
+        self.assertEqual(r.status_code, 409, r.content)
+        self.assertEqual(r.data['code'], 'not_submitted')
+        self.ic.refresh_from_db()
+        self.assertEqual(self.ic.status, 'active')
+        r = admin.post('/api/admin/finalize-course/', {'courseId': 'ic-a', 'overrideNotSubmitted': True}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(self.client_for(self.ua).get('/api/instructor/past-courses/').data[0]['state'], 'finalized')
+
+    def test_finalized_course_cannot_be_sent_back(self):
+        self._mark_absent()
+        self._submit()
+        admin = self.client_for(self.da)
+        self.assertEqual(admin.post('/api/admin/finalize-course/', {'courseId': 'ic-a'}, format='json').status_code, 200)
+        r = admin.post('/api/admin/return-course/', {'courseId': 'ic-a', 'note': 'x'}, format='json')
+        self.assertEqual(r.status_code, 400)
+
+    def test_withdrawn_student_gets_w_and_leaves_gpa_and_reports(self):
+        from core.models import FinalResult, Student
+        self._mark_absent('R2', 'withdrawn')
+        self._mark_absent('R3', 'absent')
+        self.assertEqual(self._submit().status_code, 200)
+        # R1 passed, R3 absent with no marks is skipped, R2 withdrawn is out -> 100%, not 50%.
+        ga = self.client_for(self.qa).get('/api/reports/program-ga-attainment/?programId=cs').data['attributes'][0]
+        self.assertEqual(ga['averageAttainment'], 100.0)
+        attainment = self.client_for(self.qa).get('/api/reports/course-attainment/?courseCode=CS12&programId=cs').data
+        self.assertEqual(attainment['classSize'], 2)                         # R1 and R3
+
+        self.assertEqual(self.client_for(self.da).post('/api/admin/finalize-course/', {'courseId': 'ic-a'},
+                                                       format='json').status_code, 200)
+        w = FinalResult.objects.get(student_reg_no='R2')
+        self.assertEqual((w.grade_letter, w.grade_points, w.clo_attainments), ('W', 0.0, []))
+        self.assertEqual(FinalResult.objects.get(student_reg_no='R3').grade_letter, 'F')
+
+        su = User.objects.create(username='r2@x.com', email='r2@x.com', role='student')
+        Student.objects.create(user=su, reg_no='R2', program=self.program, department=self.dept)
+        courses = self.client_for(su).get('/api/student/courses/').data
+        self.assertEqual(courses[0]['grade'], 'W')
 
     # ── GA reports use questions passed and skip unmarked students ───────────
     def test_program_ga_uses_questions_passed_and_skips_unmarked(self):

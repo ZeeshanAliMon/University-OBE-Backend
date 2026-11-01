@@ -785,19 +785,12 @@ class InstructorCourseView(APIView):
                     obj.save(update_fields=['catalog_course'])
 
 
-            all_ics = InstructorCourse.objects.filter(instructor=profile)
-
-            # Latest by date, not alphabetically ("Spring-2023" sorts after
-            # "Fall-2024" as text, which hid every newer offering).
-            terms = set(
-                all_ics.exclude(academic_year='')
-                .values_list('academic_year', flat=True)
+            # Every course not handed in yet, whatever its term: an unfinished
+            # course stays when a new term starts, and a submitted one goes
+            # (see InstructorPastCoursesView).
+            all_ics = InstructorCourse.objects.filter(
+                instructor=profile, status='active', submitted_at__isnull=True
             )
-            latest_term = max(terms, key=_term_sort_key) if terms else None
-
-
-            if latest_term:
-                all_ics = all_ics.filter(academic_year__iexact=latest_term)
 
             qs = prefetch_instructor_course(all_ics.order_by('created_at'))
 
@@ -832,15 +825,13 @@ class InstructorCourseView(APIView):
             dept_id     = c.get('departmentId', '')
             program_id  = c.get('programId')
 
-            # Closed courses are read-only — reject any edit attempt
+            # Submitted and closed courses are read-only — reject any edit attempt
             existing = InstructorCourse.objects.filter(
                 instructor=profile, frontend_id=frontend_id
             ).first()
-            if existing and existing.status == 'closed':
-                errors.append({
-                    'index': idx,
-                    'error': f'Course "{frontend_id}" is closed (finalized {existing.closed_at}) and cannot be edited.'
-                })
+            lock = _teacher_lock_message(existing) if existing else None
+            if lock:
+                errors.append({'index': idx, 'error': lock})
                 continue
 
             # Refuse an older copy: if the course was saved after the version
@@ -1199,9 +1190,9 @@ class InstructorCourseView(APIView):
         except InstructorCourse.DoesNotExist:
             return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        if ic.status == 'closed':
+        if ic.status == 'closed' or ic.submitted_at:
             return Response(
-                {'error': 'Cannot delete a closed/finalized course.'},
+                {'error': 'Cannot delete a submitted or finalized course.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1560,6 +1551,8 @@ class CourseAssignmentView(APIView):
                     'programName': a.program.name if a.program else None,
                     'academicYear': a.academic_year or '',
                     'status': ic.status if ic else 'active',
+                    'submittedAt': ic.submitted_at if ic else None,
+                    'submissionWarnings': ic.submission_warnings if ic else [],
                     'students': [
                         {'regNo': st.reg_no, 'name': st.name}
                         for st in (ic.students.all() if ic else [])
@@ -2210,6 +2203,8 @@ class StudentCoursesView(APIView):
             final_grade   = grade_letter if has_any_marks else None
             final_points  = grade_points if has_any_marks else None
             final_pct     = total_percentage if has_any_marks else None
+            if enrollment.result_status == 'withdrawn':
+                final_grade, final_points = 'W', 0.0
 
             result.append({
                 'id':                ic.frontend_id,
@@ -2502,7 +2497,7 @@ class ProgramGAAttainmentView(APIView):
         course_title_map = {}
         program_reg_nos  = set()   # marked students across the programme
         for ic in instructor_courses:
-            students = list(ic.students.all())
+            students = _graded_students(ic)
             if not students:
                 continue
             program_reg_nos.update(
@@ -2610,7 +2605,7 @@ class ProgramGAAttainmentBySemesterView(APIView):
 
         course_ga_pcts = {}   # code -> ga_id -> [student percent]
         for ic in instructor_courses:
-            students = list(ic.students.all())
+            students = _graded_students(ic)
             if not students:
                 continue
             for g, pcts in _offering_ga_student_pcts(ic, students).items():
@@ -2754,7 +2749,7 @@ class BatchGAAttainmentView(APIView):
         # "GA by Student" report: GA % = passed / total questions for the GA).
         student_ga_totals = {}
         for ic in ic_qs:
-            batch_students = [s for s in ic.students.all() if s.reg_no.strip().upper() in reg_nos]
+            batch_students = [s for s in _graded_students(ic) if s.reg_no.strip().upper() in reg_nos]
             if not batch_students:
                 continue
             for g, pcts in _offering_ga_student_pcts(ic, batch_students).items():
@@ -2863,7 +2858,7 @@ class StudentGAAttainmentView(APIView):
 
         course_students = CourseStudent.objects.filter(
             reg_no__iexact=reg_no
-        ).select_related('course__program').prefetch_related(
+        ).exclude(result_status='withdrawn').select_related('course__program').prefetch_related(
             'obe_marks__question',
             'marks__unit_item__category',
             'course__obe_questions',
@@ -3055,7 +3050,7 @@ class CourseAttainmentView(APIView):
             # pooling every section's questions into one denominator made a
             # student who earned 58% on their section read as 29%, i.e. CLO
             # attainment was divided by the number of sections.
-            for student in ic.students.all():
+            for student in _graded_students(ic):
                 all_students.append(student)
                 for clo, pct in _clo_attainments_for_student(student, ic_questions).items():
                     clo_scores_all.setdefault(clo, []).append(pct)
@@ -3214,6 +3209,9 @@ class StudentSummaryView(APIView):
             exact_pct   = _sheet_course_total(cs)['total']
             student_pct = round(exact_pct, 2)
             grade_letter, grade_points = _get_grade(exact_pct, ic)
+            withdrawn = cs.result_status == 'withdrawn'
+            if withdrawn:
+                grade_letter, grade_points = 'W', 0.0
 
 
             questions = list(ic.obe_questions.all())
@@ -3244,8 +3242,9 @@ class StudentSummaryView(APIView):
             ]
 
             credit_hours         = ic.credit_hours
-            total_credit_points += grade_points * credit_hours
-            total_credits       += credit_hours
+            if not withdrawn:   # W is on the record but not in the GPA
+                total_credit_points += grade_points * credit_hours
+                total_credits       += credit_hours
 
             enrolled_courses.append({
                 'courseCode':   ic.code,
@@ -3387,6 +3386,8 @@ class CLOListView(APIView):
         course = self._get_course(request, frontend_id)
         if not course:
             return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.role == 'instructor' and _teacher_lock_message(course):
+            return Response({'error': _teacher_lock_message(course)}, status=status.HTTP_400_BAD_REQUEST)
 
         ws = CLOWriteSerializer(data=request.data)
         if not ws.is_valid():
@@ -3470,6 +3471,8 @@ class CLODetailView(APIView):
         clo = self._get(request, frontend_id, clo_id)
         if not clo:
             return Response({'error': 'CLO not found'}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.role == 'instructor' and _teacher_lock_message(clo.course):
+            return Response({'error': _teacher_lock_message(clo.course)}, status=status.HTTP_400_BAD_REQUEST)
 
         data = request.data
         if 'description' in data:
@@ -3498,6 +3501,8 @@ class CLODetailView(APIView):
         clo = self._get(request, frontend_id, clo_id)
         if not clo:
             return Response({'error': 'CLO not found'}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.role == 'instructor' and _teacher_lock_message(clo.course):
+            return Response({'error': _teacher_lock_message(clo.course)}, status=status.HTTP_400_BAD_REQUEST)
         clo.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -3644,7 +3649,7 @@ class CourseGAStudentAttainmentView(APIView):
         offerings = []
         course_title = ''
         for ic in qs.order_by('-academic_year', 'id'):
-            students = list(ic.students.prefetch_related('marks', 'obe_marks').order_by('reg_no'))
+            students = list(ic.students.exclude(result_status='withdrawn').prefetch_related('marks', 'obe_marks').order_by('reg_no'))
             if not students:
                 continue
             course_title = course_title or ic.title
@@ -3728,7 +3733,7 @@ class StudentGAQuestionAttainmentView(APIView):
         reg_no = request.query_params.get('regNo', '').strip()
         if not reg_no:
             return Response({'error': 'regNo is required'}, status=status.HTTP_400_BAD_REQUEST)
-        enrolments = list(CourseStudent.objects.filter(reg_no__iexact=reg_no)
+        enrolments = list(CourseStudent.objects.filter(reg_no__iexact=reg_no).exclude(result_status='withdrawn')
                           .select_related('course__instructor__user', 'course__program', 'course__catalog_course')
                           .prefetch_related('marks', 'obe_marks')
                           .order_by('course__academic_year', 'course__code'))
@@ -3846,7 +3851,7 @@ class COAttainmentSummaryView(APIView):
             # Build mark lookup once per course: { question_pk: [scores] }
             all_questions = list(ic.obe_questions.all())
             q_marks = {}
-            for m in OBEStudentMark.objects.filter(question__in=all_questions).select_related('question'):
+            for m in OBEStudentMark.objects.filter(question__in=all_questions).exclude(student__result_status='withdrawn').select_related('question'):
                 q_marks.setdefault(m.question_id, []).append(m.score)
 
             clos_data = []
@@ -3937,7 +3942,7 @@ class POAttainmentView(APIView):
         # ...and every OBE mark for any question in any of those courses, once.
         all_question_ids = [q.pk for ic in courses for q in ic.obe_questions.all()]
         marks_by_question = {}
-        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids):
+        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids).exclude(student__result_status='withdrawn'):
             marks_by_question.setdefault(m.question_id, []).append(m.score)
 
         # Everything below this point is in-memory — no more queries.
@@ -4047,7 +4052,7 @@ class InstructorPerformanceView(APIView):
             for q in ic.obe_questions.all()
         ]
         marks_by_question = {}
-        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids):
+        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids).exclude(student__result_status='withdrawn'):
             marks_by_question.setdefault(m.question_id, []).append(m.score)
 
         result = []
@@ -4165,7 +4170,7 @@ class CLOCQIReportView(APIView):
         all_question_ids = [q.pk for ic in offerings for q in ic.obe_questions.all()]
         score_of = {
             (m.student_id, m.question_id): m.score
-            for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids)
+            for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids).exclude(student__result_status='withdrawn')
         }
 
         def natural_key(code):
@@ -4174,7 +4179,7 @@ class CLOCQIReportView(APIView):
         courses_data = []
         for ic in offerings:
             questions = list(ic.obe_questions.all())
-            students  = list(ic.students.all())
+            students  = _graded_students(ic)
             descriptions = {c.code: c.description for c in ic.clos.all()}
 
             clo_codes = set(descriptions)
@@ -4273,7 +4278,7 @@ class CohortComparisonView(APIView):
         # was one OBEStudentMark query per (course, CLO) pair. Batch once.
         all_question_ids = [q.pk for ic in courses for q in ic.obe_questions.all()]
         marks_by_question = {}
-        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids):
+        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids).exclude(student__result_status='withdrawn'):
             marks_by_question.setdefault(m.question_id, []).append(m.score)
 
         # Group by academic_year
@@ -4352,7 +4357,7 @@ class AtRiskStudentsView(APIView):
                 for obe_mark in student.obe_marks.all():
                     mark_lookup[(student.pk, obe_mark.question_id)] = obe_mark.score
 
-            for student in ic.students.all():
+            for student in _graded_students(ic):
                 for clo in ic.clos.all():
                     questions = [q for q in all_questions if clo.code in (q.mapped_clos or [])]
                     total_p   = sum(q.max_marks for q in questions)
@@ -4442,7 +4447,7 @@ class GapAnalysisView(APIView):
             all_question_ids.update(q.pk for q in matched)
 
         marks_by_question = {}
-        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids):
+        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids).exclude(student__result_status='withdrawn'):
             marks_by_question.setdefault(m.question_id, []).append(m.score)
 
         for ga in gas:
@@ -4764,6 +4769,11 @@ class StudentEnrollmentView(APIView):
                 {'error': f'Course "{course_id}" is closed (finalized {ic.closed_at}) — enrollment cannot be changed.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        if ic.submitted_at:
+            return Response(
+                {'error': f'Final marks for "{course_id}" have been submitted — send the course back before changing enrollment.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # True sync / idempotent overwrite:
         # The incoming list IS the desired roster. Add new students, remove
@@ -4844,6 +4854,11 @@ class StudentEnrollmentView(APIView):
         if ic.status == 'closed':
             return Response(
                 {'error': f'Course "{course_id}" is closed (finalized {ic.closed_at}) — enrollment cannot be changed.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if ic.submitted_at:
+            return Response(
+                {'error': f'Final marks for "{course_id}" have been submitted — send the course back before changing enrollment.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -5012,6 +5027,14 @@ class FinalizeCourseView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # The admin must say so explicitly to close a course the teacher hasn't
+        # handed in (e.g. a teacher who has left). Marks may be incomplete.
+        if not ic.submitted_at and request.data.get('overrideNotSubmitted') is not True:
+            return Response(
+                {'error': 'The teacher has not submitted final marks for this course.', 'code': 'not_submitted'},
+                status=status.HTTP_409_CONFLICT
+            )
+
         # ── Validation gate ──────────────────────────────────────────────────
         # Closing is irreversible via API — once FinalResult rows are written
         # and the course is locked, there is no API path back. So we refuse
@@ -5019,33 +5042,7 @@ class FinalizeCourseView(APIView):
         # internally inconsistent. The frontend enforces these same rules in
         # its UI, but the backend must never trust that and must re-verify
         # before permanently committing a grade.
-        validation_errors = []
-
-        categories = list(ic.catalog_course.markscategories.all()) if ic.catalog_course_id else []
-        if not categories:
-            validation_errors.append('Course has no marks categories defined.')
-        else:
-            cat_total = round(sum(c.percentage for c in categories), 2)
-            if cat_total != 100:
-                validation_errors.append(
-                    f'Category percentages sum to {cat_total}%, not 100%.'
-                )
-
-            for cat in categories:
-                units = list(cat.unit_items.all())
-                if cat.percentage > 0 and not units:
-                    validation_errors.append(
-                        f'Category "{cat.name}" has {cat.percentage}% weight but no units defined.'
-                    )
-                elif units:
-                    unit_total = round(sum(u.weightage for u in units), 2)
-                    if unit_total != 100:
-                        validation_errors.append(
-                            f'Category "{cat.name}" unit weightages sum to {unit_total}%, not 100%.'
-                        )
-
-        if not ic.students.exists():
-            validation_errors.append('Course has no enrolled students to finalize.')
+        validation_errors = _grading_structure_errors(ic)
 
         if validation_errors:
             return Response(
@@ -5102,6 +5099,9 @@ class FinalizeCourseView(APIView):
                     }
                     for clo, pct_val in sorted(clo_pcts_raw.items())
                 ]
+                if student.result_status == 'withdrawn':
+                    # On the record as W, without a grade or attainment.
+                    grade_letter, grade_points, clo_attainments = 'W', 0.0, []
 
                 result, _ = FinalResult.objects.update_or_create(
                     student_reg_no=student.reg_no,
@@ -5216,6 +5216,266 @@ class FinalResultsView(APIView):
         return Response({'results': results, 'count': len(results)})
 
 
+def _graded_students(ic):
+    """Roster rows that count in attainment reports: withdrawn students don't."""
+    return [s for s in ic.students.all() if s.result_status != 'withdrawn']
+
+
+def _teacher_lock_message(ic):
+    """Why the teacher can't edit this course, or None while they still can."""
+    if ic.status == 'closed':
+        return f'Course "{ic.code}" is closed (finalized {ic.closed_at}) and cannot be edited.'
+    if ic.submitted_at:
+        return f'Final marks for "{ic.code}" have been submitted and cannot be edited unless the department sends the course back.'
+    return None
+
+
+def _grading_structure_errors(ic):
+    """Problems in the marking structure that make a course impossible to grade."""
+    errors = []
+    categories = list(ic.catalog_course.markscategories.all()) if ic.catalog_course_id else []
+    if not categories:
+        errors.append('Course has no marks categories defined.')
+    else:
+        cat_total = round(sum(c.percentage for c in categories), 2)
+        if cat_total != 100:
+            errors.append(f'Category percentages sum to {cat_total}%, not 100%.')
+
+        for cat in categories:
+            units = list(cat.unit_items.all())
+            if cat.percentage > 0 and not units:
+                errors.append(f'Category "{cat.name}" has {cat.percentage}% weight but no units defined.')
+            elif units:
+                unit_total = round(sum(u.weightage for u in units), 2)
+                if unit_total != 100:
+                    errors.append(f'Category "{cat.name}" unit weightages sum to {unit_total}%, not 100%.')
+
+    if not ic.students.exists():
+        errors.append('Course has no enrolled students to finalize.')
+    return errors
+
+
+def _submission_check(ic):
+    """
+    What stands between a teacher and submitting final marks.
+
+    errors  - the marking structure is broken. Blocks.
+    missing - a student has no mark in an assessment other students were marked
+              in. Blocks until the mark is entered or the student is marked
+              absent or withdrawn.
+    warnings - an assessment nobody has a mark in (4 quizzes set, 3 marked). The
+              teacher probably forgot it, but may not have, so they can accept
+              this and it counts as 0.
+
+    A stored 0 is a mark: the sheet can't tell a real 0 from a cleared cell.
+    Uses the same marks as _sheet_course_total, so what passes here is what gets graded.
+    """
+    students = list(ic.students.all())
+    to_grade = [s for s in students if not s.result_status]
+    unit_marks = {s.pk: {m.unit_item_id: m.score for m in s.marks.all()} for s in to_grade}
+    question_marks = {s.pk: {m.question_id: m.score for m in s.obe_marks.all()} for s in to_grade}
+
+    missing = {}
+    warnings = []
+    for cat in (ic.catalog_course.markscategories.all() if ic.catalog_course_id else []):
+        if not (cat.percentage > 0):
+            continue
+        units_by_no = {ui.unit_no: ui for ui in cat.unit_items.all()}
+        for unit_no in range(1, cat.units + 1):
+            ui = units_by_no.get(unit_no)
+            questions = [q for q in ui.questions.all() if q.course_id == ic.id] if ui else []
+            label = f'{cat.name} {unit_no}'
+
+            def entered(student):
+                if not questions:
+                    return [unit_marks[student.pk].get(ui.id) if ui else None]
+                rows = [question_marks[student.pk].get(q.id) for q in questions]
+                if len(questions) == 1 and rows[0] is None:
+                    rows = [unit_marks[student.pk].get(ui.id)]   # single-question unit: unit mark, as the sheet does
+                return rows
+
+            rows_by_student = [(s, entered(s)) for s in to_grade]
+            if to_grade and not any(float(v) > 0 for _, rows in rows_by_student for v in rows if v is not None):
+                warnings.append(f'{label}: no student has a mark. If you submit, it counts as 0 for everyone.')
+                continue
+            for s, rows in rows_by_student:
+                if any(v is None for v in rows):
+                    missing.setdefault(s.reg_no, {'regNo': s.reg_no, 'name': s.name, 'items': []})['items'].append(label)
+
+    return {
+        'courseId':     ic.frontend_id,
+        'code':         ic.code,
+        'title':        ic.title,
+        'academicYear': ic.academic_year,
+        'errors':       _grading_structure_errors(ic),
+        'missing':      list(missing.values()),
+        'warnings':     warnings,
+        'students':     [{'regNo': s.reg_no, 'name': s.name, 'resultStatus': s.result_status} for s in students],
+    }
+
+
+class InstructorCourseSubmitView(APIView):
+    """
+    GET  /api/instructor/courses/<frontend_id>/submit/
+         What would stop this course being submitted (see _submission_check).
+    POST /api/instructor/courses/<frontend_id>/submit/  { "acknowledgeWarnings": true }
+         Hands in final marks: the course becomes read-only for the teacher and
+         leaves their dashboard. No grades are written; finalizing does that.
+    """
+    permission_classes = [IsInstructor]
+
+    def _course(self, request, frontend_id):
+        profile = get_instructor_profile(request.user)
+        if not profile:
+            return None
+        return prefetch_instructor_course(
+            InstructorCourse.objects.filter(instructor=profile, frontend_id=frontend_id)
+        ).first()
+
+    def get(self, request, frontend_id):
+        ic = self._course(request, frontend_id)
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(_submission_check(ic))
+
+    def post(self, request, frontend_id):
+        ic = self._course(request, frontend_id)
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        lock = _teacher_lock_message(ic)
+        if lock:
+            return Response({'error': lock}, status=status.HTTP_400_BAD_REQUEST)
+
+        check = _submission_check(ic)
+        if check['errors'] or check['missing']:
+            return Response({'error': 'Some marks are still missing.', **check}, status=status.HTTP_400_BAD_REQUEST)
+        if check['warnings'] and request.data.get('acknowledgeWarnings') is not True:
+            return Response({'error': 'Please review the warnings before submitting.', **check},
+                            status=status.HTTP_409_CONFLICT)
+
+        ic.submitted_at = timezone.now()
+        ic.submission_warnings = check['warnings']
+        ic.returned_at = None
+        ic.return_note = ''
+        ic.save(update_fields=['submitted_at', 'submission_warnings', 'returned_at', 'return_note', 'updated_at'])
+        return Response({'courseId': ic.frontend_id, 'submittedAt': ic.submitted_at})
+
+
+class InstructorStudentStatusView(APIView):
+    """
+    PATCH /api/instructor/courses/<frontend_id>/student-status/
+          { "regNo": "...", "resultStatus": "" | "absent" | "withdrawn" }
+    """
+    permission_classes = [IsInstructor]
+
+    def patch(self, request, frontend_id):
+        profile = get_instructor_profile(request.user)
+        ic = InstructorCourse.objects.filter(instructor=profile, frontend_id=frontend_id).first() if profile else None
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        lock = _teacher_lock_message(ic)
+        if lock:
+            return Response({'error': lock}, status=status.HTTP_400_BAD_REQUEST)
+
+        result_status = request.data.get('resultStatus', '')
+        if result_status not in dict(CourseStudent.RESULT_STATUS_CHOICES):
+            return Response({'error': 'resultStatus must be blank, "absent" or "withdrawn"'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        reg_no = str(request.data.get('regNo', '')).strip()
+        updated = CourseStudent.objects.filter(course=ic, reg_no__iexact=reg_no).update(result_status=result_status)
+        if not updated:
+            return Response({'error': f'Student "{reg_no}" is not in this course'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'regNo': reg_no, 'resultStatus': result_status})
+
+
+class InstructorPastCoursesView(APIView):
+    """
+    GET /api/instructor/past-courses/
+
+    The teacher's submitted and finalized courses, newest term first, read-only.
+    A finalized course shows its transcript snapshot; a submitted one is still
+    computed from its marks.
+    """
+    permission_classes = [IsInstructor]
+
+    def get(self, request):
+        profile = get_instructor_profile(request.user)
+        if not profile:
+            return Response({'error': 'Instructor profile not found'}, status=status.HTTP_403_FORBIDDEN)
+
+        offerings = InstructorCourse.objects.filter(
+            models.Q(status='closed') | models.Q(submitted_at__isnull=False),
+            instructor=profile,
+        ).select_related('program', 'catalog_course').prefetch_related(
+            *SHEET_TOTAL_PREFETCH, 'grade_scale', 'final_results',
+        )
+
+        data = []
+        for ic in sorted(offerings, key=lambda c: _term_sort_key(c.academic_year), reverse=True):
+            finals = {r.student_reg_no.strip().upper(): r for r in ic.final_results.all()}
+            rows = []
+            for st in ic.students.all():
+                final = finals.get(st.reg_no.strip().upper())
+                if final:
+                    pct, grade = final.final_percentage, final.grade_letter
+                else:
+                    total = _sheet_course_total(st)['total']
+                    pct = round(total, 2)
+                    grade = 'W' if st.result_status == 'withdrawn' else _get_grade(total, ic)[0]
+                rows.append({
+                    'regNo': st.reg_no, 'name': st.name, 'resultStatus': st.result_status,
+                    'percentage': pct, 'grade': grade,
+                })
+            data.append({
+                'id':           ic.frontend_id,
+                'code':         ic.code,
+                'title':        ic.title,
+                'programCode':  ic.program.code.upper() if ic.program else '',
+                'academicYear': ic.academic_year,
+                'state':        'finalized' if ic.status == 'closed' else 'submitted',
+                'submittedAt':  ic.submitted_at,
+                'closedAt':     ic.closed_at,
+                'students':     rows,
+            })
+        return Response(data)
+
+
+class ReturnCourseView(APIView):
+    """
+    POST /api/admin/return-course/  { "courseId": "...", "note": "..." }
+
+    Sends a submitted course back to its teacher to correct. Not possible once
+    the course is finalized: transcripts exist by then.
+    """
+    permission_classes = [IsDeptAdminOrQA]
+
+    def post(self, request):
+        course_id = str(request.data.get('courseId', '')).strip()
+        note = str(request.data.get('note', '')).strip()
+        if not note:
+            return Response({'error': 'Please say what the teacher needs to fix.'}, status=status.HTTP_400_BAD_REQUEST)
+        ic = InstructorCourse.objects.filter(frontend_id=course_id).first()
+        if not ic:
+            return Response({'error': f'Course "{course_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.role == 'dept_admin':
+            admin_dept = get_admin_department(request.user)
+            if not admin_dept or ic.department_id != admin_dept.id:
+                return Response({'error': 'You can only send back courses in your own department.'},
+                                status=status.HTTP_403_FORBIDDEN)
+        if ic.status == 'closed':
+            return Response({'error': 'This course is already finalized and cannot be sent back.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not ic.submitted_at:
+            return Response({'error': 'This course has not been submitted.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ic.submitted_at = None
+        ic.submission_warnings = []
+        ic.returned_at = timezone.now()
+        ic.return_note = note
+        ic.save(update_fields=['submitted_at', 'submission_warnings', 'returned_at', 'return_note', 'updated_at'])
+        return Response({'courseId': ic.frontend_id, 'returnedAt': ic.returned_at})
+
+
 class InstructorCourseStudentView(APIView):
     """
     POST /api/instructor/courses/<frontend_id>/students/
@@ -5252,11 +5512,9 @@ class InstructorCourseStudentView(APIView):
             return Response({'error': 'Course not found'},
                             status=status.HTTP_404_NOT_FOUND)
 
-        if ic.status == 'closed':
-            return Response(
-                {'error': f'Course is closed (finalized {ic.closed_at}) — students cannot be added.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        lock = _teacher_lock_message(ic)
+        if lock:
+            return Response({'error': lock}, status=status.HTTP_400_BAD_REQUEST)
 
         students = request.data.get('students', [])
         if not isinstance(students, list) or not students:

@@ -355,6 +355,13 @@ class InstructorCourse(models.Model):
         'User', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='closed_courses'
     )
+    # Teacher handed in final marks: read-only for the teacher and off their
+    # dashboard, waiting for the admin to finalize or send it back.
+    submitted_at        = models.DateTimeField(null=True, blank=True)
+    # Warnings the teacher saw and accepted when submitting, shown to the admin.
+    submission_warnings = models.JSONField(default=list, blank=True)
+    returned_at         = models.DateTimeField(null=True, blank=True)
+    return_note         = models.TextField(blank=True, default='')
 
     created_at              = models.DateTimeField(auto_now_add=True)
     updated_at              = models.DateTimeField(auto_now=True)
@@ -509,6 +516,14 @@ class CourseStudent(models.Model):
     )
     reg_no = models.CharField(max_length=60, db_index=True)
     name   = models.CharField(max_length=200, blank=True)
+    # '' = graded normally. Absent: marks they don't have count as 0.
+    # Withdrawn: grade W, left out of GPA and of attainment reports.
+    RESULT_STATUS_CHOICES = [
+        ('', 'Regular'),
+        ('absent', 'Absent'),
+        ('withdrawn', 'Withdrawn'),
+    ]
+    result_status = models.CharField(max_length=10, choices=RESULT_STATUS_CHOICES, blank=True, default='')
 
     class Meta:
         verbose_name        = 'Course Student'

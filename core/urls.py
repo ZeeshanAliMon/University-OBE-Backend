@@ -35,6 +35,8 @@ from .views import (
     AdmissionStudentListView, AdmissionStudentDetailView,
     CLOListView, CLODetailView,
     InstructorCourseStudentView,
+    InstructorCourseSubmitView, InstructorStudentStatusView, InstructorPastCoursesView,
+    ReturnCourseView,
     DeptAdminProfileView,
     # Reports
     ProgramGAAttainmentView,
@@ -73,12 +75,15 @@ urlpatterns = [
 
     path('instructor/profile/', InstructorProfileView.as_view(), name='instructor_profile'),
     path('instructor/courses/', InstructorCourseView.as_view(),  name='instructor_courses'),
+    path('instructor/past-courses/', InstructorPastCoursesView.as_view(), name='instructor_past_courses'),
     path('instructor/courses/<str:frontend_id>/', InstructorCourseView.as_view(), name='instructor_course_detail'),
 
     # CLO management per instructor course
     path('instructor/courses/<str:frontend_id>/clos/',           CLOListView.as_view(),   name='clo_list'),
     path('instructor/courses/<str:frontend_id>/clos/<int:clo_id>/', CLODetailView.as_view(), name='clo_detail'),
     path('instructor/courses/<str:frontend_id>/students/',         InstructorCourseStudentView.as_view(), name='instructor_course_students'),
+    path('instructor/courses/<str:frontend_id>/submit/',           InstructorCourseSubmitView.as_view(),  name='instructor_course_submit'),
+    path('instructor/courses/<str:frontend_id>/student-status/',   InstructorStudentStatusView.as_view(), name='instructor_student_status'),
 
     path('teachers/',                          TeacherListView.as_view(),          name='teacher_list'),
     path('admin/teachers/',                    TeacherOnboardingView.as_view(),    name='teacher_onboard'),
@@ -87,6 +92,7 @@ urlpatterns = [
     path('admin/course-assignments/', CourseAssignmentView.as_view(), name='course_assignments'),
     path('admin/enroll/',             StudentEnrollmentView.as_view(), name='student_enrollment'),
     path('admin/finalize-course/',    FinalizeCourseView.as_view(),    name='finalize_course'),
+    path('admin/return-course/',      ReturnCourseView.as_view(),      name='return_course'),
     path('reports/final-results/',    FinalResultsView.as_view(),      name='final_results'),
     path('admin/semester-plans/',     SemesterPlanView.as_view(),     name='semester_plans'),
 

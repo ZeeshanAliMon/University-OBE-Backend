@@ -252,10 +252,11 @@ class OBEQuestionSerializer(serializers.ModelSerializer):
 class CourseStudentSerializer(serializers.ModelSerializer):
     regNo         = serializers.CharField(source='reg_no')
     student_marks = serializers.SerializerMethodField()
+    resultStatus  = serializers.CharField(source='result_status', read_only=True)
 
     class Meta:
         model  = CourseStudent
-        fields = ['regNo', 'name', 'student_marks']
+        fields = ['regNo', 'name', 'student_marks', 'resultStatus']
 
     def get_student_marks(self, obj):
         """
@@ -309,6 +310,9 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
     # Version token: sent back on save so an older copy (another tab or
     # computer) can't overwrite newer marks. See InstructorCourseView.post.
     updatedAt             = serializers.DateTimeField(source='updated_at', read_only=True)
+    submittedAt           = serializers.DateTimeField(source='submitted_at', read_only=True)
+    returnedAt            = serializers.DateTimeField(source='returned_at', read_only=True)
+    returnNote            = serializers.CharField(source='return_note', read_only=True)
     courseType            = serializers.CharField(source='course_type')
     departmentId          = serializers.SerializerMethodField()
     departmentName        = serializers.CharField(source='department.name',  read_only=True)
@@ -350,7 +354,7 @@ class InstructorCourseSerializer(serializers.ModelSerializer):
             'selectedGradingSystem', 'customGradingSystem',
             'categories', 'unitsData', 'clos',
             'students', 'obeQuestions', 'obe_marks', 'obeMarks',
-            'status', 'updatedAt',
+            'status', 'updatedAt', 'submittedAt', 'returnedAt', 'returnNote',
         ]
 
     def get_departmentId(self, obj):
