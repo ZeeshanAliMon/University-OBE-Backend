@@ -100,6 +100,29 @@ def get_admin_department(user):
 
 
 
+def _marks_with_question():
+    """Each student's OBE marks with their question joined in. Prefetching
+    'students__obe_marks__question' instead sends every question id in one
+    IN (...), which SQLite rejects ("Expression tree is too large") once a query
+    covers a few terms of a program."""
+    return models.Prefetch('students__obe_marks', queryset=OBEStudentMark.objects.select_related('question'))
+
+
+def _marks_with_unit():
+    """Each student's unit marks with unit and category joined in, for the same reason."""
+    return models.Prefetch('students__marks', queryset=StudentMark.objects.select_related('unit_item__category'))
+
+
+def _offerings_in_semester(qs, program, semester):
+    """Offerings of one curriculum semester. They are created with a blank
+    semester, so a blank one is looked up in the program's semester plan."""
+    plan = SemesterPlan.objects.filter(program=program, semester=semester).first()
+    return qs.filter(
+        models.Q(semester=semester) |
+        models.Q(semester='', code__in=plan.course_codes if plan else [])
+    )
+
+
 def prefetch_instructor_course(qs):
     """Standard prefetch set for InstructorCourse querysets.
 
@@ -111,8 +134,8 @@ def prefetch_instructor_course(qs):
     return qs.select_related('department', 'program', 'catalog_course').prefetch_related(
         'grade_scale',
         'catalog_course__markscategories__unit_items__questions',
-        'students__marks__unit_item__category',
-        'students__obe_marks__question',
+        _marks_with_unit(),
+        _marks_with_question(),
         'obe_questions',
     )
 
@@ -181,13 +204,13 @@ class LoginView(APIView):
             try:
                 user_data['regNo']        = user.student_profile.reg_no
                 user_data['departmentId'] = user.student_profile.department.dept_id
-                # Current semester as set by Admission; the dashboard used to
+                # Current semester, from the reg number and date; the dashboard used to
                 # guess it from the batch in the reg number.
                 admitted = AdmissionStudent.objects.filter(
                     reg_no__iexact=user.student_profile.reg_no
                 ).first()
                 if admitted:
-                    user_data['semester'] = admitted.semester
+                    user_data['semester'] = admitted.current_semester
                     user_data['batch']    = admitted.batch
                 # Without this the student dashboard could never resolve the
                 # student's program, and fell back to hardcoded text
@@ -2709,10 +2732,12 @@ class BatchGAAttainmentView(APIView):
         # The batch code is a "-"-separated segment of reg_no. Two layouts are
         # in use: "<BATCH>-<PROGRAM>-<NUM>" (e.g. "SP23-BSCS-014") and the
         # university format "<CAMPUS>-<BATCH>-<NUM>" (e.g. "052-SP23-22144").
+        # A batch at the end ("22144-SP23") counts too.
         # A plain startswith only handled the first, so the second matched zero
         # students even though the frontend's batch picker offered "SP23".
         students_qs = AdmissionStudent.objects.filter(
-            models.Q(reg_no__istartswith=batch) | models.Q(reg_no__icontains=f'-{batch}-'),
+            models.Q(reg_no__istartswith=batch) | models.Q(reg_no__icontains=f'-{batch}-') |
+            models.Q(reg_no__iendswith=f'-{batch}'),
             department=department,
         )
         if program:
@@ -3032,8 +3057,8 @@ class CourseAttainmentView(APIView):
         program_obj    = None
 
         for ic in qs.select_related('instructor__user', 'program__department').prefetch_related(
-            'students__obe_marks__question',
-            'students__marks__unit_item__category',
+            _marks_with_question(),
+            _marks_with_unit(),
             'obe_questions',
         ):
             course_title = ic.title
@@ -3838,11 +3863,11 @@ class COAttainmentSummaryView(APIView):
 
         ic_qs = InstructorCourse.objects.filter(program=program).prefetch_related(
             'clos__mapped_ga',
-            'students__obe_marks__question',
+            _marks_with_question(),
             'obe_questions',
         )
         if semester:
-            ic_qs = ic_qs.filter(semester=semester)
+            ic_qs = _offerings_in_semester(ic_qs, program, semester)
         # Also support filtering by academicYear query param
         academic_year_param = request.query_params.get('academicYear', '').strip()
         if academic_year_param:
@@ -4342,7 +4367,7 @@ class AtRiskStudentsView(APIView):
 
         ic_qs = InstructorCourse.objects.filter(program=program)
         if semester:
-            ic_qs = ic_qs.filter(semester=semester)
+            ic_qs = _offerings_in_semester(ic_qs, program, semester)
         academic_year_param = request.query_params.get('academicYear', '').strip()
         if academic_year_param:
             ic_qs = ic_qs.filter(academic_year__iexact=academic_year_param)
@@ -4350,12 +4375,12 @@ class AtRiskStudentsView(APIView):
         # Map regNo → list of failed CLOs
         student_failures = {}
 
-        for ic in ic_qs.prefetch_related('students__obe_marks__question', 'clos', 'obe_questions'):
+        for ic in ic_qs.prefetch_related(_marks_with_question(), 'clos', 'obe_questions'):
             # Build mark lookup dict once per course — avoids N×M×P×Q DB queries
             # Structure: { (student_pk, question_pk): score }
             all_questions = list(ic.obe_questions.all())
             mark_lookup   = {}
-            for student in ic.students.prefetch_related('obe_marks__question').all():
+            for student in ic.students.all():
                 for obe_mark in student.obe_marks.all():
                     mark_lookup[(student.pk, obe_mark.question_id)] = obe_mark.score
 
@@ -4424,7 +4449,10 @@ class GapAnalysisView(APIView):
         except Program.DoesNotExist:
             return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        gas = list(GraduateAttribute.objects.filter(department=program.department))
+        gas = list(GraduateAttribute.objects.filter(
+            models.Q(department=program.department, program__isnull=True) |
+            models.Q(program=program)
+        ))
         result = []
 
         # Perf fix: was 2 queries per GA (mapped_courses, active_clos) plus an
@@ -4923,8 +4951,8 @@ class FinalizeCourseView(APIView):
             ic = InstructorCourse.objects.select_related(
                 'instructor__user', 'department', 'program'
             ).prefetch_related(
-                'students__marks__unit_item__category',
-                'students__obe_marks__question',
+                _marks_with_unit(),
+                _marks_with_question(),
                 'obe_questions',
             ).get(frontend_id=course_id)
         except InstructorCourse.DoesNotExist:
@@ -4992,8 +5020,8 @@ class FinalizeCourseView(APIView):
                 ic = InstructorCourse.objects.select_related(
                     'instructor__user', 'department', 'program', 'catalog_course'
                 ).prefetch_related(
-                    'students__marks__unit_item__category',
-                    'students__obe_marks__question',
+                    _marks_with_unit(),
+                    _marks_with_question(),
                     'obe_questions',
                     'catalog_course__markscategories__unit_items',
                 ).get(id=ic.id)

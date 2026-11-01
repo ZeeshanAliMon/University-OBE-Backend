@@ -495,6 +495,7 @@ class AdmissionStudentSerializer(serializers.ModelSerializer):
     regNo        = serializers.CharField(source='reg_no')
     departmentId = serializers.SerializerMethodField()
     programId    = serializers.SerializerMethodField()
+    semester     = serializers.CharField(source='current_semester', read_only=True)
 
     class Meta:
         from .models import AdmissionStudent

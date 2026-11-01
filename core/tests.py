@@ -421,6 +421,90 @@ class AuditRegressionTests(TestCase):
         self.assertEqual(len(c.get(url + '&semester=3rd').data['courses']), 1)
         self.assertEqual(c.get(url + '&semester=1st').data['courses'], [])
 
+    # ── Reports hold up on realistic data ────────────────────────────────────
+    def test_program_wide_views_survive_many_questions(self):
+        # SQLite refused the marks -> question prefetch once it spanned this many questions.
+        from core.models import OBEQuestion, OBEStudentMark
+        qs = OBEQuestion.objects.bulk_create([
+            OBEQuestion(course=self.ic, unit_item=self.unit, frontend_id=f'bulk{i}', category_name='Quiz',
+                        unit_no=1, question_name=f'Q{i}', max_marks=10, mapped_clos=['CLO-1'])
+            for i in range(1200)
+        ])
+        OBEStudentMark.objects.bulk_create([OBEStudentMark(student=self.r1, question=q, score=5) for q in qs])
+        c = self.client_for(self.qa)
+        for url in ['/api/instructor/courses/', '/api/reports/co-attainment-summary/?programId=cs',
+                    '/api/reports/at-risk-students/?programId=cs', '/api/reports/course-attainment/?courseCode=CS12']:
+            self.assertEqual(c.get(url).status_code, 200, url)
+
+    def test_co_summary_and_at_risk_take_the_semester_from_the_plan(self):
+        from core.models import SemesterPlan
+        SemesterPlan.objects.create(program=self.program, semester='3rd', course_codes=['CS12'])
+        c = self.client_for(self.qa)
+        co = '/api/reports/co-attainment-summary/?programId=cs'
+        self.assertEqual(len(c.get(co + '&semester=3rd').data['courses']), 1)
+        self.assertEqual(c.get(co + '&semester=1st').data['courses'], [])
+        risk = '/api/reports/at-risk-students/?programId=cs'
+        self.r2.obe_marks.update(score=0)
+        from core.models import CLO, OBEQuestion, OBEStudentMark
+        CLO.objects.create(course=self.ic, code='CLO-2', mapped_ga=self.ga, order=2)
+        q2 = OBEQuestion.objects.create(course=self.ic, unit_item=self.unit, frontend_id='q2', category_name='Quiz',
+                                        unit_no=1, question_name='Q2', max_marks=10, mapped_clos=['CLO-2'])
+        OBEStudentMark.objects.create(student=self.r2, question=q2, score=0)
+        self.assertIn('R2', [s['regNo'] for s in c.get(risk + '&semester=3rd').data['students']])
+        self.assertEqual(c.get(risk + '&semester=1st').data['students'], [])
+
+    def test_gap_analysis_leaves_out_other_programs_gas(self):
+        from core.models import GraduateAttribute
+        other = Program.objects.create(code='AI', name='AI', department=self.dept)
+        GraduateAttribute.objects.create(ga_id='AI1', name='Other', department=self.dept, program=other)
+        GraduateAttribute.objects.create(ga_id='ALL1', name='Shared', department=self.dept)
+        r = self.client_for(self.qa).get('/api/reports/gap-analysis/?programId=cs')
+        self.assertEqual(sorted(a['gaId'] for a in r.data['attributes']), ['ALL1', 'CS1'])
+
+    # ── Semester comes from the reg number and the date ──────────────────────
+    def test_semester_from_reg_no(self):
+        import datetime
+        from core.models import semester_from_reg_no as sem
+        fall_2026 = datetime.date(2026, 11, 1)
+        self.assertEqual(sem('22144-SP23', fall_2026), '8th')
+        self.assertEqual(sem('052-SP23-22144', fall_2026), '8th')
+        self.assertEqual(sem('FA23-BSCS-001', fall_2026), '7th')
+        self.assertEqual(sem('22144-sp26', fall_2026), '2nd')
+        self.assertEqual(sem('22144-FA26', fall_2026), '1st')
+        self.assertEqual(sem('22144-SP20', fall_2026), '8th')    # never past 8th
+        self.assertEqual(sem('22144-SP27', fall_2026), '1st')    # admitted early
+        self.assertEqual(sem('22144-FA26', datetime.date(2027, 1, 31)), '1st')   # January is still Fall
+        self.assertEqual(sem('22144-FA26', datetime.date(2027, 2, 1)), '2nd')
+        self.assertIsNone(sem('R1', fall_2026))
+
+    def test_login_and_student_list_use_the_calculated_semester(self):
+        import datetime
+        from unittest import mock
+        from core.models import AdmissionStudent, Student
+        AdmissionStudent.objects.create(reg_no='22144-SP23', name='A', email='a1@x.com', department=self.dept,
+                                        program=self.program, batch='Spring', semester='1st')
+        AdmissionStudent.objects.create(reg_no='ROLL7', name='B', email='b1@x.com', department=self.dept,
+                                        program=self.program, batch='Fall', semester='3rd')
+        su = User.objects.create(username='a1@x.com', email='a1@x.com', role='student')
+        su.set_password('secret-pass-1')
+        su.save()
+        Student.objects.create(user=su, reg_no='22144-SP23', program=self.program, department=self.dept)
+        with mock.patch('core.models.timezone.localdate', return_value=datetime.date(2026, 11, 1)):
+            rows = {s['regNo']: s['semester'] for s in self.client_for(self.qa).get('/api/students/').data}
+            login = self.client_for(self.qa).post('/api/auth/login/', {'email': 'a1@x.com', 'password': 'secret-pass-1'}, format='json')
+        self.assertEqual(rows, {'22144-SP23': '8th', 'ROLL7': '3rd'})     # no batch: the saved one
+        self.assertEqual(login.data['user']['semester'], '8th')
+
+    def test_batch_report_finds_batch_at_end_of_reg_no(self):
+        from core.models import AdmissionStudent
+        AdmissionStudent.objects.create(reg_no='22144-SP23', name='A', email='a2@x.com', department=self.dept,
+                                        program=self.program, batch='Spring')
+        AdmissionStudent.objects.create(reg_no='22145-FA23', name='B', email='b2@x.com', department=self.dept,
+                                        program=self.program, batch='Fall')
+        r = self.client_for(self.qa).get('/api/reports/batch-ga-attainment/?batch=sp23&departmentId=CS')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.data['studentCount'], 1)
+
     # ── Smaller audit fixes ──────────────────────────────────────────────────
     def test_other_instructor_cannot_touch_clos(self):
         b = self.client_for(self.ub)

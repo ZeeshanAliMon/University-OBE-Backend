@@ -1,5 +1,8 @@
+import re
+
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -589,6 +592,29 @@ class OBEStudentMark(models.Model):
 
 # ─── Admission Student Registry ───────────────────────────────────────────────
 
+def semester_from_reg_no(reg_no, today=None):
+    """
+    A student's current semester ('1st'..'8th') from the batch in their reg number
+    and the date, or None if the reg number has no batch. "22144-SP23" was admitted
+    in Spring 2023, so in Fall 2026 it is in its 8th semester.
+
+    Spring runs February to August; September to January is Fall. Same rule as the
+    frontend's getRegNoPreview (utils/regNo.ts), so the two must change together.
+    """
+    match = re.search(r'(FA|SP|SU|SM|WI)(\d{2,4})', str(reg_no or '').upper())
+    if not match:
+        return None
+    today = today or timezone.localdate()
+    start_year = 2000 + int(match.group(2)) % 100
+    start = 2 * start_year + (0 if match.group(1) == 'SP' else 1)
+    if 2 <= today.month <= 8:
+        current = 2 * today.year
+    else:
+        current = 2 * (today.year - 1 if today.month == 1 else today.year) + 1
+    number = max(1, min(current - start + 1, 8))
+    return {1: '1st', 2: '2nd', 3: '3rd'}.get(number, f'{number}th')
+
+
 class AdmissionStudent(models.Model):
     """
     Students registered through the Admission dashboard.
@@ -620,9 +646,14 @@ class AdmissionStudent(models.Model):
         related_name='admission_students'
     )
     batch      = models.CharField(max_length=10, choices=BATCH_CHOICES, default='Fall')
+    # Only used for a reg number with no batch in it; see current_semester.
     semester   = models.CharField(max_length=10, choices=SEMESTER_CHOICES, default='1st')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def current_semester(self):
+        return semester_from_reg_no(self.reg_no) or self.semester
 
     class Meta:
         verbose_name        = 'Admission Student'
