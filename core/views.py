@@ -4148,14 +4148,18 @@ class CLOCQIReportView(APIView):
         ic_qs = base_qs
         if academic_year:
             ic_qs = ic_qs.filter(academic_year__iexact=academic_year)
-        if semester:
-            ic_qs = ic_qs.filter(semester=semester)
 
         offerings = list(
             ic_qs.select_related('instructor__user', 'program')
                  .prefetch_related('clos', 'obe_questions', 'students')
                  .order_by('code', 'course_type')
         )
+
+        # Offerings are created with a blank semester, so it comes from the plan.
+        plan_cache = {}
+        semester_of = {ic.pk: ic.semester or _plan_semester(ic.program_id, ic.code, plan_cache) for ic in offerings}
+        if semester:
+            offerings = [ic for ic in offerings if semester_of[ic.pk] == semester]
 
         # One query for every mark of every offering: { (student_pk, question_pk): score }
         all_question_ids = [q.pk for ic in offerings for q in ic.obe_questions.all()]
@@ -4208,7 +4212,7 @@ class CLOCQIReportView(APIView):
                 'courseTitle':   ic.title,
                 'courseType':    ic.course_type,
                 'instructor':    user.get_full_name() or user.username,
-                'semester':      ic.semester,
+                'semester':      semester_of[ic.pk],
                 'academicYear':  ic.academic_year,
                 'programCode':   ic.program.code.upper() if ic.program else '',
                 'programName':   ic.program.name if ic.program else '',

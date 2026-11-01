@@ -232,6 +232,16 @@ class AuditRegressionTests(TestCase):
         self.assertEqual(r.data[0]['gaAttainments'],
                          [{'gaId': 'CS1', 'gaTitle': 'Knowledge', 'passed': 1, 'total': 1, 'percent': 100.0, 'attained': True}])
 
+    # ── CLO CQI gets the semester from the plan ──────────────────────────────
+    def test_clo_cqi_semester_comes_from_plan(self):
+        from core.models import SemesterPlan
+        SemesterPlan.objects.create(program=self.program, semester='3rd', course_codes=['CS12'])
+        c = self.client_for(self.qa)
+        url = '/api/reports/clo-cqi/?departmentId=CS&programId=cs'
+        self.assertEqual(c.get(url).data['courses'][0]['semester'], '3rd')
+        self.assertEqual(len(c.get(url + '&semester=3rd').data['courses']), 1)
+        self.assertEqual(c.get(url + '&semester=1st').data['courses'], [])
+
     # ── Smaller audit fixes ──────────────────────────────────────────────────
     def test_other_instructor_cannot_touch_clos(self):
         b = self.client_for(self.ub)
