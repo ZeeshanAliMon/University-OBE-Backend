@@ -37,6 +37,8 @@ from .views import (
     InstructorCourseStudentView,
     InstructorCourseSubmitView, InstructorStudentStatusView, InstructorPastCoursesView, InstructorPastCourseDetailView,
     ReturnCourseView,
+    PastCourseListView, PastCourseEligibleStudentsView, PastCourseSaveView, PastCourseDetailView,
+    PastCourseStudentsView, PastCourseStudentStatusView, PastCourseFinalizeView, PastCourseReopenView,
     DeptAdminProfileView,
     # Reports
     ProgramGAAttainmentView,
@@ -94,6 +96,14 @@ urlpatterns = [
     path('admin/enroll/',             StudentEnrollmentView.as_view(), name='student_enrollment'),
     path('admin/finalize-course/',    FinalizeCourseView.as_view(),    name='finalize_course'),
     path('admin/return-course/',      ReturnCourseView.as_view(),      name='return_course'),
+    path('admin/past-courses/',                    PastCourseListView.as_view(),             name='past_courses'),
+    path('admin/past-courses/eligible-students/',  PastCourseEligibleStudentsView.as_view(), name='past_course_eligible_students'),
+    path('admin/past-courses/save/',               PastCourseSaveView.as_view(),             name='past_course_save'),
+    path('admin/past-courses/<str:frontend_id>/',                PastCourseDetailView.as_view(),        name='past_course_detail'),
+    path('admin/past-courses/<str:frontend_id>/students/',       PastCourseStudentsView.as_view(),      name='past_course_students'),
+    path('admin/past-courses/<str:frontend_id>/student-status/', PastCourseStudentStatusView.as_view(), name='past_course_student_status'),
+    path('admin/past-courses/<str:frontend_id>/submit/',         PastCourseFinalizeView.as_view(),      name='past_course_finalize'),
+    path('admin/past-courses/<str:frontend_id>/reopen/',         PastCourseReopenView.as_view(),        name='past_course_reopen'),
     path('reports/final-results/',    FinalResultsView.as_view(),      name='final_results'),
     path('admin/semester-plans/',     SemesterPlanView.as_view(),     name='semester_plans'),
 

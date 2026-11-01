@@ -365,6 +365,9 @@ class InstructorCourse(models.Model):
     submission_warnings = models.JSONField(default=list, blank=True)
     returned_at         = models.DateTimeField(null=True, blank=True)
     return_note         = models.TextField(blank=True, default='')
+    # A course from an earlier term, entered by the department. While it is still
+    # active only the department sees it; once finalized it is a normal past course.
+    is_historical       = models.BooleanField(default=False)
 
     created_at              = models.DateTimeField(auto_now_add=True)
     updated_at              = models.DateTimeField(auto_now=True)
@@ -592,6 +595,31 @@ class OBEStudentMark(models.Model):
 
 # ─── Admission Student Registry ───────────────────────────────────────────────
 
+def term_index(season, year):
+    """Terms as consecutive numbers: Spring-2023 is one before Fall-2023."""
+    return 2 * int(year) + (0 if str(season).upper().startswith('SP') else 1)
+
+
+def current_term_index(today=None):
+    """The term running today. Spring runs February to August; September to January is Fall."""
+    today = today or timezone.localdate()
+    if 2 <= today.month <= 8:
+        return term_index('SP', today.year)
+    return term_index('FA', today.year - 1 if today.month == 1 else today.year)
+
+
+def admission_term_index(reg_no):
+    """The term a student was admitted in, from the batch in their reg number, or None."""
+    match = re.search(r'(FA|SP|SU|SM|WI)(\d{2,4})', str(reg_no or '').upper())
+    if not match:
+        return None
+    return term_index(match.group(1), 2000 + int(match.group(2)) % 100)
+
+
+def semester_label(number):
+    return {1: '1st', 2: '2nd', 3: '3rd'}.get(number, f'{number}th')
+
+
 def semester_from_reg_no(reg_no, today=None):
     """
     A student's current semester ('1st'..'8th') from the batch in their reg number
@@ -601,18 +629,10 @@ def semester_from_reg_no(reg_no, today=None):
     Spring runs February to August; September to January is Fall. Same rule as the
     frontend's getRegNoPreview (utils/regNo.ts), so the two must change together.
     """
-    match = re.search(r'(FA|SP|SU|SM|WI)(\d{2,4})', str(reg_no or '').upper())
-    if not match:
+    start = admission_term_index(reg_no)
+    if start is None:
         return None
-    today = today or timezone.localdate()
-    start_year = 2000 + int(match.group(2)) % 100
-    start = 2 * start_year + (0 if match.group(1) == 'SP' else 1)
-    if 2 <= today.month <= 8:
-        current = 2 * today.year
-    else:
-        current = 2 * (today.year - 1 if today.month == 1 else today.year) + 1
-    number = max(1, min(current - start + 1, 8))
-    return {1: '1st', 2: '2nd', 3: '3rd'}.get(number, f'{number}th')
+    return semester_label(max(1, min(current_term_index(today) - start + 1, 8)))
 
 
 class AdmissionStudent(models.Model):

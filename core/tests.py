@@ -519,6 +519,193 @@ class AuditRegressionTests(TestCase):
         self.assertEqual(r.status_code, 200, r.content)
         self.assertEqual(r.data['studentCount'], 1)
 
+    # ── Past course entry by the department ──────────────────────────────────
+    def _past_setup(self):
+        from core.models import AdmissionStudent
+        for reg_no, batch in (('22101-SP23', 'Spring'), ('22102-SP23', 'Spring'), ('22103-FA26', 'Fall')):
+            AdmissionStudent.objects.create(reg_no=reg_no, name=reg_no, email=f'{reg_no}@x.com', department=self.dept,
+                                            program=self.program, batch=batch)
+        return self.client_for(self.da)
+
+    def _past_create(self, c, **over):
+        body = {'programId': 'CS', 'courseCode': 'CS12', 'academicYear': 'Spring-2023', 'teacherId': 'EB',
+                'students': [{'regNo': '22101-SP23', 'name': 'One'}, {'regNo': '22102-SP23', 'name': 'Two'}]}
+        return c.post('/api/admin/past-courses/', {**body, **over}, format='json')
+
+    def _past_marks(self, c, course_id, r1=9, r2=None):
+        # Each save carries what the screen has, as the browser's autosave does.
+        course = c.get(f'/api/admin/past-courses/{course_id}/').data
+        marks = {'22101-SP23': {'q1': r1}, '22102-SP23': {'q1': r2 if r2 is not None else r1}}
+        r = c.post('/api/admin/past-courses/save/', {'courses': [{
+            'id': course_id, 'courseType': 'Theory', 'code': 'HACKED', 'academicYear': 'Fall-2010',
+            'categories': [{'name': 'Quiz', 'percentage': 100, 'units': 1}],
+            'unitsData': {'Quiz': [{'unitNo': 1, 'totalMarks': 10, 'weightage': 100, 'passing': 5}]},
+            'obeQuestions': [{'id': 'q1', 'categoryName': 'Quiz', 'unitNo': 1, 'questionName': 'Q1',
+                              'maxMarks': 10, 'mappedCLOs': ['CLO-1']}],
+            'students': course['students'] + [{'regNo': 'INJECTED', 'name': 'X'}],
+            'obeMarks': marks,
+        }]}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+
+    def test_past_course_goes_from_draft_to_teacher_reports_and_student(self):
+        from core.models import FinalResult, InstructorCourse, Student
+        c = self._past_setup()
+        r = self._past_create(c)
+        self.assertEqual(r.status_code, 201, r.content)
+        cid = r.data['id']
+
+        # Setup was copied from the earlier offering of this course.
+        detail = c.get(f'/api/admin/past-courses/{cid}/').data
+        self.assertEqual(detail['clos'][0]['code'], 'CLO-1')
+        self.assertEqual(detail['academicYear'], 'Spring-2023')
+
+        self._past_marks(c, cid)
+        ic = InstructorCourse.objects.get(frontend_id=cid)
+        self.assertEqual((ic.code, ic.academic_year, ic.students.count()), ('CS12', 'Spring-2023', 2))  # not HACKED/INJECTED
+
+        # A draft: not on the teacher's list, not theirs to edit, not on the student's dashboard.
+        teacher = self.client_for(self.ub)
+        self.assertEqual(teacher.get('/api/instructor/courses/').data, [])
+        self.assertEqual(teacher.get('/api/instructor/past-courses/').data, [])
+        self.assertEqual(teacher.post('/api/instructor/courses/', {'courses': [{'id': cid, 'departmentId': 'CS'}]},
+                                      format='json').status_code, 400)
+        su = User.objects.create(username='s@x.com', email='s@x.com', role='student')
+        Student.objects.create(user=su, reg_no='22101-SP23', program=self.program, department=self.dept)
+        student = self.client_for(su)
+        self.assertEqual(student.get('/api/student/courses/').data, [])
+
+        r = c.post(f'/api/admin/past-courses/{cid}/submit/', {}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+
+        result = FinalResult.objects.get(student_reg_no='22101-SP23', course_code='CS12', academic_year='Spring-2023')
+        self.assertEqual(result.grade_letter, 'A')
+        self.assertEqual(result.instructor_name, self.ub.get_full_name() or self.ub.email)
+
+        past = teacher.get('/api/instructor/past-courses/').data
+        self.assertEqual([p['id'] for p in past], [cid])
+        self.assertEqual(past[0]['state'], 'finalized')
+        self.assertEqual(teacher.get(f'/api/instructor/past-courses/{cid}/').status_code, 200)
+
+        self.assertEqual([x['code'] for x in student.get('/api/student/courses/').data], ['CS12'])
+        ga = self.client_for(self.qa).get('/api/reports/course-ga-students/?courseCode=CS12&programId=CS').data
+        block = next(o for o in ga['offerings'] if o['id'] == cid)
+        self.assertEqual(block['gas'][0]['studentsAttained'], 2)
+
+        # A finalized course can't be changed until it is reopened, which clears its grades.
+        self.assertEqual(c.post('/api/admin/past-courses/save/', {'courses': [{'id': cid}]}, format='json').status_code, 400)
+        self.assertEqual(c.delete(f'/api/admin/past-courses/{cid}/').status_code, 400)
+        self.assertEqual(c.post(f'/api/admin/past-courses/{cid}/reopen/', {}, format='json').status_code, 200)
+        self.assertFalse(FinalResult.objects.filter(source_course__frontend_id=cid).exists())
+        self.assertEqual(teacher.get('/api/instructor/past-courses/').data, [])
+        self._past_marks(c, cid, r1=3)
+        self.assertEqual(c.post(f'/api/admin/past-courses/{cid}/submit/', {}, format='json').status_code, 200)
+        result = FinalResult.objects.get(student_reg_no='22101-SP23', course_code='CS12', academic_year='Spring-2023')
+        self.assertEqual(result.grade_letter, 'F')
+
+    def test_student_ga_transcript_is_own_and_finalized_only(self):
+        from core.models import FinalResult, Student
+        c = self._past_setup()
+        cid = self._past_create(c).data['id']
+        self._past_marks(c, cid)
+
+        su = User.objects.create(username='s@x.com', email='s@x.com', role='student')
+        Student.objects.create(user=su, reg_no='22101-SP23', program=self.program, department=self.dept)
+        student = self.client_for(su)
+        url = '/api/reports/student-ga-questions/'
+
+        # While the course is open it is not on the transcript.
+        self.assertEqual(student.get(url).data['courses'], [])
+
+        self.assertEqual(c.post(f'/api/admin/past-courses/{cid}/submit/', {}, format='json').status_code, 200)
+        data = student.get(url + '?regNo=22102-SP23').data   # asking for someone else returns their own
+        self.assertEqual(data['regNo'], '22101-SP23')
+        self.assertEqual([x['courseCode'] for x in data['courses']], ['CS12'])
+        self.assertEqual(data['courses'][0]['grade'], 'A')
+        self.assertTrue(data['gas'][0]['attained'])
+
+        # The grade is the permanent one, even if the live calculation would differ.
+        FinalResult.objects.filter(student_reg_no='22101-SP23', course_code='CS12').update(grade_letter='B+')
+        self.assertEqual(student.get(url).data['courses'][0]['grade'], 'B+')
+
+        self.assertEqual(self.client_for(self.ub).get(url + '?regNo=22101-SP23').status_code, 403)
+        self.assertEqual(self.client_for(self.qa).get(url + '?regNo=22102-SP23').data['regNo'], '22102-SP23')
+
+    def test_past_course_refuses_bad_terms_and_students(self):
+        c = self._past_setup()
+        for term in ('Fall-2026', 'Spring-2099', 'Autumn'):
+            self.assertEqual(self._past_create(c, academicYear=term).status_code, 400, term)
+        self.assertEqual(self._past_create(c, students=[]).status_code, 400)
+        self.assertEqual(self._past_create(c, courseCode='NOPE').status_code, 400)
+        self.assertEqual(self._past_create(c, students=[{'regNo': 'GHOST'}]).status_code, 400)
+        # Admitted after the term.
+        self.assertEqual(self._past_create(c, students=[{'regNo': '22103-FA26'}]).status_code, 400)
+
+        cid = self._past_create(c).data['id']
+        self.assertEqual(self._past_create(c).status_code, 400)                                 # same teacher again
+        # Another teacher, same course and term: one student can't have it twice.
+        r = self._past_create(c, teacherId='EA', students=[{'regNo': '22101-SP23'}])
+        self.assertEqual(r.status_code, 400, r.content)
+        self.assertEqual(c.post(f'/api/admin/past-courses/{cid}/students/', {'students': [{'regNo': 'GHOST'}]},
+                                format='json').status_code, 400)
+
+    def test_past_course_finalize_needs_ga_mapping_and_all_marks(self):
+        from core.models import CLO, InstructorCourse
+        c = self._past_setup()
+        cid = self._past_create(c).data['id']
+        check = c.get(f'/api/admin/past-courses/{cid}/submit/').data
+        self.assertTrue(check['warnings'])                                        # nobody has a mark yet
+        self.assertEqual(c.post(f'/api/admin/past-courses/{cid}/submit/', {}, format='json').status_code, 409)
+        self._past_marks(c, cid)
+        one = self.CourseStudent.objects.get(course__frontend_id=cid, reg_no='22102-SP23')
+        marks = list(one.obe_marks.all())
+        one.obe_marks.all().delete()
+        self.assertEqual(c.get(f'/api/admin/past-courses/{cid}/submit/').data['missing'][0]['regNo'], '22102-SP23')
+        self.assertEqual(c.post(f'/api/admin/past-courses/{cid}/submit/', {}, format='json').status_code, 400)
+        for m in marks:
+            m.pk = None
+            m.save()
+        CLO.objects.filter(course__frontend_id=cid).update(mapped_ga=None)
+        r = c.get(f'/api/admin/past-courses/{cid}/submit/')
+        self.assertIn('CLO-1 is not mapped to a GA.', r.data['errors'])
+        self.assertEqual(c.post(f'/api/admin/past-courses/{cid}/submit/', {}, format='json').status_code, 400)
+        self.assertEqual(InstructorCourse.objects.get(frontend_id=cid).status, 'active')
+
+    def test_past_course_belongs_to_its_department(self):
+        from core.models import DeptAdminProfile
+        c = self._past_setup()
+        cid = self._past_create(c).data['id']
+        other = Department.objects.create(dept_id='EE', name='Electrical')
+        u = User.objects.create(username='ee@x.com', email='ee@x.com', role='dept_admin')
+        DeptAdminProfile.objects.create(user=u, employee_id='DA2', department=other)
+        c2 = self.client_for(u)
+        self.assertEqual(c2.get('/api/admin/past-courses/').data, [])
+        self.assertEqual(c2.get(f'/api/admin/past-courses/{cid}/').status_code, 404)
+        self.assertEqual(c2.delete(f'/api/admin/past-courses/{cid}/').status_code, 404)
+        self.assertEqual(self.client_for(self.ua).get('/api/admin/past-courses/').status_code, 403)
+        self.assertEqual(self.client_for(self.qa).get('/api/admin/past-courses/').status_code, 403)
+
+    def test_past_course_does_not_stop_a_new_term_gradebook(self):
+        from core.models import CourseAssignment, InstructorCourse
+        c = self._past_setup()
+        self._past_create(c)
+        CourseAssignment.objects.create(instructor=self.ub.instructor_profile, course=self.course,
+                                        program=self.program, academic_year='Fall-2026')
+        data = self.client_for(self.ub).get('/api/instructor/courses/').data
+        self.assertEqual([x['academicYear'] for x in data], ['Fall-2026'])
+
+    def test_eligible_students_suggest_the_batch_on_plan(self):
+        from core.models import SemesterPlan
+        c = self._past_setup()
+        SemesterPlan.objects.create(program=self.program, semester='1st', course_codes=['CS12'])
+        r = c.get('/api/admin/past-courses/eligible-students/?programId=CS&courseCode=CS12&academicYear=Spring-2023')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.data['semester'], '1st')
+        self.assertEqual([(s['regNo'], s['semesterInTerm'], s['suggested']) for s in r.data['students']],
+                         [('22101-SP23', '1st', True), ('22102-SP23', '1st', True)])    # FA26 not admitted yet
+        r = c.get('/api/admin/past-courses/eligible-students/?programId=CS&courseCode=CS12&academicYear=Fall-2023')
+        self.assertEqual([(s['semesterInTerm'], s['suggested']) for s in r.data['students']],
+                         [('2nd', False), ('2nd', False)])                               # a retake, if taken
+
     # ── Smaller audit fixes ──────────────────────────────────────────────────
     def test_other_instructor_cannot_touch_clos(self):
         b = self.client_for(self.ub)

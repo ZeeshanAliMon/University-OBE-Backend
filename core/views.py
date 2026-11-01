@@ -25,6 +25,7 @@ from .models      import (
     InstructorProfile, QAProfile, Student,
     AdmissionProfile, DeptAdminProfile, CourseAssignment,
     SemesterPlan, AdmissionStudent, FinalResult,
+    admission_term_index, current_term_index, semester_label, term_index,
 )
 from .serializers import (
     LoginSerializer, UserSerializer,
@@ -767,7 +768,7 @@ class InstructorCourseView(APIView):
                     instructor=profile,
                     code=course.code,
                     program=program
-                ).exclude(frontend_id=frontend_id).exists()
+                ).exclude(frontend_id=frontend_id).exclude(is_historical=True).exists()
 
 
                 if already_exists:
@@ -812,7 +813,7 @@ class InstructorCourseView(APIView):
             # course stays when a new term starts, and a submitted one goes
             # (see InstructorPastCoursesView).
             all_ics = InstructorCourse.objects.filter(
-                instructor=profile, status='active', submitted_at__isnull=True
+                instructor=profile, status='active', submitted_at__isnull=True, is_historical=False
             )
 
             qs = prefetch_instructor_course(all_ics.order_by('created_at'))
@@ -833,8 +834,9 @@ class InstructorCourseView(APIView):
                 {'error': 'Instructor profile not found'},
                 status=status.HTTP_403_FORBIDDEN
             )
+        return self._save_courses(request.data.get('courses', []), profile, _teacher_lock_message)
 
-        courses_data = request.data.get('courses', [])
+    def _save_courses(self, courses_data, profile, lock_for):
         if not isinstance(courses_data, list):
             return Response(
                 {'error': '"courses" must be a list'},
@@ -852,7 +854,7 @@ class InstructorCourseView(APIView):
             existing = InstructorCourse.objects.filter(
                 instructor=profile, frontend_id=frontend_id
             ).first()
-            lock = _teacher_lock_message(existing) if existing else None
+            lock = lock_for(existing) if existing else None
             if lock:
                 errors.append({'index': idx, 'error': lock})
                 continue
@@ -1211,7 +1213,7 @@ class InstructorCourseView(APIView):
             return Response({'error': 'Instructor profile not found'}, status=status.HTTP_403_FORBIDDEN)
 
         try:
-            ic = InstructorCourse.objects.get(frontend_id=frontend_id, instructor=profile)
+            ic = InstructorCourse.objects.get(frontend_id=frontend_id, instructor=profile, is_historical=False)
         except InstructorCourse.DoesNotExist:
             return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -2073,7 +2075,7 @@ class StudentCoursesView(APIView):
 
         enrollments = CourseStudent.objects.filter(
             reg_no__iexact=reg_no
-        ).select_related(
+        ).exclude(course__is_historical=True, course__status='active').select_related(
             'course__department',
             'course__program',
             'course__instructor',
@@ -2885,7 +2887,7 @@ class StudentGAAttainmentView(APIView):
 
         course_students = CourseStudent.objects.filter(
             reg_no__iexact=reg_no
-        ).exclude(result_status='withdrawn').select_related('course__program').prefetch_related(
+        ).exclude(course__is_historical=True, course__status='active').exclude(result_status='withdrawn').select_related('course__program').prefetch_related(
             'obe_marks__question',
             'marks__unit_item__category',
             'course__obe_questions',
@@ -3221,7 +3223,7 @@ class StudentSummaryView(APIView):
 
         course_students = CourseStudent.objects.filter(
             reg_no__iexact=reg_no
-        ).select_related('course').prefetch_related(
+        ).exclude(course__is_historical=True, course__status='active').select_related('course').prefetch_related(
             'marks__unit_item__category',
             'obe_marks__question',
             'course__grade_scale',
@@ -3753,14 +3755,29 @@ class StudentGAQuestionAttainmentView(APIView):
     same rule as the course report: a question is passed at >= 50% of its
     marks; GA attainment = questions passed / questions for that GA (summed
     over every course); the GA is attained at >= 50%. Also per course.
+
+    A student gets only their own record and only finalized courses: this is
+    their transcript, and a running course's half-entered marks would show as
+    failed. A finalized course shows the grade on its permanent FinalResult.
     """
-    permission_classes = [IsStaffReport]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         reg_no = request.query_params.get('regNo', '').strip()
+        is_student = request.user.role == 'student'
+        if is_student:
+            try:
+                reg_no = request.user.student_profile.reg_no
+            except Exception:
+                return Response({'error': 'Student profile not found'}, status=status.HTTP_403_FORBIDDEN)
+        elif not IsStaffReport().has_permission(request, self):
+            return Response({'error': 'You do not have permission to view this report.'}, status=status.HTTP_403_FORBIDDEN)
         if not reg_no:
             return Response({'error': 'regNo is required'}, status=status.HTTP_400_BAD_REQUEST)
-        enrolments = list(CourseStudent.objects.filter(reg_no__iexact=reg_no).exclude(result_status='withdrawn')
+        enrolment_qs = CourseStudent.objects.filter(reg_no__iexact=reg_no).exclude(course__is_historical=True, course__status='active').exclude(result_status='withdrawn')
+        if is_student:
+            enrolment_qs = enrolment_qs.filter(course__status='closed')
+        enrolments = list(enrolment_qs
                           .select_related('course__instructor__user', 'course__program', 'course__catalog_course')
                           .prefetch_related('marks', 'obe_marks')
                           .order_by('course__academic_year', 'course__code'))
@@ -3768,6 +3785,8 @@ class StudentGAQuestionAttainmentView(APIView):
         if not enrolments and not adm:
             return Response({'error': f'Student "{reg_no}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        official_grades = dict(FinalResult.objects.filter(student_reg_no__iexact=reg_no, source_course__isnull=False)
+                               .values_list('source_course_id', 'grade_letter'))
         threshold = ATTAINMENT_THRESHOLD
         totals = {}      # ga_id -> {'passed', 'total', 'courses': set, 'title'}
         courses_out = []
@@ -3788,7 +3807,7 @@ class StudentGAQuestionAttainmentView(APIView):
                 'status': ic.status,
                 'instructor': ic.instructor.user.get_full_name() or ic.instructor.user.username,
                 'creditHours': ic.credit_hours,
-                'grade': _get_grade(_sheet_course_total(cs)['total'], ic)[0],
+                'grade': official_grades.get(ic.id) or _get_grade(_sheet_course_total(cs)['total'], ic)[0],
                 'questionCount': graded_count, 'unmappedQuestionCount': unmapped,
                 'gas': per_ga,
             })
@@ -4087,7 +4106,7 @@ class InstructorPerformanceView(APIView):
             courses_data = []
             # Only report on active (current) courses, not historical closed ones.
             # Closed courses are already finalized — their data is in FinalResult.
-            for ic in profile.instructor_courses.filter(status='active'):
+            for ic in profile.instructor_courses.filter(status='active', is_historical=False):
                 clo_attainments = []
                 all_qs_cohort = list(ic.obe_questions.all())
                 clo_qs_cohort = ic.clos.all()
@@ -5083,85 +5102,7 @@ class FinalizeCourseView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        questions = list(ic.obe_questions.all())
-        instructor_name = ic.instructor.user.get_full_name() or ic.instructor.user.email
-
-        # Pre-build CLO meta (description + GA) once for all students
-        clo_meta_final = {
-            clo_obj.code: {
-                'description': clo_obj.description or '',
-                'mappedGA': {
-                    'gaId':    clo_obj.mapped_ga.ga_id,
-                    'gaTitle': clo_obj.mapped_ga.name,
-                } if clo_obj.mapped_ga else None,
-            }
-            for clo_obj in ic.clos.select_related('mapped_ga').all()
-        }
-
-        # Wrap the entire finalization in a single atomic transaction.
-        # Without this, a crash or DB error partway through the student loop
-        # leaves some FinalResult rows written and others not — but the course
-        # remains 'active', so instructors can keep editing marks that are now
-        # out of sync with the already-committed transcript rows.
-        # More critically: if the loop completes but ic.save() fails, ALL
-        # FinalResult rows exist permanently but the course is never locked —
-        # instructors can keep editing marks forever against a transcript that
-        # already exists. Atomic makes it all-or-nothing: either every
-        # FinalResult is written AND the course is locked, or none of it is.
-        results_created = []
-        with transaction.atomic():
-            for student in ic.students.all():
-                exact_pct = _sheet_course_total(student)['total']
-                pct = round(exact_pct, 2)
-                grade_letter, grade_points = _get_grade(exact_pct, ic)
-                clo_pcts_raw = _clo_attainments_for_student(student, questions)
-
-                # Store enriched CLO blob so FinalResultsView returns the same
-                # shape as StudentCoursesView — description, status, GA all included
-                clo_attainments = [
-                    {
-                        'code':        clo,
-                        'description': clo_meta_final.get(clo, {}).get('description', ''),
-                        'percentage':  pct_val,
-                        'attained':    pct_val >= ATTAINMENT_THRESHOLD,
-                        'status':      'Attained' if pct_val >= ATTAINMENT_THRESHOLD else 'Not Attained',
-                        'mappedGA':    clo_meta_final.get(clo, {}).get('mappedGA'),
-                    }
-                    for clo, pct_val in sorted(clo_pcts_raw.items())
-                ]
-                if student.result_status == 'withdrawn':
-                    # On the record as W, without a grade or attainment.
-                    grade_letter, grade_points, clo_attainments = 'W', 0.0, []
-
-                result, _ = FinalResult.objects.update_or_create(
-                    student_reg_no=student.reg_no,
-                    course_code=ic.code,
-                    academic_year=ic.academic_year,
-                    defaults=dict(
-                        student_name=student.name,
-                        course_title=ic.title,
-                        instructor_name=instructor_name,
-                        department=ic.department,
-                        program=ic.program,
-                        semester=ic.semester or _plan_semester(ic.program_id, ic.code),
-                        credit_hours=ic.credit_hours,
-                        final_percentage=pct,
-                        grade_letter=grade_letter,
-                        grade_points=grade_points,
-                        clo_attainments=clo_attainments,
-                        source_course=ic,
-                    )
-                )
-                results_created.append({
-                    'regNo': student.reg_no, 'grade': grade_letter, 'percentage': pct
-                })
-
-            # Lock the course — inside atomic so this and FinalResult rows
-            # either all commit together or all roll back together.
-            ic.status    = 'closed'
-            ic.closed_at = timezone.now()
-            ic.closed_by = request.user
-            ic.save()
+        results_created = _finalize_offering(ic, request.user)
 
         return Response({
             'courseId':        course_id,
@@ -5171,6 +5112,91 @@ class FinalizeCourseView(APIView):
             'studentsFinalized': len(results_created),
             'results':         results_created,
         })
+
+
+def _finalize_offering(ic, user):
+    """Writes one course's grades to FinalResult and locks it. Returns the grades written."""
+    questions = list(ic.obe_questions.all())
+    instructor_name = ic.instructor.user.get_full_name() or ic.instructor.user.email
+
+    # Pre-build CLO meta (description + GA) once for all students
+    clo_meta_final = {
+        clo_obj.code: {
+            'description': clo_obj.description or '',
+            'mappedGA': {
+                'gaId':    clo_obj.mapped_ga.ga_id,
+                'gaTitle': clo_obj.mapped_ga.name,
+            } if clo_obj.mapped_ga else None,
+        }
+        for clo_obj in ic.clos.select_related('mapped_ga').all()
+    }
+
+    # Wrap the entire finalization in a single atomic transaction.
+    # Without this, a crash or DB error partway through the student loop
+    # leaves some FinalResult rows written and others not — but the course
+    # remains 'active', so instructors can keep editing marks that are now
+    # out of sync with the already-committed transcript rows.
+    # More critically: if the loop completes but ic.save() fails, ALL
+    # FinalResult rows exist permanently but the course is never locked —
+    # instructors can keep editing marks forever against a transcript that
+    # already exists. Atomic makes it all-or-nothing: either every
+    # FinalResult is written AND the course is locked, or none of it is.
+    results_created = []
+    with transaction.atomic():
+        for student in ic.students.all():
+            exact_pct = _sheet_course_total(student)['total']
+            pct = round(exact_pct, 2)
+            grade_letter, grade_points = _get_grade(exact_pct, ic)
+            clo_pcts_raw = _clo_attainments_for_student(student, questions)
+
+            # Store enriched CLO blob so FinalResultsView returns the same
+            # shape as StudentCoursesView — description, status, GA all included
+            clo_attainments = [
+                {
+                    'code':        clo,
+                    'description': clo_meta_final.get(clo, {}).get('description', ''),
+                    'percentage':  pct_val,
+                    'attained':    pct_val >= ATTAINMENT_THRESHOLD,
+                    'status':      'Attained' if pct_val >= ATTAINMENT_THRESHOLD else 'Not Attained',
+                    'mappedGA':    clo_meta_final.get(clo, {}).get('mappedGA'),
+                }
+                for clo, pct_val in sorted(clo_pcts_raw.items())
+            ]
+            if student.result_status == 'withdrawn':
+                # On the record as W, without a grade or attainment.
+                grade_letter, grade_points, clo_attainments = 'W', 0.0, []
+
+            result, _ = FinalResult.objects.update_or_create(
+                student_reg_no=student.reg_no,
+                course_code=ic.code,
+                academic_year=ic.academic_year,
+                defaults=dict(
+                    student_name=student.name,
+                    course_title=ic.title,
+                    instructor_name=instructor_name,
+                    department=ic.department,
+                    program=ic.program,
+                    semester=ic.semester or _plan_semester(ic.program_id, ic.code),
+                    credit_hours=ic.credit_hours,
+                    final_percentage=pct,
+                    grade_letter=grade_letter,
+                    grade_points=grade_points,
+                    clo_attainments=clo_attainments,
+                    source_course=ic,
+                )
+            )
+            results_created.append({
+                'regNo': student.reg_no, 'grade': grade_letter, 'percentage': pct
+            })
+
+        # Lock the course — inside atomic so this and FinalResult rows
+        # either all commit together or all roll back together.
+        ic.status    = 'closed'
+        ic.closed_at = timezone.now()
+        ic.closed_by = user
+        ic.save()
+
+    return results_created
 
 
 class FinalResultsView(APIView):
@@ -5257,6 +5283,8 @@ def _teacher_lock_message(ic):
         return f'Course "{ic.code}" is closed (finalized {ic.closed_at}) and cannot be edited.'
     if ic.submitted_at:
         return f'Final marks for "{ic.code}" have been submitted and cannot be edited unless the department sends the course back.'
+    if ic.is_historical:
+        return f'Course "{ic.code}" is being entered by the department.'
     return None
 
 
@@ -5593,3 +5621,405 @@ class InstructorCourseStudentView(APIView):
 
         return Response({'courseId': frontend_id, 'added': added, 'alreadyEnrolled': already},
                         status=status.HTTP_201_CREATED if added else status.HTTP_200_OK)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAST COURSE ENTRY
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Students already studying when the system went live took courses that GA and
+# PO attainment must count. The department enters those courses here, doing what
+# a teacher does on a current course (CLOs, weightage, questions, marks), through
+# the same screen. Finalizing makes one a normal past course: it shows in that
+# teacher's Past Courses, in the reports and in the student's dashboard.
+# ───────────────────────────────────────────────────────────────────────────────
+
+def _parse_past_term(term):
+    """(\'Fall-2024\', term number) for a term that has ended, or (None, reason)."""
+    match = re.fullmatch(r'(spring|fall)[-\s]*(\d{4})', str(term or '').strip().lower())
+    if not match:
+        return None, 'Term must look like Spring-2024 or Fall-2024.'
+    season, year = match.group(1).capitalize(), match.group(2)
+    index = term_index(season, year)
+    if index >= current_term_index():
+        return None, f'{season}-{year} has not ended. Use Teacher Assignments for the current term.'
+    return f'{season}-{year}', index
+
+
+def _past_lock_message(ic):
+    """Why the department can't edit this course right now, or None."""
+    if ic.status == 'closed':
+        return f'Course "{ic.code}" is finalized. Reopen it to make corrections.'
+    return None
+
+
+def _past_roster_errors(code, academic_year, reg_nos, department, own_course=None):
+    """Students who can't be on this course: unknown, not admitted yet, or already on it this term."""
+    known = {s.reg_no.strip().upper(): s for s in AdmissionStudent.objects.filter(department=department)}
+    taken = FinalResult.objects.filter(course_code__iexact=code, academic_year__iexact=academic_year)
+    other_rosters = CourseStudent.objects.filter(course__code__iexact=code, course__academic_year__iexact=academic_year)
+    if own_course:
+        taken = taken.exclude(source_course=own_course)
+        other_rosters = other_rosters.exclude(course=own_course)
+    busy = {r.strip().upper() for r in taken.values_list('student_reg_no', flat=True)}
+    busy |= {r.strip().upper() for r in other_rosters.values_list('reg_no', flat=True)}
+
+    season, year = academic_year.split('-')
+    term_no = term_index(season, year)
+    errors = []
+    for reg_no in reg_nos:
+        admitted = admission_term_index(reg_no)
+        if reg_no not in known:
+            errors.append(f'{reg_no} is not a registered student of this department.')
+        elif admitted is not None and admitted > term_no:
+            errors.append(f'{reg_no} was admitted after {academic_year}.')
+        elif reg_no in busy:
+            errors.append(f'{reg_no} already has {code} in {academic_year}.')
+    return errors
+
+
+def _clean_past_students(students):
+    """[(reg no, name)] from a request's student list, without blanks or repeats."""
+    cleaned = {}
+    for s in students if isinstance(students, list) else []:
+        reg_no = str(s.get('regNo', '')).strip().upper() if isinstance(s, dict) else ''
+        if reg_no:
+            cleaned.setdefault(reg_no, str(s.get('name', '')).strip() or reg_no)
+    return cleaned
+
+
+def _copy_course_setup(source, target):
+    """CLOs and questions of an earlier offering, so they aren't typed again each term."""
+    for clo in source.clos.all():
+        CLO.objects.create(course=target, code=clo.code, description=clo.description,
+                           mapped_ga=clo.mapped_ga, order=clo.order)
+    for q in source.obe_questions.all():
+        OBEQuestion.objects.create(course=target, unit_item=q.unit_item, frontend_id=q.frontend_id,
+                                   category_name=q.category_name, unit_no=q.unit_no, question_name=q.question_name,
+                                   max_marks=q.max_marks, mapped_clos=q.mapped_clos, order=q.order)
+
+
+def _past_course_errors(ic):
+    """What stops a past course counting towards GA, on top of the teacher's checks."""
+    errors = []
+    clos = list(ic.clos.all())
+    if not clos:
+        errors.append('Add the CLOs of this course.')
+    for clo in clos:
+        if not clo.mapped_ga_id:
+            errors.append(f'{clo.code} is not mapped to a GA.')
+    _items, _objs, _clos, graded, unmapped = _ga_question_items(ic)
+    if not graded:
+        errors.append('Add the questions of each assessment, so GA can be calculated.')
+    elif unmapped:
+        errors.append(f'{unmapped} question{"s are" if unmapped != 1 else " is"} not mapped to a CLO with a GA.')
+    return errors
+
+
+class PastCourseBase(APIView):
+    """A department's own past courses."""
+    permission_classes = [IsDeptAdmin]
+
+    def _course(self, request, frontend_id):
+        department = get_admin_department(request.user)
+        if not department:
+            return None
+        return prefetch_instructor_course(InstructorCourse.objects.filter(
+            is_historical=True, department=department, frontend_id=frontend_id,
+        )).select_related('instructor__user').first()
+
+
+class PastCourseListView(PastCourseBase):
+    """
+    GET  /api/admin/past-courses/   Every past course of the department, newest term first.
+    POST /api/admin/past-courses/   { programId, courseCode, academicYear, teacherId, students: [{regNo, name}] }
+         Creates the course with its roster. CLOs and questions are copied from the
+         latest offering of the same course, if there is one.
+    """
+
+    def get(self, request):
+        department = get_admin_department(request.user)
+        if not department:
+            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
+        offerings = InstructorCourse.objects.filter(is_historical=True, department=department).select_related(
+            'program', 'instructor__user').prefetch_related('students', 'clos')
+        plan_cache = {}
+        rows = [{
+            'id':           ic.frontend_id,
+            'code':         ic.code,
+            'title':        ic.title,
+            'programId':    ic.program.code.lower() if ic.program else '',
+            'programCode':  ic.program.code.upper() if ic.program else '',
+            'academicYear': ic.academic_year,
+            'semester':     ic.semester or _plan_semester(ic.program_id, ic.code, plan_cache),
+            'teacherName':  ic.instructor.user.get_full_name() or ic.instructor.user.username,
+            'state':        'finalized' if ic.status == 'closed' else 'draft',
+            'studentCount': len(ic.students.all()),
+            'cloCount':     len(ic.clos.all()),
+            'closedAt':     ic.closed_at,
+        } for ic in offerings]
+        rows.sort(key=lambda r: r['code'])
+        rows.sort(key=lambda r: _term_sort_key(r['academicYear']), reverse=True)
+        return Response(rows)
+
+    def post(self, request):
+        department = get_admin_department(request.user)
+        if not department:
+            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
+        data = request.data
+
+        term, term_no = _parse_past_term(data.get('academicYear'))
+        if not term:
+            return Response({'error': term_no}, status=status.HTTP_400_BAD_REQUEST)
+        program = Program.objects.filter(code__iexact=str(data.get('programId', '')).strip(), department=department).first()
+        if not program:
+            return Response({'error': 'Choose a programme of your department.'}, status=status.HTTP_400_BAD_REQUEST)
+        code = str(data.get('courseCode', '')).strip()
+        catalog = Course.objects.filter(code__iexact=code, department=department, program=program).first()
+        if not catalog:
+            return Response({'error': f'"{code}" is not in the {program.code.upper()} course catalog.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        teacher = InstructorProfile.objects.filter(employee_id=str(data.get('teacherId', '')).strip()).first()
+        if not teacher:
+            return Response({'error': 'Choose the teacher who taught this course.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if InstructorCourse.objects.filter(instructor=teacher, code__iexact=catalog.code,
+                                           program=program, academic_year__iexact=term).exists():
+            return Response({'error': f'{catalog.code} in {term} already exists for this teacher.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        students = _clean_past_students(data.get('students'))
+        if not students:
+            return Response({'error': 'Choose the students who took this course.'}, status=status.HTTP_400_BAD_REQUEST)
+        roster_errors = _past_roster_errors(catalog.code, term, list(students), department)
+        if roster_errors:
+            return Response({'error': ' '.join(roster_errors)}, status=status.HTTP_400_BAD_REQUEST)
+
+        earlier = InstructorCourse.objects.filter(code__iexact=catalog.code, program=program).prefetch_related(
+            'clos', 'obe_questions')
+        earlier = [c for c in earlier if c.clos.all()]
+        with transaction.atomic():
+            ic = InstructorCourse.objects.create(
+                instructor=teacher,
+                frontend_id=f'past-{catalog.code}-{teacher.employee_id}-{program.code.lower()}-{term}',
+                catalog_course=catalog,
+                code=catalog.code,
+                title=catalog.title,
+                course_type='Lab' if catalog.subtype == 'lab' else 'Theory',
+                department=department,
+                program=program,
+                credit_hours=catalog.credit_hours,
+                semester=_plan_semester(program.id, catalog.code) or '',
+                academic_year=term,
+                is_historical=True,
+            )
+            CourseStudent.objects.bulk_create([
+                CourseStudent(course=ic, reg_no=reg_no, name=name) for reg_no, name in students.items()
+            ])
+            if earlier:
+                _copy_course_setup(max(earlier, key=lambda c: _term_sort_key(c.academic_year)), ic)
+        return Response({'id': ic.frontend_id}, status=status.HTTP_201_CREATED)
+
+
+class PastCourseEligibleStudentsView(PastCourseBase):
+    """
+    GET /api/admin/past-courses/eligible-students/?programId=&courseCode=&academicYear=
+
+    Students of a programme who could have taken a course in a past term. `suggested`
+    is the batch whose semester that term matches the course's place in the plan;
+    anyone else on the list would be a retake or an off-plan course.
+    """
+
+    def get(self, request):
+        department = get_admin_department(request.user)
+        if not department:
+            return Response({'error': 'Admin profile not found'}, status=status.HTTP_403_FORBIDDEN)
+        term, term_no = _parse_past_term(request.query_params.get('academicYear'))
+        if not term:
+            return Response({'error': term_no}, status=status.HTTP_400_BAD_REQUEST)
+        program = Program.objects.filter(code__iexact=request.query_params.get('programId', '').strip(),
+                                         department=department).first()
+        code = request.query_params.get('courseCode', '').strip()
+        if not program or not code:
+            return Response({'error': 'programId and courseCode are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        busy = {r.strip().upper() for r in FinalResult.objects.filter(
+            course_code__iexact=code, academic_year__iexact=term).values_list('student_reg_no', flat=True)}
+        busy |= {r.strip().upper() for r in CourseStudent.objects.filter(
+            course__code__iexact=code, course__academic_year__iexact=term).values_list('reg_no', flat=True)}
+        plan_semester = _plan_semester(program.id, code)
+
+        rows = []
+        for st in AdmissionStudent.objects.filter(program=program).order_by('reg_no'):
+            admitted = admission_term_index(st.reg_no)
+            if st.reg_no.strip().upper() in busy or (admitted is not None and admitted > term_no):
+                continue
+            semester = semester_label(term_no - admitted + 1) if admitted is not None else ''
+            rows.append({'regNo': st.reg_no, 'name': st.name, 'semesterInTerm': semester,
+                         'suggested': bool(semester) and semester == plan_semester})
+        return Response({'semester': plan_semester or '', 'students': rows})
+
+
+class PastCourseSaveView(InstructorCourseView, PastCourseBase):
+    """
+    POST /api/admin/past-courses/save/   { courses: [...] }
+
+    The course screen's save. Same as a teacher's, under the course's own teacher,
+    except the course's identity and roster can't be changed by what is sent.
+    """
+    http_method_names = ['post', 'options']
+
+    def get_permissions(self):
+        return [IsDeptAdmin()]
+
+    def post(self, request, frontend_id=None):
+        courses = request.data.get('courses', [])
+        if not isinstance(courses, list) or len(courses) != 1 or not isinstance(courses[0], dict):
+            return Response({'error': 'Send one course at a time.'}, status=status.HTTP_400_BAD_REQUEST)
+        ic = self._course(request, courses[0].get('id', ''))
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        roster = {s.reg_no.strip().upper() for s in ic.students.all()}
+        sent = dict(courses[0])
+        sent.update(
+            departmentId=ic.department.dept_id,
+            programId=ic.program.code if ic.program else None,
+            academicYear=ic.academic_year,
+            code=ic.code,
+            title=ic.title,
+            students=[s for s in sent.get('students', [])
+                      if isinstance(s, dict) and str(s.get('regNo', '')).strip().upper() in roster],
+        )
+        return self._save_courses([sent], ic.instructor, _past_lock_message)
+
+
+class PastCourseDetailView(PastCourseBase):
+    """
+    GET    /api/admin/past-courses/<id>/   The course in the same shape as a teacher's course.
+    DELETE /api/admin/past-courses/<id>/   Discards a course that isn't finalized, with its marks.
+    """
+
+    def get(self, request, frontend_id):
+        ic = self._course(request, frontend_id)
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(InstructorCourseSerializer(ic).data)
+
+    def delete(self, request, frontend_id):
+        ic = self._course(request, frontend_id)
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        lock = _past_lock_message(ic)
+        if lock:
+            return Response({'error': lock}, status=status.HTTP_400_BAD_REQUEST)
+        ic.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PastCourseStudentsView(PastCourseBase):
+    """POST /api/admin/past-courses/<id>/students/   { students: [{regNo, name}] }  Add-only."""
+
+    def post(self, request, frontend_id):
+        ic = self._course(request, frontend_id)
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        lock = _past_lock_message(ic)
+        if lock:
+            return Response({'error': lock}, status=status.HTTP_400_BAD_REQUEST)
+        students = _clean_past_students(request.data.get('students'))
+        if not students:
+            return Response({'error': 'No valid registration numbers supplied'}, status=status.HTTP_400_BAD_REQUEST)
+        on_roster = {s.reg_no.strip().upper() for s in ic.students.all()}
+        new = {r: n for r, n in students.items() if r not in on_roster}
+        errors = _past_roster_errors(ic.code, ic.academic_year, list(new), ic.department, own_course=ic)
+        if errors:
+            return Response({'error': ' '.join(errors)}, status=status.HTTP_400_BAD_REQUEST)
+        for reg_no, name in new.items():
+            CourseStudent.objects.create(course=ic, reg_no=reg_no, name=name)
+        return Response({'courseId': frontend_id, 'added': list(new)}, status=status.HTTP_201_CREATED)
+
+
+class PastCourseStudentStatusView(PastCourseBase):
+    """PATCH /api/admin/past-courses/<id>/student-status/   { regNo, resultStatus }"""
+
+    def patch(self, request, frontend_id):
+        ic = self._course(request, frontend_id)
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        lock = _past_lock_message(ic)
+        if lock:
+            return Response({'error': lock}, status=status.HTTP_400_BAD_REQUEST)
+        result_status = request.data.get('resultStatus', '')
+        if result_status not in dict(CourseStudent.RESULT_STATUS_CHOICES):
+            return Response({'error': 'resultStatus must be blank, "absent" or "withdrawn"'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        reg_no = str(request.data.get('regNo', '')).strip()
+        if not CourseStudent.objects.filter(course=ic, reg_no__iexact=reg_no).update(result_status=result_status):
+            return Response({'error': f'Student "{reg_no}" is not in this course'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'regNo': reg_no, 'resultStatus': result_status})
+
+
+class PastCourseFinalizeView(PastCourseBase):
+    """
+    GET  /api/admin/past-courses/<id>/submit/   What stops this course being finalized.
+    POST /api/admin/past-courses/<id>/submit/   { acknowledgeWarnings }  Finalizes it.
+    """
+
+    @staticmethod
+    def _check(ic):
+        check = _submission_check(ic)
+        check['errors'] = check['errors'] + _past_course_errors(ic)
+        return check
+
+    def get(self, request, frontend_id):
+        ic = self._course(request, frontend_id)
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self._check(ic))
+
+    def post(self, request, frontend_id):
+        ic = self._course(request, frontend_id)
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        lock = _past_lock_message(ic)
+        if lock:
+            return Response({'error': lock}, status=status.HTTP_400_BAD_REQUEST)
+        check = self._check(ic)
+        if check['errors'] or check['missing']:
+            return Response({'error': 'Some marks or mappings are still missing.', **check},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if check['warnings'] and request.data.get('acknowledgeWarnings') is not True:
+            return Response({'error': 'Please review the warnings before finalizing.', **check},
+                            status=status.HTTP_409_CONFLICT)
+        with transaction.atomic():
+            ic.submitted_at = timezone.now()
+            ic.submission_warnings = check['warnings']
+            _finalize_offering(ic, request.user)
+        return Response({'courseId': ic.frontend_id, 'closedAt': ic.closed_at})
+
+
+class PastCourseReopenView(PastCourseBase):
+    """
+    POST /api/admin/past-courses/<id>/reopen/
+
+    Takes a finalized past course back to a draft, to correct a typing mistake. Its
+    grades leave the transcript until it is finalized again. Only for past courses
+    entered here: a course a teacher ran stays final.
+    """
+
+    def post(self, request, frontend_id):
+        ic = self._course(request, frontend_id)
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        if ic.status != 'closed':
+            return Response({'error': 'This course is not finalized.'}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            FinalResult.objects.filter(source_course=ic).delete()
+            ic.status = 'active'
+            ic.closed_at = None
+            ic.closed_by = None
+            ic.submitted_at = None
+            ic.submission_warnings = []
+            ic.save()
+        return Response({'courseId': ic.frontend_id, 'state': 'draft'})
