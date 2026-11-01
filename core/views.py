@@ -1134,7 +1134,9 @@ class InstructorCourseView(APIView):
                             continue
                         for q_frontend_id, score in q_marks.items():
                             q_obj = q_obj_map.get(q_frontend_id)
-                            if q_obj:
+                            if q_obj and score is None:   # the teacher cleared this cell
+                                OBEStudentMark.objects.filter(student=student, question=q_obj).delete()
+                            elif q_obj:
                                 OBEStudentMark.objects.update_or_create(
                                     student=student, question=q_obj,
                                     defaults={'score': score}

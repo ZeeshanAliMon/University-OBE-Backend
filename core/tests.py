@@ -268,6 +268,34 @@ class AuditRegressionTests(TestCase):
         check = self.client_for(self.ua).get('/api/instructor/courses/ic-a/submit/').data
         self.assertEqual(len(check['warnings']), 1)
 
+    def _save_question_mark(self, reg_no, score):
+        payload = {'courses': [{
+            'id': 'ic-a', 'code': 'CS12', 'title': 'Course', 'courseType': 'Theory',
+            'departmentId': 'CS', 'programId': 'cs', 'academicYear': 'Fall-2024',
+            'categories': [{'name': 'Quiz', 'percentage': 100, 'units': 1}],
+            'unitsData': {'Quiz': [{'unitNo': 1, 'passing': 5, 'totalMarks': 10, 'weightage': 100, 'mappedCLOs': []}]},
+            'students': [],
+            'obeQuestions': [{'id': 'q1', 'categoryName': 'Quiz', 'unitNo': 1, 'questionName': 'Q1',
+                              'maxMarks': 10, 'mappedCLOs': ['CLO-1']}],
+            'obeMarks': {reg_no: {'q1': score}},
+        }]}
+        return self.client_for(self.ua).post('/api/instructor/courses/', payload, format='json')
+
+    def test_cleared_cell_removes_the_mark_and_blocks_submitting(self):
+        from core.models import OBEStudentMark
+        self.assertEqual(self._save_question_mark('R2', None).status_code, 200)
+        self.assertFalse(OBEStudentMark.objects.filter(student=self.r2).exists())
+        self.assertTrue(OBEStudentMark.objects.filter(student=self.r1).exists())     # others untouched
+        self._mark_absent()
+        check = self.client_for(self.ua).get('/api/instructor/courses/ic-a/submit/').data
+        self.assertEqual(check['missing'], [{'regNo': 'R2', 'name': 'Two', 'items': ['Quiz 1']}])
+
+    def test_typed_zero_is_a_real_mark(self):
+        self.assertEqual(self._save_question_mark('R3', 0).status_code, 200)
+        self.assertEqual(self.r3.obe_marks.get(question=self.q).score, 0)
+        check = self.client_for(self.ua).get('/api/instructor/courses/ic-a/submit/').data
+        self.assertEqual(check['missing'], [])
+
     def test_submitted_course_is_read_only_and_moves_to_past_courses(self):
         self._mark_absent()
         self.assertEqual(self._submit().status_code, 200)
