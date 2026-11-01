@@ -317,6 +317,20 @@ class AuditRegressionTests(TestCase):
         self.assertEqual(self.client_for(self.da).post('/api/admin/enroll/', {'courseId': 'ic-a', 'students': []},
                                                        format='json').status_code, 400)
 
+    def test_past_course_detail_has_everything_but_only_once_handed_in(self):
+        c = self.client_for(self.ua)
+        url = '/api/instructor/past-courses/ic-a/'
+        self.assertEqual(c.get(url).status_code, 404)                        # still a current course
+        self._mark_absent()
+        self._submit()
+        data = c.get(url).data
+        self.assertEqual(data['code'], 'CS12')
+        self.assertEqual(data['categories'][0]['name'], 'Quiz')
+        self.assertEqual(data['obeMarks']['R1'], {'q1': 8})
+        self.assertEqual(data['clos'][0]['code'], 'CLO-1')
+        self.assertIsNotNone(data['submittedAt'])
+        self.assertEqual(self.client_for(self.ub).get(url).status_code, 404)  # another teacher's
+
     def _grade_of_r1(self):
         from core.views import _get_grade, _sheet_course_total
         return _get_grade(_sheet_course_total(self.r1)['total'], self.ic)[0]

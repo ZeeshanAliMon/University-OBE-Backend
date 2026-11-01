@@ -5470,6 +5470,29 @@ class InstructorPastCoursesView(APIView):
         return Response(data)
 
 
+class InstructorPastCourseDetailView(APIView):
+    """
+    GET /api/instructor/past-courses/<frontend_id>/
+
+    One submitted or finalized course in the same shape as the teacher's current
+    courses, so the dashboard can show all of it. Writes stay refused by
+    _teacher_lock_message.
+    """
+    permission_classes = [IsInstructor]
+
+    def get(self, request, frontend_id):
+        profile = get_instructor_profile(request.user)
+        if not profile:
+            return Response({'error': 'Instructor profile not found'}, status=status.HTTP_403_FORBIDDEN)
+        ic = prefetch_instructor_course(InstructorCourse.objects.filter(
+            models.Q(status='closed') | models.Q(submitted_at__isnull=False),
+            instructor=profile, frontend_id=frontend_id,
+        )).first()
+        if not ic:
+            return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(InstructorCourseSerializer(ic).data)
+
+
 class ReturnCourseView(APIView):
     """
     POST /api/admin/return-course/  { "courseId": "...", "note": "..." }

@@ -35,7 +35,7 @@ from .views import (
     AdmissionStudentListView, AdmissionStudentDetailView,
     CLOListView, CLODetailView,
     InstructorCourseStudentView,
-    InstructorCourseSubmitView, InstructorStudentStatusView, InstructorPastCoursesView,
+    InstructorCourseSubmitView, InstructorStudentStatusView, InstructorPastCoursesView, InstructorPastCourseDetailView,
     ReturnCourseView,
     DeptAdminProfileView,
     # Reports
@@ -76,6 +76,7 @@ urlpatterns = [
     path('instructor/profile/', InstructorProfileView.as_view(), name='instructor_profile'),
     path('instructor/courses/', InstructorCourseView.as_view(),  name='instructor_courses'),
     path('instructor/past-courses/', InstructorPastCoursesView.as_view(), name='instructor_past_courses'),
+    path('instructor/past-courses/<str:frontend_id>/', InstructorPastCourseDetailView.as_view(), name='instructor_past_course_detail'),
     path('instructor/courses/<str:frontend_id>/', InstructorCourseView.as_view(), name='instructor_course_detail'),
 
     # CLO management per instructor course
