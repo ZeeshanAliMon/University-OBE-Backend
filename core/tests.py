@@ -706,6 +706,17 @@ class AuditRegressionTests(TestCase):
         self.assertEqual([(s['semesterInTerm'], s['suggested']) for s in r.data['students']],
                          [('2nd', False), ('2nd', False)])                               # a retake, if taken
 
+    def test_cohort_comparison_lists_terms_by_date(self):
+        from core.models import InstructorCourse
+        for i, term in enumerate(['Spring-2025', 'Fall-2023', 'Spring-2024']):
+            InstructorCourse.objects.create(
+                frontend_id=f'ic-t{i}', instructor=self.pa, code='CS12', title='Course',
+                department=self.dept, program=self.program, catalog_course=self.course, academic_year=term,
+            )
+        r = self.client_for(self.qa).get('/api/reports/cohort-comparison/?programId=CS')
+        self.assertEqual([c['academicYear'] for c in r.data['cohorts']],
+                         ['Fall-2023', 'Spring-2024', 'Fall-2024', 'Spring-2025'])
+
     # ── Smaller audit fixes ──────────────────────────────────────────────────
     def test_other_instructor_cannot_touch_clos(self):
         b = self.client_for(self.ub)

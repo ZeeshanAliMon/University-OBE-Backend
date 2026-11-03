@@ -3925,6 +3925,7 @@ class COAttainmentSummaryView(APIView):
                 'clos':         clos_data,
             })
 
+        courses_data.sort(key=lambda c: (_term_sort_key(c['academicYear']), c['courseCode']))
         return Response({
             'programId': program.code.lower(),
             'semester':  semester or 'all',
@@ -4102,6 +4103,7 @@ class InstructorPerformanceView(APIView):
             marks_by_question.setdefault(m.question_id, []).append(m.score)
 
         result = []
+        plan_cache = {}
         for profile in instructors:
             courses_data = []
             # Only report on active (current) courses, not historical closed ones.
@@ -4121,7 +4123,8 @@ class InstructorPerformanceView(APIView):
                 courses_data.append({
                     'courseCode':        ic.code,
                     'courseTitle':       ic.title,
-                    'semester':          ic.semester,
+                    'programCode':       ic.program.code if ic.program else '',
+                    'semester':          ic.semester or _plan_semester(ic.program_id, ic.code, plan_cache),
                     'academicYear':      ic.academic_year,
                     'avgCLOAttainment':  avg,
                     'belowThreshold':    avg < ATTAINMENT_THRESHOLD,
@@ -4343,7 +4346,7 @@ class CohortComparisonView(APIView):
                     by_year[year]['total_obtained']  += sum(scores)
 
         cohorts = []
-        for year in sorted(by_year.keys()):
+        for year in sorted(by_year.keys(), key=_term_sort_key):
             tp = by_year[year]['total_possible']
             to = by_year[year]['total_obtained']
             cohorts.append({
@@ -4849,10 +4852,12 @@ class StudentEnrollmentView(APIView):
                 continue
             incoming_reg_nos.add(reg_no)
             if reg_no not in existing:
-                existing[reg_no] = CourseStudent.objects.create(
-                    course=ic, reg_no=reg_no, name=name or reg_no
+                # get_or_create: two identical requests at once used to 500 here.
+                existing[reg_no], created = CourseStudent.objects.get_or_create(
+                    course=ic, reg_no=reg_no, defaults={'name': name or reg_no}
                 )
-                enrolled.append(reg_no)
+                if created:
+                    enrolled.append(reg_no)
 
         removed = []
         kept    = []
