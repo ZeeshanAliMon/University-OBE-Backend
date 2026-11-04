@@ -2840,14 +2840,16 @@ class StudentGAAttainmentView(APIView):
         # Same rules as the other GA reports: the questions-passed rule in each
         # course, the best attempt at a repeated course, the framework's overall rule.
         ga_info, ga_courses, titles = {}, {}, {}
+        by_code = {}
         for cs in course_students:
+            by_code.setdefault(cs.course.code, []).append(cs)
+        for code, attempts in by_code.items():
+            cs = _best_attempt(attempts)
             ga_items, ga_objs = _ga_question_items(cs.course)[:2]
-            titles[cs.course.code] = cs.course.title
+            titles[code] = cs.course.title
             for g, items in ga_items.items():
                 ga_info[g] = ga_objs[g].name
-                pct = round(_ga_questions_passed(cs, items, ATTAINMENT_THRESHOLD) / len(items) * 100, 1)
-                courses = ga_courses.setdefault(g, {})
-                courses[cs.course.code] = max(pct, courses.get(cs.course.code, -1))
+                ga_courses.setdefault(g, {})[code] = round(_ga_questions_passed(cs, items, ATTAINMENT_THRESHOLD) / len(items) * 100, 1)
 
         attainments = []
         for ga_id in sorted(ga_courses, key=CourseGAStudentAttainmentView._ga_sort_key):
@@ -2949,7 +2951,8 @@ class CourseAttainmentView(APIView):
         all_questions = []
         course_title  = ''
         prog_id_out   = program_id.lower() if program_id else None
-        clo_scores_all = {}   # clo code -> {reg no: best %}: a repeated course counts once, at its best
+        clo_scores_all = {}   # clo code -> {reg no: %}: a repeated course counts once, at its best attempt
+        attempts_by_student = {}   # reg no -> [(attempt, its questions)]
         instructors    = []   # offering instructors, in order, de-duplicated
         academic_years = []
         program_obj    = None
@@ -2976,12 +2979,15 @@ class CourseAttainmentView(APIView):
             # student who earned 58% on their section read as 29%, i.e. CLO
             # attainment was divided by the number of sections.
             for student in _graded_students(ic):
-                all_students.append(_reg_key(student.reg_no))
-                for clo, pct in _clo_attainments_for_student(student, ic_questions).items():
-                    per_student = clo_scores_all.setdefault(clo, {})
-                    per_student[_reg_key(student.reg_no)] = max(pct, per_student.get(_reg_key(student.reg_no), -1))
+                attempts_by_student.setdefault(_reg_key(student.reg_no), []).append((student, ic_questions))
 
-        class_size = len(set(all_students))
+        for reg, attempts in attempts_by_student.items():
+            questions_of = {student.pk: questions for student, questions in attempts}
+            chosen = _best_attempt([student for student, _questions in attempts])
+            for clo, pct in _clo_attainments_for_student(chosen, questions_of[chosen.pk]).items():
+                clo_scores_all.setdefault(clo, {})[reg] = pct
+
+        class_size = len(attempts_by_student)
 
         # CLO max marks (total across all questions mapped to that CLO)
         clo_max_marks = {}
@@ -3543,28 +3549,39 @@ def _reg_key(reg_no):
     return str(reg_no or '').strip().upper()
 
 
+def _best_attempt(attempts):
+    """
+    The attempt reports count for a student who took a course more than once:
+    the whole attempt with the highest course total, the latest if tied. Its CLO
+    and GA results are used together, never mixed with another attempt's.
+    """
+    if len(attempts) == 1:
+        return attempts[0]
+    return max(attempts, key=lambda s: (_sheet_course_total(s)['total'], _term_sort_key(s.course.academic_year)))
+
+
 def _course_ga_best(offerings, reg_nos=None):
     """
     Each student's GA percent in each course code: {code: {ga_id: {reg_no: percent}}}.
-    A student with several attempts at a course counts once, at their best.
+    A student with several attempts at a course counts once, at their best attempt.
     reg_nos (upper case) limits it to those students. Also returns course titles.
     """
-    best, titles = {}, {}
+    attempts, titles = {}, {}
     for ic in offerings:
-        students = _graded_students(ic)
-        if reg_nos is not None:
-            students = [s for s in students if _reg_key(s.reg_no) in reg_nos]
-        students = [s for s in students if list(s.marks.all()) or list(s.obe_marks.all())]
-        if not students:
-            continue
-        titles[ic.code] = ic.title
-        ga_items = _ga_question_items(ic)[0]
+        for s in _graded_students(ic):
+            key = _reg_key(s.reg_no)
+            if (reg_nos is None or key in reg_nos) and (list(s.marks.all()) or list(s.obe_marks.all())):
+                attempts.setdefault((ic.code, key), []).append(s)
+                titles[ic.code] = ic.title
+
+    best = {}
+    ga_items_of = {}
+    for (code, key), rows in attempts.items():
+        s = _best_attempt(rows)
+        ga_items = ga_items_of.setdefault(s.course_id, _ga_question_items(s.course)[0])
         for g, items in ga_items.items():
-            per_student = best.setdefault(ic.code, {}).setdefault(g, {})
-            for s in students:
-                pct = round(_ga_questions_passed(s, items, ATTAINMENT_THRESHOLD) / len(items) * 100, 1)
-                key = _reg_key(s.reg_no)
-                per_student[key] = max(pct, per_student.get(key, -1))
+            best.setdefault(code, {}).setdefault(g, {})[key] = round(
+                _ga_questions_passed(s, items, ATTAINMENT_THRESHOLD) / len(items) * 100, 1)
     return best, titles
 
 
@@ -3803,8 +3820,12 @@ class StudentGAQuestionAttainmentView(APIView):
         official_grades = dict(FinalResult.objects.filter(student_reg_no__iexact=reg_no, source_course__isnull=False)
                                .values_list('source_course_id', 'grade_letter'))
         threshold = ATTAINMENT_THRESHOLD
-        totals = {}      # ga_id -> {'passed', 'total', 'courses': {code: best percent}, 'title'}
+        totals = {}      # ga_id -> {'passed', 'total', 'courses': {code: percent}, 'title'}
         courses_out = []
+        by_code = {}
+        for cs in enrolments:
+            by_code.setdefault(cs.course.code, []).append(cs)
+        counted = {_best_attempt(attempts).pk for attempts in by_code.values()}   # a repeated course counts at its best attempt
         for cs in enrolments:
             ic = cs.course
             ga_items, ga_objs, _clos, graded_count, unmapped = _ga_question_items(ic)
@@ -3813,10 +3834,12 @@ class StudentGAQuestionAttainmentView(APIView):
                 passed = _ga_questions_passed(cs, items, threshold)
                 pct = round(passed / len(items) * 100, 1)
                 per_ga[g] = {'passed': passed, 'total': len(items), 'percent': pct, 'attained': pct >= threshold}
+                if cs.pk not in counted:
+                    continue
                 t = totals.setdefault(g, {'passed': 0, 'total': 0, 'courses': {}, 'title': ga_objs[g].name})
                 t['passed'] += passed
                 t['total'] += len(items)
-                t['courses'][ic.code] = max(pct, t['courses'].get(ic.code, -1))
+                t['courses'][ic.code] = pct
             courses_out.append({
                 'courseCode': ic.code, 'courseTitle': ic.title, 'academicYear': ic.academic_year,
                 'status': ic.status,

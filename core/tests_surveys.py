@@ -72,6 +72,42 @@ class DirectAssessmentTests(AttainmentBase):
         self.assertEqual(r.data['classSize'], 1)
         self.assertEqual((r.data['clos'][0]['averageMarks'], r.data['clos'][0]['passedCount']), (80.0, 1))
 
+    def two_clo_attempt(self, term, clo1, clo2, reg='SP23-BSCS-001'):
+        """An attempt at C1 with one question per CLO, 100 marks each. CLO-1 is GA1, CLO-2 is GA2."""
+        ic = self.offering('C1', term, {reg: clo1})
+        CLO.objects.create(course=ic, code='CLO-2', mapped_ga=self.gas[1], order=2)
+        q2 = OBEQuestion.objects.create(course=ic, unit_item=ic.obe_questions.get().unit_item, frontend_id='q2', category_name='Final',
+                                        unit_no=1, question_name='Q2', max_marks=100, mapped_clos=['CLO-2'])
+        OBEStudentMark.objects.create(student=ic.students.get(), question=q2, score=clo2)
+        return ic
+
+    def test_best_whole_attempt_is_not_mixed_with_another(self):
+        # 1st attempt total 60 (CLO-1 40, CLO-2 80); 2nd total 57.5 (CLO-1 70, CLO-2 45).
+        # The 1st counts as a whole, so CLO-1 stays 40 and is not attained.
+        reg = 'SP23-BSCS-001'
+        self.two_clo_attempt('Fall-2024', 40, 80)
+        self.two_clo_attempt('Fall-2025', 70, 45)
+        c = self.client_for(self.qa)
+        clos = {x['code']: x for x in c.get('/api/reports/course-attainment/?courseCode=C1&programId=BSCS').data['clos']}
+        self.assertEqual((clos['CLO-1']['averageMarks'], clos['CLO-1']['passedCount']), (40.0, 0))
+        self.assertEqual((clos['CLO-2']['averageMarks'], clos['CLO-2']['passedCount']), (80.0, 1))
+        attrs = {a['id']: a for a in c.get('/api/reports/program-ga-attainment/?programId=BSCS').data['attributes']}
+        self.assertEqual(attrs['GA-BSCS-1']['contributingCourses'][0]['score'], 0.0)
+        self.assertEqual(attrs['GA-BSCS-2']['contributingCourses'][0]['score'], 100.0)
+        for path, key, value in ((f'/api/reports/student-ga-questions/?regNo={reg}', 'gas', 'percent'),
+                                 (f'/api/reports/student-ga-attainment/?regNo={reg}', 'attainments', 'score')):
+            rows = c.get(path).data[key]
+            self.assertEqual([r[value] for r in rows], [0.0, 100.0], path)
+        # Choosing one term looks at that attempt alone.
+        clos = {x['code']: x for x in c.get('/api/reports/course-attainment/?courseCode=C1&programId=BSCS&academicYear=Fall-2025').data['clos']}
+        self.assertEqual(clos['CLO-1']['averageMarks'], 70.0)
+
+    def test_best_attempt_tie_uses_the_latest(self):
+        self.two_clo_attempt('Fall-2024', 40, 80)
+        self.two_clo_attempt('Fall-2025', 80, 40)
+        clos = {x['code']: x for x in self.client_for(self.qa).get('/api/reports/course-attainment/?courseCode=C1&programId=BSCS').data['clos']}
+        self.assertEqual((clos['CLO-1']['averageMarks'], clos['CLO-2']['averageMarks']), (80.0, 40.0))
+
     def test_student_needs_half_the_courses_and_a_50_average(self):
         reg = 'SP23-BSCS-001'
         self.offering('C1', 'Fall-2024', {reg: 100})
