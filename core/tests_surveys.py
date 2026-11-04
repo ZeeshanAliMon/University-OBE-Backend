@@ -136,6 +136,21 @@ class CohortAndSurveyTests(AttainmentBase):
         self.assertTrue(ga['attained'])
         self.assertIsNone(data['attributes'][1]['combined'])   # GA2 has neither
 
+    def test_cohort_weights_are_configurable(self):
+        self.graduate()    # direct 50
+        self.upload('exit', [{'program': 'BSCS', 'batch': 'SP23', 'ratings': {'1': 5}}])    # indirect 100
+        c = self.client_for(self.qa)
+        self.assertEqual(c.get('/api/reports/cohort-ga/?programId=BSCS').data['attributes'][0]['combined'], 60.0)
+        self.assertEqual(c.patch('/api/departments/computing/', {'directWeight': 70}, format='json').status_code, 200)
+        data = c.get('/api/reports/cohort-ga/?programId=BSCS').data
+        self.assertEqual((data['directWeight'], data['indirectWeight']), (70, 30))
+        self.assertEqual(data['attributes'][0]['combined'], 65.0)
+        # At 100% direct, no survey is needed for a combined result.
+        c.patch('/api/departments/computing/', {'directWeight': 100}, format='json')
+        self.assertEqual(c.get('/api/reports/cohort-ga/?programId=BSCS').data['attributes'][0]['combined'], 50.0)
+        self.assertEqual(c.patch('/api/departments/computing/', {'directWeight': 101}, format='json').status_code, 400)
+        self.assertEqual(self.client_for(self.admin).patch('/api/departments/computing/', {'directWeight': 50}, format='json').status_code, 403)
+
     def test_po_keeps_direct_and_indirect_separate(self):
         self.offering('C1', 'Fall-2024', {'SP23-BSCS-001': 90})   # GA1 direct 100
         self.upload('alumni', [

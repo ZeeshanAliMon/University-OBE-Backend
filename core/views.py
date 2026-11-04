@@ -4468,12 +4468,11 @@ class CohortLevelGAView(APIView):
 
     Cohort Level GA Attainment for the program's graduated batches: the direct
     result from marks, the indirect result from the internship and exit surveys,
-    and combined = 80% direct + 20% indirect. Combined needs both.
+    and combined by the department's weights (80% direct + 20% indirect unless
+    QA changes them). Combined needs every result with a weight above 0.
     Survey data, so QA and department admins only.
     """
     permission_classes = [IsDeptAdminOrQA]
-
-    DIRECT_WEIGHT, INDIRECT_WEIGHT = 0.8, 0.2
 
     def get(self, request):
         program_id = request.query_params.get('programId', '').strip()
@@ -4484,6 +4483,8 @@ class CohortLevelGAView(APIView):
         except Program.DoesNotExist:
             return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        direct_weight = program.department.direct_weight
+        indirect_weight = 100 - direct_weight
         graduated = _graduated_batches(program)
         reg_nos = set().union(*graduated.values()) if graduated else set()
         best, titles = _course_ga_best(_program_offerings(program), reg_nos=reg_nos)
@@ -4502,8 +4503,9 @@ class CohortLevelGAView(APIView):
             survey = indirect.get(ga.ga_id, {})
             has_direct = bool(courses)
             has_indirect = 'indirect' in survey
-            combined = (round(summary['averageAttainment'] * self.DIRECT_WEIGHT + survey['indirect'] * self.INDIRECT_WEIGHT, 2)
-                        if has_direct and has_indirect else None)
+            combined = None
+            if (has_direct or not direct_weight) and (has_indirect or not indirect_weight):
+                combined = round((summary['averageAttainment'] * direct_weight + survey.get('indirect', 0) * indirect_weight) / 100, 2)
             attributes.append({
                 'id':              ga.ga_id,
                 'title':           ga.name,
@@ -4528,6 +4530,8 @@ class CohortLevelGAView(APIView):
             'programCode':         program.code.upper(),
             'departmentName':      program.department.name,
             'graduatedBatches':    sorted(graduated),
+            'directWeight':        direct_weight,
+            'indirectWeight':      indirect_weight,
             'studentCount':        len(reg_nos),
             'responseCounts':      response_counts,
             'attainmentThreshold': ATTAINMENT_THRESHOLD,

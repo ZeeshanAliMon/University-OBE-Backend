@@ -48,6 +48,8 @@ class Department(models.Model):
     name       = models.CharField(max_length=200, unique=True)
     vision     = models.TextField(blank=True)
     mission    = models.TextField(blank=True)
+    # Cohort Level GA: combined = this % of direct + the rest of indirect.
+    direct_weight = models.PositiveSmallIntegerField(default=80)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

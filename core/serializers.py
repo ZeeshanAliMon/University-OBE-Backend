@@ -88,15 +88,17 @@ class POSerializer(serializers.ModelSerializer):
 
 class DepartmentSerializer(serializers.ModelSerializer):
     id = serializers.CharField(source='dept_id')
+    directWeight = serializers.IntegerField(source='direct_weight', min_value=0, max_value=100, required=False)
 
     class Meta:
         model  = Department
-        fields = ['id', 'name', 'vision', 'mission']
+        fields = ['id', 'name', 'vision', 'mission', 'directWeight']
 
     def update(self, instance, validated_data):
         instance.vision  = validated_data.get('vision',  instance.vision)
         instance.mission = validated_data.get('mission', instance.mission)
         instance.name    = validated_data.get('name',    instance.name)
+        instance.direct_weight = validated_data.get('direct_weight', instance.direct_weight)
         instance.save()
         return instance
 
