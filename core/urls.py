@@ -56,7 +56,9 @@ from .views import (
     AtRiskStudentsView,
     GapAnalysisView,
     CLOCQIReportView,
+    CohortLevelGAView,
 )
+from .survey_views import SurveyFormsView, SurveyMappingView, SurveyResultsView, SurveyUploadDetailView, SurveyUploadView
 
 urlpatterns = [
     path('health/', health_check, name='health_check'),
@@ -132,6 +134,14 @@ urlpatterns = [
     path('reports/at-risk-students/',      AtRiskStudentsView.as_view(),       name='report_at_risk_students'),
     path('reports/gap-analysis/',          GapAnalysisView.as_view(),          name='report_gap_analysis'),
     path('reports/clo-cqi/',               CLOCQIReportView.as_view(),         name='report_clo_cqi'),
+    path('reports/cohort-ga/',             CohortLevelGAView.as_view(),        name='report_cohort_ga'),
+
+    # Surveys (indirect assessment)
+    path('surveys/forms/',                 SurveyFormsView.as_view(),          name='survey_forms'),
+    path('surveys/mapping/',               SurveyMappingView.as_view(),        name='survey_mapping'),
+    path('surveys/results/',               SurveyResultsView.as_view(),        name='survey_results'),
+    path('surveys/uploads/',               SurveyUploadView.as_view(),         name='survey_uploads'),
+    path('surveys/uploads/<int:upload_id>/', SurveyUploadDetailView.as_view(), name='survey_upload_detail'),
 ]
 
 

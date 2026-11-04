@@ -834,3 +834,72 @@ class FinalResult(models.Model):
 
     def __str__(self):
         return f"{self.student_reg_no} — {self.course_code} ({self.academic_year}): {self.grade_letter}"
+
+
+# ─── Surveys (indirect assessment) ───────────────────────────────────────────
+#
+# The forms run in Microsoft Forms; QA uploads the downloaded responses. The
+# questions and the framework's default mappings are in core/surveys.py.
+
+SURVEY_FORM_CHOICES = [
+    ('internship', 'Internship Feedback'),
+    ('exit',       'Graduating (Exit) Survey'),
+    ('alumni',     'Alumni Survey'),
+    ('employer',   'Employer Survey'),
+]
+
+
+class SurveyMapping(models.Model):
+    """QA's change to the framework's mapping of a question: target is a GA id or a PO code."""
+    program     = models.ForeignKey(Program, on_delete=models.CASCADE, related_name='survey_mappings')
+    form_type   = models.CharField(max_length=20, choices=SURVEY_FORM_CHOICES)
+    question_no = models.PositiveSmallIntegerField()
+    target      = models.CharField(max_length=30, blank=True)
+
+    class Meta:
+        unique_together = ('program', 'form_type', 'question_no')
+        ordering        = ['form_type', 'question_no']
+
+
+class SurveyUpload(models.Model):
+    """One downloaded response file. A new file for the same form and year replaces it."""
+    department       = models.ForeignKey(Department, on_delete=models.PROTECT, related_name='survey_uploads')
+    form_type        = models.CharField(max_length=20, choices=SURVEY_FORM_CHOICES)
+    year             = models.PositiveSmallIntegerField()
+    file_name        = models.CharField(max_length=255, blank=True)
+    # {program code: {question no: target}} as mapped when uploaded, so changing a
+    # mapping later leaves past results as they were.
+    mapping_snapshot = models.JSONField(default=dict)
+    uploaded_by      = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='survey_uploads')
+    uploaded_at      = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('department', 'form_type', 'year')
+        ordering        = ['-year', 'form_type']
+
+    def __str__(self):
+        return f"{self.get_form_type_display()} {self.year}"
+
+
+class SurveyResponse(models.Model):
+    """One respondent. Seen by QA and department admins only."""
+    upload            = models.ForeignKey(SurveyUpload, on_delete=models.CASCADE, related_name='responses')
+    program           = models.ForeignKey(Program, on_delete=models.PROTECT, related_name='survey_responses')
+    ratings           = models.JSONField(default=dict)   # {question no: 1..5}
+    reg_no            = models.CharField(max_length=60, blank=True)
+    batch             = models.CharField(max_length=10, blank=True, db_index=True)   # 'SP23'
+    section           = models.CharField(max_length=30, blank=True)
+    graduation_year   = models.PositiveSmallIntegerField(null=True, blank=True)
+    respondent_name   = models.CharField(max_length=200, blank=True)
+    respondent_email  = models.CharField(max_length=254, blank=True)
+    supervisor_name   = models.CharField(max_length=200, blank=True)
+    employee_name     = models.CharField(max_length=200, blank=True)
+    designation       = models.CharField(max_length=200, blank=True)
+    organization      = models.CharField(max_length=200, blank=True)
+    organization_type = models.CharField(max_length=60, blank=True)
+    working_since     = models.CharField(max_length=60, blank=True)
+    comment           = models.TextField(blank=True)
+    submitted_at      = models.CharField(max_length=40, blank=True)
+
+    class Meta:
+        ordering = ['id']

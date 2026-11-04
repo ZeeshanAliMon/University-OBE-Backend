@@ -36,6 +36,7 @@ from .serializers import (
     CourseWriteSerializer, CLOWriteSerializer,
     TeacherWriteSerializer, StudentWriteSerializer,
 )
+from .surveys import SURVEY_KPI, batch_code, graduation_years, indirect_ga, indirect_po
 from .permissions import IsQA, IsQAOrReadOnly, IsInstructor, IsAdmission, IsDeptAdmin, IsDeptAdminOrQA, IsStaffReport, IsInstructorOrStaffReport
 
 logger = logging.getLogger(__name__)
@@ -2450,10 +2451,7 @@ def _student_total_percentage(course_student) -> float:
 
 def _clo_attainments_for_student(course_student, questions_qs):
     """Returns dict: { 'CLO-1': percentage_float, ... }"""
-    obe_marks = {
-        m.question_id: m.score
-        for m in course_student.obe_marks.select_related('question').all()
-    }
+    obe_marks = {m.question_id: m.score for m in course_student.obe_marks.all()}
     clo_scores = {}
     clo_max    = {}
     for q in questions_qs:
@@ -2511,51 +2509,24 @@ class ProgramGAAttainmentView(APIView):
             models.Q(program=program)
         ).order_by('ga_id')
 
-        # GA attainment by questions passed (question -> CLO -> GA), the same
-        # method as the QA "GA by Course" / "GA by Student" reports. Every
-        # offering of a course code is pooled (weighted by student count);
-        # averageMarks is the course's average GA attainment over its marked
-        # students.
-        instructor_courses = InstructorCourse.objects.filter(
-            program=program
-        ).select_related('catalog_course').prefetch_related(*GA_QUESTION_PREFETCH)
-
-        course_ga_pcts   = {}   # code -> ga_id -> [student percent]
-        course_title_map = {}
-        program_reg_nos  = set()   # marked students across the programme
-        for ic in instructor_courses:
-            students = _graded_students(ic)
-            if not students:
-                continue
-            program_reg_nos.update(
-                s.reg_no.strip().upper() for s in students if list(s.marks.all()) or list(s.obe_marks.all())
-            )
-            for g, pcts in _offering_ga_student_pcts(ic, students).items():
-                course_ga_pcts.setdefault(ic.code, {}).setdefault(g, []).extend(pcts)
-            course_title_map[ic.code] = ic.title
-
-        ga_courses = {}
-        for code in sorted(course_ga_pcts):
-            for g, pcts in course_ga_pcts[code].items():
-                ga_courses.setdefault(g, []).append({
-                    'code':         code,
-                    'title':        course_title_map.get(code, code),
-                    'averageMarks': round(sum(pcts) / len(pcts), 2),
-                    'studentCount': len(pcts),
-                })
+        # A course's score is the percentage of its students who attain the GA
+        # (by questions passed); the GA's result is the average of its course
+        # scores; the KPI is the share of mapped courses that attain it.
+        best, titles = _course_ga_best(_program_offerings(program))
+        ga_courses = _direct_ga_courses(best, titles)
+        program_reg_nos = {reg for per_ga in best.values() for per_student in per_ga.values() for reg in per_student}
 
         attributes = []
         for ga in gas:
-            contributing    = ga_courses.get(ga.ga_id, [])
-            avg_attainment  = round(sum(c['averageMarks'] for c in contributing) / len(contributing), 2) if contributing else 0.0
+            contributing = ga_courses.get(ga.ga_id, [])
+            summary = _direct_ga_summary(contributing)
             attributes.append({
-                'id':                      ga.ga_id,
-                'title':                   ga.name,
-                'description':             ga.description,
-                'averageAttainment':       avg_attainment,
-                'contributingCoursesCount': len(contributing),
-                'attainmentStatus':        'Passed' if avg_attainment >= ATTAINMENT_THRESHOLD else 'Failed',
-                'contributingCourses':     contributing,
+                'id':                  ga.ga_id,
+                'title':               ga.name,
+                'description':         ga.description,
+                **summary,
+                'attainmentStatus':    'Passed' if summary['kpiMet'] else 'Failed',
+                'contributingCourses': contributing,
             })
 
         return Response({
@@ -2622,21 +2593,7 @@ class ProgramGAAttainmentBySemesterView(APIView):
             models.Q(program=program)
         ).order_by('ga_id')
 
-        # Same pooling approach as ProgramGAAttainmentView (see fix note
-        # there): collect every student's percentage across every offering
-        # of a course code first, then average once — weights by student
-        # count rather than by offering count.
-        instructor_courses = InstructorCourse.objects.filter(
-            program=program
-        ).select_related('catalog_course').prefetch_related(*GA_QUESTION_PREFETCH)
-
-        course_ga_pcts = {}   # code -> ga_id -> [student percent]
-        for ic in instructor_courses:
-            students = _graded_students(ic)
-            if not students:
-                continue
-            for g, pcts in _offering_ga_student_pcts(ic, students).items():
-                course_ga_pcts.setdefault(ic.code, {}).setdefault(g, []).extend(pcts)
+        best, titles = _course_ga_best(_program_offerings(program))
 
         semester_plans = SemesterPlan.objects.filter(program=program)
         # Preserve curriculum order (1st..8th), only including configured semesters.
@@ -2647,23 +2604,16 @@ class ProgramGAAttainmentBySemesterView(APIView):
         for sem in semester_order:
             if sem not in plans_by_semester:
                 continue
-            sem_course_codes = [c for c in plans_by_semester[sem] if c in course_ga_pcts]
-            ga_courses = {}
-            for code in sem_course_codes:
-                for ga_id, pcts in course_ga_pcts[code].items():
-                    ga_courses.setdefault(ga_id, []).append(
-                        {'code': code, 'averageMarks': round(sum(pcts) / len(pcts), 2)})
+            ga_courses = _direct_ga_courses(best, titles, codes=set(plans_by_semester[sem]))
 
             attributes = []
             for ga in gas:
-                contributing   = ga_courses.get(ga.ga_id, [])
-                avg_attainment = round(sum(c['averageMarks'] for c in contributing) / len(contributing), 2) if contributing else 0.0
+                summary = _direct_ga_summary(ga_courses.get(ga.ga_id, []))
                 attributes.append({
                     'id':                       ga.ga_id,
                     'title':                    ga.name,
-                    'averageAttainment':        avg_attainment,
-                    'contributingCoursesCount': len(contributing),
-                    'attainmentStatus':         'Passed' if avg_attainment >= ATTAINMENT_THRESHOLD else 'Failed',
+                    **summary,
+                    'attainmentStatus':         'Passed' if summary['kpiMet'] else 'Failed',
                 })
 
             semesters_out.append({
@@ -2765,55 +2715,40 @@ class BatchGAAttainmentView(APIView):
 
         # Pull every InstructorCourse in this department (optionally scoped
         # to one program) and score this batch's students by questions passed.
-        ic_qs = InstructorCourse.objects.filter(department=department)
+        ic_qs = _report_offerings(InstructorCourse.objects.filter(department=department))
         if program:
             ic_qs = ic_qs.filter(program=program)
         ic_qs = ic_qs.select_related('catalog_course').prefetch_related(*GA_QUESTION_PREFETCH)
 
-        # ga_id -> list of individual student percentages (questions passed,
-        # per student per course), restricted to this batch.
-        ga_student_pcts = {}
-        # reg_no -> ga_id -> [questions passed, questions] over all their
-        # courses, for the per-student progress table (same rule as the QA
-        # "GA by Student" report: GA % = passed / total questions for the GA).
-        student_ga_totals = {}
-        for ic in ic_qs:
-            batch_students = [s for s in _graded_students(ic) if s.reg_no.strip().upper() in reg_nos]
-            if not batch_students:
-                continue
-            for g, pcts in _offering_ga_student_pcts(ic, batch_students).items():
-                ga_student_pcts.setdefault(g, []).extend(pcts)
-            ga_items = _ga_question_items(ic)[0]
-            for st in batch_students:
-                if not (list(st.marks.all()) or list(st.obe_marks.all())):
-                    continue   # unmarked roster rows don't count, as in _offering_ga_student_pcts
-                per_ga = student_ga_totals.setdefault(st.reg_no.strip().upper(), {})
-                for g, items in ga_items.items():
-                    t = per_ga.setdefault(g, [0, 0])
-                    t[0] += _ga_questions_passed(st, items, ATTAINMENT_THRESHOLD)
-                    t[1] += len(items)
+        # reg_no -> ga_id -> {course code: percent}, for the framework's student rule.
+        best, _titles = _course_ga_best(ic_qs, reg_nos=reg_nos)
+        student_ga = {}
+        for code, per_ga in best.items():
+            for g, per_student in per_ga.items():
+                for reg, pct in per_student.items():
+                    student_ga.setdefault(reg, {}).setdefault(g, {})[code] = pct
 
+        ga_overall = {}   # ga_id -> [each assessed student's overall result]
         students_data = []
         for adm in students_qs.select_related('program').order_by('reg_no'):
-            per_ga = student_ga_totals.get(adm.reg_no.upper(), {})
+            per_ga = {g: _student_overall_ga(courses) for g, courses in student_ga.get(adm.reg_no.upper(), {}).items()}
+            for g, overall in per_ga.items():
+                ga_overall.setdefault(g, []).append(overall)
             students_data.append({
                 'regNo':       adm.reg_no,
                 'name':        adm.name,
                 'programCode': adm.program.code.upper() if adm.program else '',
                 'programName': adm.program.name if adm.program else '',
-                'gaScores':    {
-                    ga.ga_id: (round(per_ga[ga.ga_id][0] / per_ga[ga.ga_id][1] * 100, 1)
-                               if per_ga.get(ga.ga_id) and per_ga[ga.ga_id][1] else None)
-                    for ga in gas
-                },
+                'gaScores':    {ga.ga_id: per_ga[ga.ga_id]['percent'] if ga.ga_id in per_ga else None for ga in gas},
+                'gaAttained':  {ga.ga_id: per_ga[ga.ga_id]['attained'] if ga.ga_id in per_ga else None for ga in gas},
             })
 
         attributes = []
         for ga in gas:
-            pcts = ga_student_pcts.get(ga.ga_id, [])
-            assessed_count = len(pcts)
-            passed_count   = sum(1 for p in pcts if p >= ATTAINMENT_THRESHOLD)
-            avg_attainment = round(sum(pcts) / assessed_count, 2) if assessed_count > 0 else 0.0
+            overall = ga_overall.get(ga.ga_id, [])
+            assessed_count = len(overall)
+            passed_count   = sum(1 for o in overall if o['attained'])
+            avg_attainment = round(sum(o['percent'] for o in overall) / assessed_count, 2) if assessed_count > 0 else 0.0
             attributes.append({
                 'id':                ga.ga_id,
                 'title':             ga.name,
@@ -2902,70 +2837,31 @@ class StudentGAAttainmentView(APIView):
                 'attainments': [],
             })
 
-        course_codes = [cs.course.code for cs in course_students]
-        catalog_map  = {
-            c.code: c
-            for c in Course.objects.filter(code__in=course_codes).prefetch_related('mapped_gas')
-        }
-
-        ga_scores         = {}   # ga_id → [clo_attainment_scores]
-        ga_info           = {}   # ga_id → { gaId, gaTitle }
-        ga_course_details = {}   # ga_id → [{ code, title, score, clos }]
-
+        # Same rules as the other GA reports: the questions-passed rule in each
+        # course, the best attempt at a repeated course, the framework's overall rule.
+        ga_info, ga_courses, titles = {}, {}, {}
         for cs in course_students:
-            catalog_course = catalog_map.get(cs.course.code)
-            if not catalog_course:
-                continue
-
-            # Get CLO attainments for this student in this course
-            questions    = list(cs.course.obe_questions.all())
-            clo_pcts     = _clo_attainments_for_student(cs, questions)
-
-            if not clo_pcts:
-                # No OBE questions/marks yet — skip this course for GA calculation
-                continue
-
-            # Get CLOs for this course with their GA mappings
-            clos = cs.course.clos.select_related('mapped_ga').all()
-            clo_ga_map = {
-                clo.code: clo.mapped_ga
-                for clo in clos
-                if clo.mapped_ga
-            }
-
-            # For each CLO that has a score AND maps to a GA, add to that GA's scores
-            course_ga_scores = {}  # ga_id → [clo scores] for this course
-            for clo_code, clo_pct in clo_pcts.items():
-                ga = clo_ga_map.get(clo_code)
-                if not ga:
-                    continue
-                ga_scores.setdefault(ga.ga_id, []).append(clo_pct)
-                ga_info[ga.ga_id] = {'gaId': ga.ga_id, 'gaTitle': ga.name}
-                course_ga_scores.setdefault(ga.ga_id, []).append(clo_pct)
-
-            # Build per-course detail for each GA this course contributes to
-            for ga_id, scores in course_ga_scores.items():
-                course_avg = round(sum(scores) / len(scores), 2) if scores else 0.0
-                ga_course_details.setdefault(ga_id, []).append({
-                    'code':  cs.course.code,
-                    'title': cs.course.title,
-                    'score': course_avg,
-                    'cloScores': {
-                        clo_code: clo_pcts[clo_code]
-                        for clo_code in clo_pcts
-                        if clo_ga_map.get(clo_code) and clo_ga_map[clo_code].ga_id == ga_id
-                    }
-                })
+            ga_items, ga_objs = _ga_question_items(cs.course)[:2]
+            titles[cs.course.code] = cs.course.title
+            for g, items in ga_items.items():
+                ga_info[g] = ga_objs[g].name
+                pct = round(_ga_questions_passed(cs, items, ATTAINMENT_THRESHOLD) / len(items) * 100, 1)
+                courses = ga_courses.setdefault(g, {})
+                courses[cs.course.code] = max(pct, courses.get(cs.course.code, -1))
 
         attainments = []
-        for ga_id, scores in sorted(ga_scores.items()):
-            avg = round(sum(scores) / len(scores), 2) if scores else 0.0
+        for ga_id in sorted(ga_courses, key=CourseGAStudentAttainmentView._ga_sort_key):
+            overall = _student_overall_ga(ga_courses[ga_id])
             attainments.append({
                 'gaId':               ga_id,
-                'gaTitle':            ga_info[ga_id]['gaTitle'],
-                'score':              avg,
-                'passed':             avg >= ATTAINMENT_THRESHOLD,
-                'contributingCourses': ga_course_details.get(ga_id, []),
+                'gaTitle':            ga_info[ga_id],
+                'score':              overall['percent'],
+                'passed':             overall['attained'],
+                'coursesAttained':    overall['coursesAttained'],
+                'courseCount':        overall['courseCount'],
+                'contributingCourses': [
+                    {'code': code, 'title': titles[code], 'score': pct} for code, pct in sorted(ga_courses[ga_id].items())
+                ],
             })
 
         return Response({
@@ -3053,7 +2949,7 @@ class CourseAttainmentView(APIView):
         all_questions = []
         course_title  = ''
         prog_id_out   = program_id.lower() if program_id else None
-        clo_scores_all = {}   # clo code -> [one % per student]
+        clo_scores_all = {}   # clo code -> {reg no: best %}: a repeated course counts once, at its best
         instructors    = []   # offering instructors, in order, de-duplicated
         academic_years = []
         program_obj    = None
@@ -3080,11 +2976,12 @@ class CourseAttainmentView(APIView):
             # student who earned 58% on their section read as 29%, i.e. CLO
             # attainment was divided by the number of sections.
             for student in _graded_students(ic):
-                all_students.append(student)
+                all_students.append(_reg_key(student.reg_no))
                 for clo, pct in _clo_attainments_for_student(student, ic_questions).items():
-                    clo_scores_all.setdefault(clo, []).append(pct)
+                    per_student = clo_scores_all.setdefault(clo, {})
+                    per_student[_reg_key(student.reg_no)] = max(pct, per_student.get(_reg_key(student.reg_no), -1))
 
-        class_size = len(all_students)
+        class_size = len(set(all_students))
 
         # CLO max marks (total across all questions mapped to that CLO)
         clo_max_marks = {}
@@ -3126,7 +3023,7 @@ class CourseAttainmentView(APIView):
 
         clos_result = []
         for clo in sorted(clo_scores_all.keys()):
-            scores         = clo_scores_all[clo]
+            scores         = list(clo_scores_all[clo].values())
             class_avg      = round(sum(scores) / len(scores), 2) if scores else 0.0
             passed_count   = sum(1 for s in scores if s >= ATTAINMENT_THRESHOLD)
             attain_pct     = round((passed_count / len(scores) * 100), 2) if scores else 0.0
@@ -3637,6 +3534,124 @@ def _student_ga_attainments(course_student, threshold=None):
     return out
 
 
+def _report_offerings(qs):
+    """Offerings reports count: a past course still being entered is a draft."""
+    return qs.exclude(is_historical=True, status='active')
+
+
+def _reg_key(reg_no):
+    return str(reg_no or '').strip().upper()
+
+
+def _course_ga_best(offerings, reg_nos=None):
+    """
+    Each student's GA percent in each course code: {code: {ga_id: {reg_no: percent}}}.
+    A student with several attempts at a course counts once, at their best.
+    reg_nos (upper case) limits it to those students. Also returns course titles.
+    """
+    best, titles = {}, {}
+    for ic in offerings:
+        students = _graded_students(ic)
+        if reg_nos is not None:
+            students = [s for s in students if _reg_key(s.reg_no) in reg_nos]
+        students = [s for s in students if list(s.marks.all()) or list(s.obe_marks.all())]
+        if not students:
+            continue
+        titles[ic.code] = ic.title
+        ga_items = _ga_question_items(ic)[0]
+        for g, items in ga_items.items():
+            per_student = best.setdefault(ic.code, {}).setdefault(g, {})
+            for s in students:
+                pct = round(_ga_questions_passed(s, items, ATTAINMENT_THRESHOLD) / len(items) * 100, 1)
+                key = _reg_key(s.reg_no)
+                per_student[key] = max(pct, per_student.get(key, -1))
+    return best, titles
+
+
+def _course_ga_score(per_student):
+    """A course's GA score: the percentage of its students who attain the GA."""
+    attained = sum(1 for p in per_student.values() if p >= ATTAINMENT_THRESHOLD)
+    return round(attained / len(per_student) * 100, 2) if per_student else 0.0, attained
+
+
+def _direct_ga_courses(best, titles, codes=None):
+    """{ga_id: [one row per course]} from _course_ga_best, optionally for some course codes only."""
+    out = {}
+    for code in sorted(best):
+        if codes is not None and code not in codes:
+            continue
+        for g, per_student in best[code].items():
+            score, attained = _course_ga_score(per_student)
+            out.setdefault(g, []).append({
+                'code':             code,
+                'title':            titles.get(code, code),
+                'score':            score,
+                'studentsAttained': attained,
+                'studentCount':     len(per_student),
+                'attained':         score >= ATTAINMENT_THRESHOLD,
+            })
+    return out
+
+
+def _direct_ga_summary(courses):
+    """
+    The direct GA result: the average of its course scores, for the 80/20 rule.
+    The KPI is the framework's: at least 50% of the mapped courses attain the GA.
+    """
+    attained = sum(1 for c in courses if c['attained'])
+    average = round(sum(c['score'] for c in courses) / len(courses), 2) if courses else 0.0
+    return {
+        'averageAttainment':        average,
+        'contributingCoursesCount': len(courses),
+        'coursesAttained':          attained,
+        'kpiMet':                   bool(courses) and attained / len(courses) * 100 >= ATTAINMENT_THRESHOLD,
+    }
+
+
+def _student_overall_ga(course_percents):
+    """
+    A student's overall GA from {course code: percent}. The framework's rule: the
+    GA must be attained in at least 50% of its mapped courses, with an average
+    score of at least 50%.
+    """
+    values = list(course_percents.values())
+    attained = sum(1 for p in values if p >= ATTAINMENT_THRESHOLD)
+    average = round(sum(values) / len(values), 1) if values else 0.0
+    return {
+        'percent':         average,
+        'courseCount':     len(values),
+        'coursesAttained': attained,
+        'attained':        bool(values) and attained / len(values) * 100 >= ATTAINMENT_THRESHOLD and average >= ATTAINMENT_THRESHOLD,
+    }
+
+
+def _program_offerings(program):
+    return _report_offerings(InstructorCourse.objects.filter(program=program)).select_related(
+        'catalog_course').prefetch_related(*GA_QUESTION_PREFETCH)
+
+
+def _graduated_batches(program):
+    """
+    {batch code: {reg numbers}} of the program's graduated batches: a batch has
+    graduated once all its 8th semester courses are finalized.
+    """
+    batches = {}
+    for adm in AdmissionStudent.objects.filter(program=program):
+        code = batch_code(adm.reg_no)
+        if code:
+            batches.setdefault(code, set()).add(_reg_key(adm.reg_no))
+    final_semester = _offerings_in_semester(
+        _report_offerings(InstructorCourse.objects.filter(program=program)), program, '8th'
+    ).prefetch_related('students')
+    final_offerings = [(ic.status == 'closed', {_reg_key(s.reg_no) for s in ic.students.all()}) for ic in final_semester]
+    out = {}
+    for code, reg_nos in batches.items():
+        own = [closed for closed, roster in final_offerings if roster & reg_nos]
+        if own and all(own):
+            out[code] = reg_nos
+    return out
+
+
 class CourseGAStudentAttainmentView(APIView):
     """
     GET /api/reports/course-ga-students/?courseCode=CMC111&programId=bscs
@@ -3788,7 +3803,7 @@ class StudentGAQuestionAttainmentView(APIView):
         official_grades = dict(FinalResult.objects.filter(student_reg_no__iexact=reg_no, source_course__isnull=False)
                                .values_list('source_course_id', 'grade_letter'))
         threshold = ATTAINMENT_THRESHOLD
-        totals = {}      # ga_id -> {'passed', 'total', 'courses': set, 'title'}
+        totals = {}      # ga_id -> {'passed', 'total', 'courses': {code: best percent}, 'title'}
         courses_out = []
         for cs in enrolments:
             ic = cs.course
@@ -3798,10 +3813,10 @@ class StudentGAQuestionAttainmentView(APIView):
                 passed = _ga_questions_passed(cs, items, threshold)
                 pct = round(passed / len(items) * 100, 1)
                 per_ga[g] = {'passed': passed, 'total': len(items), 'percent': pct, 'attained': pct >= threshold}
-                t = totals.setdefault(g, {'passed': 0, 'total': 0, 'courses': set(), 'title': ga_objs[g].name})
+                t = totals.setdefault(g, {'passed': 0, 'total': 0, 'courses': {}, 'title': ga_objs[g].name})
                 t['passed'] += passed
                 t['total'] += len(items)
-                t['courses'].add(ic.code)
+                t['courses'][ic.code] = max(pct, t['courses'].get(ic.code, -1))
             courses_out.append({
                 'courseCode': ic.code, 'courseTitle': ic.title, 'academicYear': ic.academic_year,
                 'status': ic.status,
@@ -3815,9 +3830,8 @@ class StudentGAQuestionAttainmentView(APIView):
         gas_out = []
         for g in sorted(totals.keys(), key=CourseGAStudentAttainmentView._ga_sort_key):
             t = totals[g]
-            pct = round(t['passed'] / t['total'] * 100, 1) if t['total'] else 0.0
             gas_out.append({'id': g, 'title': t['title'], 'passed': t['passed'], 'total': t['total'],
-                            'percent': pct, 'attained': pct >= threshold, 'courseCount': len(t['courses'])})
+                            **_student_overall_ga(t['courses'])})
 
         return Response({
             'regNo': adm.reg_no if adm else (enrolments[0].reg_no if enrolments else reg_no),
@@ -3880,9 +3894,9 @@ class COAttainmentSummaryView(APIView):
         except Program.DoesNotExist:
             return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        ic_qs = InstructorCourse.objects.filter(program=program).prefetch_related(
+        ic_qs = _report_offerings(InstructorCourse.objects.filter(program=program)).prefetch_related(
             'clos__mapped_ga',
-            _marks_with_question(),
+            'students__obe_marks',
             'obe_questions',
         )
         if semester:
@@ -3894,27 +3908,26 @@ class COAttainmentSummaryView(APIView):
 
         courses_data = []
         for ic in ic_qs:
-            # Build mark lookup once per course: { question_pk: [scores] }
+            # A CLO is Met when at least 50% of the students attain it (framework KPI).
             all_questions = list(ic.obe_questions.all())
-            q_marks = {}
-            for m in OBEStudentMark.objects.filter(question__in=all_questions).exclude(student__result_status='withdrawn').select_related('question'):
-                q_marks.setdefault(m.question_id, []).append(m.score)
+            students = [s for s in _graded_students(ic) if list(s.obe_marks.all())]
+            student_pcts = [_clo_attainments_for_student(s, all_questions) for s in students]
 
             clos_data = []
-            for clo in ic.clos.select_related('mapped_ga').all():
-                questions = [q for q in all_questions if clo.code in (q.mapped_clos or [])]
-                total_possible = sum(q.max_marks * len(q_marks.get(q.pk, [])) for q in questions)
-                total_obtained = sum(sum(q_marks.get(q.pk, [])) for q in questions)
-
-                pct        = round((total_obtained / total_possible * 100), 1) if total_possible > 0 else 0
-                status_str = 'Met' if pct >= ATTAINMENT_THRESHOLD else 'Not Met'
+            for clo in ic.clos.all():
+                pcts = [p[clo.code] for p in student_pcts if clo.code in p]
+                attained = sum(1 for p in pcts if p >= ATTAINMENT_THRESHOLD)
+                pct = round(attained / len(pcts) * 100, 1) if pcts else 0
 
                 clos_data.append({
                     'code':              clo.code,
                     'description':       clo.description,
                     'mappedGA':          clo.mapped_ga.ga_id if clo.mapped_ga else None,
                     'attainmentPercent': pct,
-                    'status':            status_str,
+                    'studentsAttained':  attained,
+                    'studentCount':      len(pcts),
+                    'classAverage':      round(sum(pcts) / len(pcts), 1) if pcts else 0,
+                    'status':            'Met' if pct >= ATTAINMENT_THRESHOLD else 'Not Met',
                 })
 
             courses_data.append({
@@ -3935,29 +3948,15 @@ class COAttainmentSummaryView(APIView):
 
 class POAttainmentView(APIView):
     """
-    GET /api/reports/po-attainment/?programId=bscs
+    GET /api/reports/po-attainment/?programId=bscs[&graduationYear=2026]
 
-    Program Outcome Attainment — aggregates CLO → GA → PO.
-    The direct HEC compliance report.
-
-    Response:
-    {
-      "programId": "bscs",
-      "programName": "...",
-      "pos": [
-        {
-          "id": "PO1",
-          "text": "...",
-          "attainmentPercent": 68.3,
-          "status": "Partially Met",
-          "contributingGAs": [
-            { "gaId": "GA-1", "gaName": "...", "attainmentPercent": 72.5 }
-          ]
-        }
-      ]
-    }
+    Program Outcome attainment, two separate figures that are never combined:
+      - direct: the average of the direct results of the GAs mapped to the PO
+      - indirect: the employer and alumni surveys, the only tools the framework
+        lists for PO. graduationYear limits them to those graduates.
+    Survey data, so QA and department admins only.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsDeptAdminOrQA]
 
     def get(self, request):
         program_id = request.query_params.get('programId', '').strip()
@@ -3969,88 +3968,47 @@ class POAttainmentView(APIView):
         except Program.DoesNotExist:
             return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        gas = list(GraduateAttribute.objects.filter(department=program.department))
+        graduation_year = request.query_params.get('graduationYear', '').strip()
+        graduation_year = int(graduation_year) if graduation_year.isdigit() else None
 
-        # Perf fix: previously this ran one InstructorCourse query per GA, then
-        # inside that a .filter() call on a prefetched relation (which silently
-        # discards the prefetch cache and re-hits the DB), then an OBEStudentMark
-        # query per (GA, course, CLO) triple — for a department with, say, 8 GAs,
-        # 20 courses, and 3 CLOs each, that's roughly 8 + 8*20*3 = ~488 queries.
-        # Fetch every relevant course once, with CLOs and questions prefetched...
-        courses = list(
-            InstructorCourse.objects.filter(
-                program=program,
-                clos__mapped_ga__in=gas,
-            )
-            .prefetch_related('clos', 'obe_questions')
-            .distinct()
-        )
+        best, titles = _course_ga_best(_program_offerings(program))
+        ga_courses = _direct_ga_courses(best, titles)
+        indirect, response_counts = indirect_po(program, graduation_year=graduation_year)
 
-        # ...and every OBE mark for any question in any of those courses, once.
-        all_question_ids = [q.pk for ic in courses for q in ic.obe_questions.all()]
-        marks_by_question = {}
-        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids).exclude(student__result_status='withdrawn'):
-            marks_by_question.setdefault(m.question_id, []).append(m.score)
+        def met(value):
+            return 'Met' if value >= ATTAINMENT_THRESHOLD else 'Not Met'
 
-        # Everything below this point is in-memory — no more queries.
-        ga_attainment = {}   # ga_id → percent
-        for ga in gas:
-            total_possible = 0
-            total_obtained  = 0
-            for ic in courses:
-                clos_for_ga = [c for c in ic.clos.all() if c.mapped_ga_id == ga.id]
-                if not clos_for_ga:
-                    continue
-                clo_codes = {c.code for c in clos_for_ga}
-                questions = [
-                    q for q in ic.obe_questions.all()
-                    if clo_codes & set(q.mapped_clos or [])
-                ]
-                for q in questions:
-                    scores = marks_by_question.get(q.pk, [])
-                    total_possible += q.max_marks * len(scores)
-                    total_obtained  += sum(scores)
-
-            ga_attainment[ga.ga_id] = round(
-                (total_obtained / total_possible * 100), 1
-            ) if total_possible > 0 else 0
-
-        # Map GAs up to POs
         pos_data = []
         for po in program.objectives.prefetch_related('ga_mappings__graduate_attribute').all():
             contributing_gas = []
-            po_percents = []
-
-            for mapping in po.ga_mappings.select_related('graduate_attribute').all():
-                ga     = mapping.graduate_attribute
-                pct    = ga_attainment.get(ga.ga_id, 0)
-                po_percents.append(pct)
+            for mapping in po.ga_mappings.all():
+                ga = mapping.graduate_attribute
                 contributing_gas.append({
                     'gaId':              ga.ga_id,
                     'gaName':            ga.name,
-                    'attainmentPercent': pct,
+                    'attainmentPercent': _direct_ga_summary(ga_courses.get(ga.ga_id, []))['averageAttainment'],
                 })
-
-            po_avg = round(sum(po_percents) / len(po_percents), 1) if po_percents else 0
-            if po_avg >= 70:
-                po_status = 'Met'
-            elif po_avg >= ATTAINMENT_THRESHOLD:
-                po_status = 'Partially Met'
-            else:
-                po_status = 'Not Met'
-
+            direct = (round(sum(g['attainmentPercent'] for g in contributing_gas) / len(contributing_gas), 1)
+                      if contributing_gas else 0)
+            survey = indirect.get(po.code)
             pos_data.append({
-                'id':                 po.code,
-                'text':               po.description,
-                'attainmentPercent':  po_avg,
-                'status':             po_status,
-                'contributingGAs':    contributing_gas,
+                'id':              po.code,
+                'text':            po.description,
+                'directPercent':   direct,
+                'directStatus':    met(direct),
+                'contributingGAs': contributing_gas,
+                'indirectPercent': survey['percent'] if survey else None,
+                'indirectStatus':  met(survey['percent']) if survey else None,
+                'questions':       survey['questions'] if survey else [],
             })
 
         return Response({
-            'programId':   program.code.lower(),
-            'programName': program.name,
-            'pos':         pos_data,
+            'programId':       program.code.lower(),
+            'programName':     program.name,
+            'graduationYear':  graduation_year,
+            'graduationYears': graduation_years(program),
+            'responseCounts':  response_counts,
+            'pos':             pos_data,
         })
 
 
@@ -4092,32 +4050,20 @@ class InstructorPerformanceView(APIView):
         # instructors averaging 3 courses each, that's 45+ queries just for
         # marks. Batch-fetch every mark for every question across every
         # instructor's courses in this department in a single query instead.
-        all_question_ids = [
-            q.pk
-            for profile in instructors
-            for ic in profile.instructor_courses.all()
-            for q in ic.obe_questions.all()
-        ]
-        marks_by_question = {}
-        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids).exclude(student__result_status='withdrawn'):
-            marks_by_question.setdefault(m.question_id, []).append(m.score)
-
         result = []
         plan_cache = {}
         for profile in instructors:
             courses_data = []
             # Only report on active (current) courses, not historical closed ones.
             # Closed courses are already finalized — their data is in FinalResult.
-            for ic in profile.instructor_courses.filter(status='active', is_historical=False):
+            for ic in profile.instructor_courses.filter(status='active', is_historical=False).select_related('program').prefetch_related('students__obe_marks'):
+                # Each CLO's figure: the percentage of students who attain it.
                 clo_attainments = []
-                all_qs_cohort = list(ic.obe_questions.all())
-                clo_qs_cohort = ic.clos.all()
-                for clo in clo_qs_cohort:
-                    questions = [q for q in all_qs_cohort if clo.code in (q.mapped_clos or [])]
-                    total_p = sum(q.max_marks * len(marks_by_question.get(q.pk, [])) for q in questions)
-                    total_o = sum(sum(marks_by_question.get(q.pk, [])) for q in questions)
-                    pct = round(total_o / total_p * 100, 1) if total_p > 0 else 0
-                    clo_attainments.append(pct)
+                questions = list(ic.obe_questions.all())
+                student_pcts = [_clo_attainments_for_student(s, questions) for s in _graded_students(ic) if list(s.obe_marks.all())]
+                for clo in ic.clos.all():
+                    pcts = [p[clo.code] for p in student_pcts if clo.code in p]
+                    clo_attainments.append(round(sum(1 for p in pcts if p >= ATTAINMENT_THRESHOLD) / len(pcts) * 100, 1) if pcts else 0)
 
                 avg = round(sum(clo_attainments) / len(clo_attainments), 1) if clo_attainments else 0
                 courses_data.append({
@@ -4312,46 +4258,28 @@ class CohortComparisonView(APIView):
             except GraduateAttribute.DoesNotExist:
                 return Response({'error': f'GA "{ga_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        # Each term's figure uses the same rule as the direct GA result: the average
+        # of the courses' scores, a score being the percentage of students attaining.
+        offerings = _program_offerings(program)
         if ga:
-            courses = InstructorCourse.objects.filter(
-                program=program, clos__mapped_ga=ga
-            ).prefetch_related('clos', 'obe_questions').distinct()
-        else:
-            courses = InstructorCourse.objects.filter(
-                program=program
-            ).prefetch_related('clos', 'obe_questions')
+            offerings = offerings.filter(clos__mapped_ga=ga).distinct()
 
-        courses = list(courses)
-
-        # Perf fix: same pattern as POAttainmentView/InstructorPerformanceView —
-        # was one OBEStudentMark query per (course, CLO) pair. Batch once.
-        all_question_ids = [q.pk for ic in courses for q in ic.obe_questions.all()]
-        marks_by_question = {}
-        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids).exclude(student__result_status='withdrawn'):
-            marks_by_question.setdefault(m.question_id, []).append(m.score)
-
-        # Group by academic_year
         by_year = {}
-        for ic in courses:
-            year = ic.academic_year or 'Unknown'
-            if year not in by_year:
-                by_year[year] = {'total_possible': 0, 'total_obtained': 0}
-
-            clo_qs = [c for c in ic.clos.all() if (c.mapped_ga_id == ga.id if ga else True)]
-            for clo in clo_qs:
-                questions = [q for q in ic.obe_questions.all() if clo.code in (q.mapped_clos or [])]
-                for q in questions:
-                    scores = marks_by_question.get(q.pk, [])
-                    by_year[year]['total_possible'] += q.max_marks * len(scores)
-                    by_year[year]['total_obtained']  += sum(scores)
+        for ic in offerings:
+            scores = by_year.setdefault(ic.academic_year or 'Unknown', [])
+            students = [s for s in _graded_students(ic) if list(s.marks.all()) or list(s.obe_marks.all())]
+            if not students:
+                continue
+            for g, pcts in _offering_ga_student_pcts(ic, students).items():
+                if not ga or g == ga.ga_id:
+                    scores.append(sum(1 for p in pcts if p >= ATTAINMENT_THRESHOLD) / len(pcts) * 100)
 
         cohorts = []
         for year in sorted(by_year.keys(), key=_term_sort_key):
-            tp = by_year[year]['total_possible']
-            to = by_year[year]['total_obtained']
+            scores = by_year[year]
             cohorts.append({
                 'academicYear':      year,
-                'attainmentPercent': round(to / tp * 100, 1) if tp > 0 else 0,
+                'attainmentPercent': round(sum(scores) / len(scores), 1) if scores else 0,
             })
 
         return Response({
@@ -4491,30 +4419,13 @@ class GapAnalysisView(APIView):
         for clo in all_active_clos:
             clos_by_ga.setdefault(clo.mapped_ga_id, []).append(clo)
 
-        questions_by_clo = {}
-        all_question_ids = set()
-        for clo in all_active_clos:
-            matched = [q for q in clo.course.obe_questions.all() if clo.code in (q.mapped_clos or [])]
-            questions_by_clo[clo.id] = matched
-            all_question_ids.update(q.pk for q in matched)
-
-        marks_by_question = {}
-        for m in OBEStudentMark.objects.filter(question_id__in=all_question_ids).exclude(student__result_status='withdrawn'):
-            marks_by_question.setdefault(m.question_id, []).append(m.score)
+        best, titles = _course_ga_best(_program_offerings(program))
+        ga_courses = _direct_ga_courses(best, titles)
 
         for ga in gas:
             mapped_courses = Course.objects.filter(program=program, mapped_gas=ga)
             active_clos    = clos_by_ga.get(ga.id, [])
-
-            total_p = 0
-            total_o = 0
-            for clo in active_clos:
-                for q in questions_by_clo.get(clo.id, []):
-                    scores   = marks_by_question.get(q.pk, [])
-                    total_p += q.max_marks * len(scores)
-                    total_o += sum(scores)
-
-            avg_att = round(total_o / total_p * 100, 1) if total_p > 0 else 0
+            avg_att = _direct_ga_summary(ga_courses.get(ga.ga_id, []))['averageAttainment']
             courses_count = mapped_courses.count()
             clos_count    = len(active_clos)
 
@@ -4550,6 +4461,79 @@ class GapAnalysisView(APIView):
 # ═══════════════════════════════════════════════════════════════════════════════
 # TEACHER ONBOARDING (Dept Admin)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+class CohortLevelGAView(APIView):
+    """
+    GET /api/reports/cohort-ga/?programId=bscs
+
+    Cohort Level GA Attainment for the program's graduated batches: the direct
+    result from marks, the indirect result from the internship and exit surveys,
+    and combined = 80% direct + 20% indirect. Combined needs both.
+    Survey data, so QA and department admins only.
+    """
+    permission_classes = [IsDeptAdminOrQA]
+
+    DIRECT_WEIGHT, INDIRECT_WEIGHT = 0.8, 0.2
+
+    def get(self, request):
+        program_id = request.query_params.get('programId', '').strip()
+        if not program_id:
+            return Response({'error': 'programId is required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            program = Program.objects.select_related('department').get(code__iexact=program_id)
+        except Program.DoesNotExist:
+            return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        graduated = _graduated_batches(program)
+        reg_nos = set().union(*graduated.values()) if graduated else set()
+        best, titles = _course_ga_best(_program_offerings(program), reg_nos=reg_nos)
+        ga_courses = _direct_ga_courses(best, titles)
+        indirect, response_counts = indirect_ga(program, batches=list(graduated))
+
+        gas = sorted(
+            GraduateAttribute.objects.filter(
+                models.Q(department=program.department, program__isnull=True) | models.Q(program=program)),
+            key=lambda g: CourseGAStudentAttainmentView._ga_sort_key(g.ga_id),
+        )
+        attributes = []
+        for ga in gas:
+            courses = ga_courses.get(ga.ga_id, [])
+            summary = _direct_ga_summary(courses)
+            survey = indirect.get(ga.ga_id, {})
+            has_direct = bool(courses)
+            has_indirect = 'indirect' in survey
+            combined = (round(summary['averageAttainment'] * self.DIRECT_WEIGHT + survey['indirect'] * self.INDIRECT_WEIGHT, 2)
+                        if has_direct and has_indirect else None)
+            attributes.append({
+                'id':              ga.ga_id,
+                'title':           ga.name,
+                'direct':          summary['averageAttainment'] if has_direct else None,
+                'mappedCourses':   summary['contributingCoursesCount'],
+                'coursesAttained': summary['coursesAttained'],
+                'directKpiMet':    summary['kpiMet'],
+                'internship':      survey['internship']['percent'] if 'internship' in survey else None,
+                'internshipResponses': survey['internship']['responses'] if 'internship' in survey else 0,
+                'exit':            survey['exit']['percent'] if 'exit' in survey else None,
+                'exitResponses':   survey['exit']['responses'] if 'exit' in survey else 0,
+                'indirect':        survey.get('indirect'),
+                'indirectKpiMet':  has_indirect and survey['indirect'] >= SURVEY_KPI,
+                'combined':        combined,
+                'attained':        combined is not None and combined >= ATTAINMENT_THRESHOLD,
+                'courses':         courses,
+            })
+
+        return Response({
+            'programId':           program.code.lower(),
+            'programName':         program.name,
+            'programCode':         program.code.upper(),
+            'departmentName':      program.department.name,
+            'graduatedBatches':    sorted(graduated),
+            'studentCount':        len(reg_nos),
+            'responseCounts':      response_counts,
+            'attainmentThreshold': ATTAINMENT_THRESHOLD,
+            'attributes':          attributes,
+        })
+
 
 class TeacherOnboardingView(APIView):
     """
