@@ -864,10 +864,14 @@ class SurveyMapping(models.Model):
 
 
 class SurveyUpload(models.Model):
-    """One downloaded response file. A new file for the same form and year replaces it."""
+    """
+    One downloaded response file. Each response has its own year, so a file can
+    cover several years; a new file replaces the responses of the years it has.
+    """
     department       = models.ForeignKey(Department, on_delete=models.PROTECT, related_name='survey_uploads')
     form_type        = models.CharField(max_length=20, choices=SURVEY_FORM_CHOICES)
-    year             = models.PositiveSmallIntegerField()
+    # The year given for rows without one of their own, if any.
+    year             = models.PositiveSmallIntegerField(null=True, blank=True)
     file_name        = models.CharField(max_length=255, blank=True)
     # {program code: {question no: target}} as mapped when uploaded, so changing a
     # mapping later leaves past results as they were.
@@ -876,8 +880,7 @@ class SurveyUpload(models.Model):
     uploaded_at      = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ('department', 'form_type', 'year')
-        ordering        = ['-year', 'form_type']
+        ordering        = ['form_type', '-uploaded_at']
 
     def __str__(self):
         return f"{self.get_form_type_display()} {self.year}"
@@ -888,6 +891,8 @@ class SurveyResponse(models.Model):
     upload            = models.ForeignKey(SurveyUpload, on_delete=models.CASCADE, related_name='responses')
     program           = models.ForeignKey(Program, on_delete=models.PROTECT, related_name='survey_responses')
     ratings           = models.JSONField(default=dict)   # {question no: 1..5}
+    year              = models.PositiveSmallIntegerField(db_index=True)   # e.g. 2026 from "Summer 2026"
+    period            = models.CharField(max_length=40, blank=True)        # as written in the file
     reg_no            = models.CharField(max_length=60, blank=True)
     batch             = models.CharField(max_length=10, blank=True, db_index=True)   # 'SP23'
     section           = models.CharField(max_length=30, blank=True)

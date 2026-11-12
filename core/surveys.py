@@ -95,6 +95,12 @@ def batch_code(value):
     return f'{m.group(1)}{int(m.group(2)) % 100:02d}' if m else ''
 
 
+def parse_year(value):
+    """2026 from 2026, '2026', 'Summer 2026' or 'Fall-2025'. None if there is no year."""
+    m = re.search(r'(?<!\d)(20\d{2})(?!\d)', str(value if value is not None else ''))
+    return int(m.group(1)) if m else None
+
+
 def parse_rating(value):
     """1-5 from 5, '5', '5 = Excellent' or 'Excellent'. None if blank. Raises ValueError if neither."""
     text = str(value if value is not None else '').strip().lower()
@@ -138,7 +144,7 @@ def question_results(program, form_type, year=None, batches=None, graduation_yea
     """
     responses = SurveyResponse.objects.filter(program=program, upload__form_type=form_type).select_related('upload')
     if year:
-        responses = responses.filter(upload__year=year)
+        responses = responses.filter(year=year)
     if graduation_year:
         responses = responses.filter(graduation_year=graduation_year)
     if batches is not None:

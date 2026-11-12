@@ -6,7 +6,7 @@ from .models import (
     GraduateAttribute, InstructorCourse, InstructorProfile, MarksCategory, OBEQuestion, OBEStudentMark,
     POGAMapping, Program, ProgramObjective, QAProfile, SemesterPlan, SurveyResponse, SurveyUpload, UnitItem, User,
 )
-from .surveys import batch_code, parse_rating
+from .surveys import batch_code, parse_rating, parse_year
 
 
 class AttainmentBase(TestCase):
@@ -201,6 +201,28 @@ class CohortAndSurveyTests(AttainmentBase):
         self.assertEqual(data['pos'][0]['indirectPercent'], 50.0)    # Q1 100%, Q2 0%
         self.assertEqual(data['graduationYears'], [2023, 2024])
 
+    def test_cumulative_file_replaces_only_its_years(self):
+        row = lambda year: {'program': 'BSCS', 'year': year, 'batch': 'SP-23', 'ratings': {'1': '5 - Excellent'}}
+        self.upload('internship', [row('Summer 2024'), row('Summer 2025')], year=None)
+        self.upload('internship', [row('Summer 2026')], year=None)
+        r = self.upload('internship', [row('Summer 2025'), row('Summer 2025'), row('Summer 2026')], year=None)
+        self.assertEqual((r.data['years'], r.data['replaces']), ({'2025': 2, '2026': 1}, 2))
+        years = sorted(SurveyResponse.objects.values_list('year', flat=True))
+        self.assertEqual(years, [2024, 2025, 2025, 2026])
+        self.assertEqual(SurveyUpload.objects.count(), 2)    # the 2026-only file had nothing left, so it went
+        self.assertEqual(SurveyResponse.objects.filter(year=2025).first().period, 'Summer 2025')
+        c = self.client_for(self.qa)
+        data = c.get('/api/surveys/results/?programId=BSCS&formType=internship').data
+        self.assertEqual((data['years'], data['batches'], data['responseCount']), ([2024, 2025, 2026], ['SP23'], 4))
+        self.assertEqual(c.get('/api/surveys/results/?programId=BSCS&formType=internship&year=2025').data['responseCount'], 2)
+        self.assertEqual(c.get('/api/surveys/results/?programId=BSCS&formType=internship&batch=SP23').data['responseCount'], 4)
+        self.assertEqual(c.get('/api/surveys/results/?programId=BSCS&formType=internship&batch=FA22').data['responseCount'], 0)
+
+    def test_row_without_any_year_is_reported(self):
+        r = self.upload('exit', [{'program': 'BSCS', 'ratings': {'1': 5}}, {'program': 'BSCS', 'year': '2025', 'ratings': {'1': 5}}], year=None, dryRun=True)
+        self.assertEqual((r.data['accepted'], r.data['skipped'], r.data['years']), (1, 1, {'2025': 1}))
+        self.assertIn('No year', r.data['errors'][0]['error'])
+
     def test_new_file_replaces_the_same_form_and_year(self):
         self.assertEqual(self.upload('exit', [{'program': 'BSCS', 'ratings': {'1': 5}}] * 3).status_code, 201)
         r = self.upload('exit', [{'program': 'BSCS', 'ratings': {'1': 5}}])
@@ -259,5 +281,7 @@ class CohortAndSurveyTests(AttainmentBase):
         for bad in ('6', 'maybe', '0'):
             with self.assertRaises(ValueError):
                 parse_rating(bad)
+        self.assertEqual([parse_year(v) for v in (2026, '2025', 'Summer 2026', 'Fall-2025', 'none', '12026', None)],
+                         [2026, 2025, 2026, 2025, None, None, None])
         self.assertEqual([batch_code(v) for v in ('CS-SP-23', 'SP23-BSCS-001', '052-FA23-22144', 'sp 2024', 'none')],
                          ['SP23', 'SP23', 'FA23', 'SP24', ''])

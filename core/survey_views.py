@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 from .models import GraduateAttribute, Program, SurveyMapping, SurveyResponse, SurveyUpload
 from .permissions import IsDeptAdminOrQA, IsQA
 from .surveys import (
-    SURVEY_FORMS, SURVEY_KPI, batch_code, current_mapping, parse_rating, question_results,
+    SURVEY_FORMS, SURVEY_KPI, batch_code, current_mapping, parse_rating, parse_year, question_results,
 )
 
 MAX_ROWS = 5000
@@ -120,22 +120,24 @@ def _find_program(value, department, default):
 class SurveyUploadView(APIView):
     """
     GET  /api/surveys/uploads/
-    POST /api/surveys/uploads/ { formType, year, fileName, defaultProgramId?, rows, dryRun? }
+    POST /api/surveys/uploads/ { formType, year?, fileName, defaultProgramId?, rows, dryRun? }
 
     The browser reads the downloaded file and sends one object per response:
-    { program, regNo, batch, section, graduationYear, respondentName, respondentEmail,
+    { program, year, regNo, batch, section, graduationYear, respondentName, respondentEmail,
       supervisorName, employeeName, designation, organization, organizationType,
       workingSince, comment, submittedAt, ratings: {question no: answer} }
 
-    Bad rows are reported and left out. A file for a form and year that already
-    has one replaces it, so nothing counts twice. dryRun checks without saving.
+    Each response's year comes from its own year column ("Summer 2026"), else from
+    `year`. Bad rows are reported and left out. Saving replaces the responses this
+    form already has for the years in the file, so a cumulative file can be
+    uploaded again without counting anything twice. dryRun checks without saving.
     """
 
     def get_permissions(self):
         return [IsDeptAdminOrQA()] if self.request.method == 'GET' else [IsQA()]
 
     def get(self, request):
-        uploads = SurveyUpload.objects.select_related('uploaded_by')
+        uploads = SurveyUpload.objects.select_related('uploaded_by').prefetch_related('responses')
         department = _user_department(request.user)
         if request.user.role != 'admin':
             uploads = uploads.filter(department=department)
@@ -143,9 +145,9 @@ class SurveyUploadView(APIView):
             'id':          u.id,
             'formType':    u.form_type,
             'formTitle':   u.get_form_type_display(),
-            'year':        u.year,
+            'years':       sorted({r.year for r in u.responses.all()}),
             'fileName':    u.file_name,
-            'responses':   u.responses.count(),
+            'responses':   len(u.responses.all()),
             'uploadedAt':  u.uploaded_at,
             'uploadedBy':  u.uploaded_by.get_full_name() if u.uploaded_by else '',
         } for u in uploads])
@@ -157,9 +159,10 @@ class SurveyUploadView(APIView):
         form_type = request.data.get('formType')
         if form_type not in SURVEY_FORMS:
             return Response({'error': 'Choose one of the four forms.'}, status=status.HTTP_400_BAD_REQUEST)
-        year = str(request.data.get('year', '')).strip()
-        if not year.isdigit() or not 2000 <= int(year) <= 2100:
-            return Response({'error': 'Choose the year these responses were collected.'}, status=status.HTTP_400_BAD_REQUEST)
+        year = str(request.data.get('year') or '').strip()
+        if year and (not year.isdigit() or not 2000 <= int(year) <= 2100):
+            return Response({'error': 'The year must be like 2026.'}, status=status.HTTP_400_BAD_REQUEST)
+        default_year = int(year) if year else None
         rows = request.data.get('rows')
         if not isinstance(rows, list) or not rows:
             return Response({'error': 'The file has no responses.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -193,13 +196,17 @@ class SurveyUploadView(APIView):
             if row_error or not ratings:
                 errors.append({'row': index, 'error': row_error or 'No ratings were answered.'})
                 continue
+            row_year = parse_year(row.get('year')) or default_year
+            if not row_year:
+                errors.append({'row': index, 'error': 'No year: the row has none and no year was given for the file.'})
+                continue
             graduation_year = None
             text_year = str(row.get('graduationYear') or '').strip()
             if text_year[:4].isdigit():
                 graduation_year = int(text_year[:4])
             reg_no = _clean(row, 'regNo', 60)
             cleaned.append(SurveyResponse(
-                program=program, ratings=ratings, reg_no=reg_no,
+                program=program, ratings=ratings, reg_no=reg_no, year=row_year, period=_clean(row, 'year', 40),
                 batch=batch_code(row.get('batch')) or batch_code(reg_no),
                 section=_clean(row, 'section', 30), graduation_year=graduation_year,
                 respondent_name=_clean(row, 'respondentName'), respondent_email=_clean(row, 'respondentEmail', 254),
@@ -209,13 +216,16 @@ class SurveyUploadView(APIView):
                 comment=str(row.get('comment') or '').strip(), submitted_at=_clean(row, 'submittedAt', 40),
             ))
 
-        existing = SurveyUpload.objects.filter(department=department, form_type=form_type, year=int(year)).first()
-        per_program = {}
+        per_program, per_year = {}, {}
         for response in cleaned:
             per_program[response.program.code] = per_program.get(response.program.code, 0) + 1
+            per_year[response.year] = per_year.get(response.year, 0) + 1
+        replaced = SurveyResponse.objects.filter(
+            upload__department=department, upload__form_type=form_type, year__in=list(per_year))
         summary = {
             'accepted': len(cleaned), 'skipped': len(errors), 'errors': errors[:50],
-            'programs': per_program, 'replaces': existing.responses.count() if existing else None,
+            'programs': per_program, 'years': {str(y): n for y, n in sorted(per_year.items())},
+            'replaces': replaced.count() or None,
         }
         if request.data.get('dryRun') is True:
             return Response({'dryRun': True, **summary})
@@ -228,10 +238,10 @@ class SurveyUploadView(APIView):
             if code not in snapshot:
                 snapshot[code] = {str(k): v for k, v in current_mapping(response.program, form_type).items()}
         with transaction.atomic():
-            if existing:
-                existing.delete()
+            replaced.delete()
+            SurveyUpload.objects.filter(department=department, form_type=form_type, responses__isnull=True).delete()
             upload = SurveyUpload.objects.create(
-                department=department, form_type=form_type, year=int(year),
+                department=department, form_type=form_type, year=default_year,
                 file_name=_clean(request.data, 'fileName', 255), mapping_snapshot=snapshot, uploaded_by=request.user,
             )
             for response in cleaned:
@@ -254,7 +264,7 @@ class SurveyUploadDetailView(APIView):
 
 class SurveyResultsView(APIView):
     """
-    GET /api/surveys/results/?programId=bscs&formType=exit[&year=2026]
+    GET /api/surveys/results/?programId=bscs&formType=exit[&year=2026][&batch=SP23]
     Each question against the KPI, the comments without names, and the named
     responses, for QA and department admins.
     """
@@ -267,11 +277,15 @@ class SurveyResultsView(APIView):
             return Response({'error': 'Program or form not found'}, status=status.HTTP_404_NOT_FOUND)
         year = request.query_params.get('year', '').strip()
         year = int(year) if year.isdigit() else None
+        batch = batch_code(request.query_params.get('batch', ''))
 
-        questions, response_count = question_results(program, form_type, year=year)
-        responses = SurveyResponse.objects.filter(program=program, upload__form_type=form_type).select_related('upload')
+        questions, response_count = question_results(program, form_type, year=year, batches=[batch] if batch else None)
+        all_responses = SurveyResponse.objects.filter(program=program, upload__form_type=form_type)
+        responses = all_responses.select_related('upload')
         if year:
-            responses = responses.filter(upload__year=year)
+            responses = responses.filter(year=year)
+        if batch:
+            responses = responses.filter(batch=batch)
         return Response({
             'programId':  program.code.lower(),
             'programName': program.name,
@@ -279,14 +293,17 @@ class SurveyResultsView(APIView):
             'formTitle':  SURVEY_FORMS[form_type]['title'],
             'usedFor':    SURVEY_FORMS[form_type]['usedFor'],
             'year':       year,
-            'years':      sorted(set(SurveyResponse.objects.filter(program=program, upload__form_type=form_type)
-                                     .values_list('upload__year', flat=True))),
+            'batch':      batch or None,
+            'years':      sorted(set(all_responses.values_list('year', flat=True))),
+            'batches':    sorted(set(all_responses.exclude(batch='').values_list('batch', flat=True)),
+                                 key=lambda b: (b[2:], b[:2] != 'SP')),
             'kpi':        SURVEY_KPI,
             'responseCount': response_count,
             'questions':  questions,
             'comments':   [r.comment for r in responses if r.comment],
             'responses':  [{
-                'year':         r.upload.year,
+                'year':         r.year,
+                'period':       r.period,
                 'name':         r.respondent_name,
                 'email':        r.respondent_email,
                 'regNo':        r.reg_no,
