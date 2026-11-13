@@ -889,7 +889,9 @@ class SurveyUpload(models.Model):
 class SurveyResponse(models.Model):
     """One respondent. Seen by QA and department admins only."""
     upload            = models.ForeignKey(SurveyUpload, on_delete=models.CASCADE, related_name='responses')
-    program           = models.ForeignKey(Program, on_delete=models.PROTECT, related_name='survey_responses')
+    # None when the form's Program answer names no programme ("Unknown"): such a
+    # response counts in batch and department totals, not in any programme's.
+    program           = models.ForeignKey(Program, on_delete=models.PROTECT, related_name='survey_responses', null=True, blank=True)
     ratings           = models.JSONField(default=dict)   # {question no: 1..5}
     year              = models.PositiveSmallIntegerField(db_index=True)   # e.g. 2026 from "Summer 2026"
     period            = models.CharField(max_length=40, blank=True)        # as written in the file

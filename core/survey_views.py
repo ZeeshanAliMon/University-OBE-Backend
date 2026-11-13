@@ -9,8 +9,10 @@ from rest_framework.views import APIView
 
 from .models import GraduateAttribute, Program, SurveyMapping, SurveyResponse, SurveyUpload
 from .permissions import IsDeptAdminOrQA, IsQA
+from .models import AdmissionStudent
 from .surveys import (
-    SURVEY_FORMS, SURVEY_KPI, batch_code, current_mapping, parse_rating, parse_year, question_results,
+    SURVEY_FORMS, SURVEY_KPI, batch_code, batch_sort_key, current_mapping, default_target, meaningful_comment,
+    parse_rating, parse_year, question_results, rating_stats,
 )
 
 MAX_ROWS = 5000
@@ -105,7 +107,11 @@ def _clean(row, key, limit=200):
 
 
 def _find_program(value, department, default):
-    """A program from the form's Program answer: its code, its name, or part of its name."""
+    """
+    A program from the form's Program answer: its code (BSCS), the end of its code
+    (CS, AI), its name, or part of its name. None when it names no programme, as
+    forms often say "Unknown".
+    """
     text = str(value or '').strip().lower()
     programs = list(Program.objects.filter(department=department))
     if not text:
@@ -114,7 +120,13 @@ def _find_program(value, department, default):
         if text == program.code.lower() or text == program.name.lower():
             return program
     matches = [p for p in programs if p.code.lower() in text or text in p.name.lower() or p.name.lower() in text]
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) == 1:
+        return matches[0]
+    if len(text) >= 2 and text.isalpha():
+        suffix = [p for p in programs if p.code.lower().endswith(text)]
+        if len(suffix) == 1:
+            return suffix[0]
+    return default
 
 
 class SurveyUploadView(APIView):
@@ -127,8 +139,11 @@ class SurveyUploadView(APIView):
       supervisorName, employeeName, designation, organization, organizationType,
       workingSince, comment, submittedAt, ratings: {question no: answer} }
 
-    Each response's year comes from its own year column ("Summer 2026"), else from
-    `year`. Bad rows are reported and left out. Saving replaces the responses this
+    Each response's year comes from its own year column ("Summer 2026"), else its
+    graduation year, else `year`. A batch it can't read ("2022") becomes
+    `defaultBatch`. A Program answer that names no programme ("Unknown") is kept as
+    "Not specified": it counts in batch totals, not in any programme's. Bad rows
+    are reported and left out. Saving replaces the responses this
     form already has for the years in the file, so a cumulative file can be
     uploaded again without counting anything twice. dryRun checks without saving.
     """
@@ -171,6 +186,8 @@ class SurveyUploadView(APIView):
 
         default_id = str(request.data.get('defaultProgramId') or '').strip()
         default = Program.objects.filter(department=department, code__iexact=default_id).first() if default_id else None
+        default_batch = batch_code(request.data.get('defaultBatch'))
+        unrecognized = {}
         question_count = len(SURVEY_FORMS[form_type]['questions'])
 
         cleaned, errors = [], []
@@ -180,8 +197,8 @@ class SurveyUploadView(APIView):
                 continue
             program = _find_program(row.get('program'), department, default)
             if not program:
-                errors.append({'row': index, 'error': f'Program "{row.get("program") or ""}" was not recognized.'})
-                continue
+                answer = str(row.get('program') or '').strip() or '(blank)'
+                unrecognized[answer] = unrecognized.get(answer, 0) + 1
             ratings, row_error = {}, None
             for key, answer in (row.get('ratings') or {}).items():
                 if not str(key).isdigit() or not 1 <= int(key) <= question_count:
@@ -196,7 +213,7 @@ class SurveyUploadView(APIView):
             if row_error or not ratings:
                 errors.append({'row': index, 'error': row_error or 'No ratings were answered.'})
                 continue
-            row_year = parse_year(row.get('year')) or default_year
+            row_year = parse_year(row.get('year')) or parse_year(row.get('graduationYear')) or default_year
             if not row_year:
                 errors.append({'row': index, 'error': 'No year: the row has none and no year was given for the file.'})
                 continue
@@ -207,7 +224,7 @@ class SurveyUploadView(APIView):
             reg_no = _clean(row, 'regNo', 60)
             cleaned.append(SurveyResponse(
                 program=program, ratings=ratings, reg_no=reg_no, year=row_year, period=_clean(row, 'year', 40),
-                batch=batch_code(row.get('batch')) or batch_code(reg_no),
+                batch=batch_code(row.get('batch')) or batch_code(reg_no) or default_batch,
                 section=_clean(row, 'section', 30), graduation_year=graduation_year,
                 respondent_name=_clean(row, 'respondentName'), respondent_email=_clean(row, 'respondentEmail', 254),
                 supervisor_name=_clean(row, 'supervisorName'), employee_name=_clean(row, 'employeeName'),
@@ -216,15 +233,18 @@ class SurveyUploadView(APIView):
                 comment=str(row.get('comment') or '').strip(), submitted_at=_clean(row, 'submittedAt', 40),
             ))
 
-        per_program, per_year = {}, {}
+        per_program, per_year, per_batch = {}, {}, {}
         for response in cleaned:
-            per_program[response.program.code] = per_program.get(response.program.code, 0) + 1
+            code = response.program.code if response.program else 'Not specified'
+            per_program[code] = per_program.get(code, 0) + 1
             per_year[response.year] = per_year.get(response.year, 0) + 1
+            per_batch[response.batch or 'Not recorded'] = per_batch.get(response.batch or 'Not recorded', 0) + 1
         replaced = SurveyResponse.objects.filter(
             upload__department=department, upload__form_type=form_type, year__in=list(per_year))
         summary = {
             'accepted': len(cleaned), 'skipped': len(errors), 'errors': errors[:50],
             'programs': per_program, 'years': {str(y): n for y, n in sorted(per_year.items())},
+            'batches': per_batch, 'unrecognizedPrograms': unrecognized,
             'replaces': replaced.count() or None,
         }
         if request.data.get('dryRun') is True:
@@ -234,6 +254,8 @@ class SurveyUploadView(APIView):
 
         snapshot = {}
         for response in cleaned:
+            if not response.program:
+                continue
             code = response.program.code.upper()
             if code not in snapshot:
                 snapshot[code] = {str(k): v for k, v in current_mapping(response.program, form_type).items()}
@@ -315,3 +337,88 @@ class SurveyResultsView(APIView):
                 'ratings':      r.ratings,
             } for r in responses],
         })
+
+
+class SurveyAnalysisView(APIView):
+    """
+    GET /api/surveys/analysis/?formType=exit[&groups=SP22,FA22]
+
+    The data for a survey analysis report in the university's format: respondents
+    by programme and batch, each KPI's average rating and share rated 3 or above,
+    per programme within each batch, per batch and consolidated, and the written
+    comments. Internship and exit responses are grouped by batch; alumni and
+    employer responses by graduation year. groups limits the report to some.
+    """
+    permission_classes = [IsDeptAdminOrQA]
+
+    def get(self, request):
+        form_type = request.query_params.get('formType')
+        if form_type not in SURVEY_FORMS:
+            return Response({'error': 'Form not found'}, status=status.HTTP_404_NOT_FOUND)
+        department = _user_department(request.user)
+        if not department:
+            return Response({'error': 'Department not found'}, status=status.HTTP_403_FORBIDDEN)
+
+        form = SURVEY_FORMS[form_type]
+        by_batch = form_type in ('internship', 'exit')
+        responses = list(SurveyResponse.objects.filter(upload__department=department, upload__form_type=form_type)
+                         .select_related('program'))
+
+        def group_of(r):
+            if by_batch:
+                return r.batch or 'Not recorded'
+            return str(r.graduation_year) if r.graduation_year else 'Not recorded'
+
+        def order(key):
+            if key == 'Not recorded':
+                return (1, (0, 0))
+            return (0, batch_sort_key(key) if by_batch else (int(key), 0))
+
+        available = sorted({group_of(r) for r in responses}, key=order)
+        wanted = [g.strip().upper() if by_batch else g.strip() for g in request.query_params.get('groups', '').split(',') if g.strip()]
+        groups = [g for g in available if not wanted or g in wanted]
+        programs = list(Program.objects.filter(department=department).order_by('code'))
+        count = len(form['questions'])
+
+        population = {}
+        if by_batch:
+            for adm in AdmissionStudent.objects.filter(department=department).select_related('program'):
+                key = batch_code(adm.reg_no)
+                if key:
+                    population.setdefault(key, {'total': 0})
+                    population[key]['total'] += 1
+                    population[key][adm.program.code] = population[key].get(adm.program.code, 0) + 1
+
+        groups_out = []
+        selected = []
+        for key in groups:
+            rs = [r for r in responses if group_of(r) == key]
+            selected += rs
+            by_program = {}
+            for r in rs:
+                by_program.setdefault(r.program.code if r.program else '', []).append(r)
+            groups_out.append({
+                'key':        key,
+                'population': population.get(key, {}).get('total'),
+                'composition': {code or 'Not specified': len(v) for code, v in by_program.items()},
+                'stats':      rating_stats(rs, count),
+                'programs':   {code: rating_stats(v, count) for code, v in by_program.items() if code},
+                'comments':   [{'program': r.program.code if r.program else '', 'text': r.comment.strip()}
+                               for r in rs if meaningful_comment(r.comment)],
+            })
+
+        return Response({
+            'formType':     form_type,
+            'formTitle':    form['title'],
+            'usedFor':      form['usedFor'],
+            'groupBy':      'batch' if by_batch else 'graduationYear',
+            'department':   department.name,
+            'kpi':          SURVEY_KPI,
+            'kpis':         [{'no': i, 'text': text, 'target': default_target(form_type, i)}
+                             for i, text in enumerate(form['questions'], start=1)],
+            'programs':     [{'code': p.code, 'name': p.name} for p in programs],
+            'available':    available,
+            'groups':       groups_out,
+            'consolidated': rating_stats(selected, count),
+        })
+

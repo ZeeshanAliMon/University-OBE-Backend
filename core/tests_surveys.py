@@ -6,7 +6,7 @@ from .models import (
     GraduateAttribute, InstructorCourse, InstructorProfile, MarksCategory, OBEQuestion, OBEStudentMark,
     POGAMapping, Program, ProgramObjective, QAProfile, SemesterPlan, SurveyResponse, SurveyUpload, UnitItem, User,
 )
-from .surveys import batch_code, parse_rating, parse_year
+from .surveys import batch_code, meaningful_comment, parse_rating, parse_year
 
 
 class AttainmentBase(TestCase):
@@ -233,11 +233,12 @@ class CohortAndSurveyTests(AttainmentBase):
     def test_dry_run_saves_nothing_and_bad_rows_are_reported(self):
         r = self.upload('exit', [
             {'program': 'BS Computer Science', 'ratings': {'1': 'Very Good', '2': ''}},
-            {'program': 'BBA', 'ratings': {'1': 5}},
+            {'program': 'BBA', 'ratings': {'1': 5}},    # names no programme here: kept as Not specified
             {'program': 'BSCS', 'ratings': {'1': 'maybe'}},
             {'program': 'BSCS', 'ratings': {}},
         ], dryRun=True)
-        self.assertEqual((r.data['accepted'], r.data['skipped']), (1, 3))
+        self.assertEqual((r.data['accepted'], r.data['skipped']), (2, 2))
+        self.assertEqual((r.data['programs'], r.data['unrecognizedPrograms']), ({'BSCS': 1, 'Not specified': 1}, {'BBA': 1}))
         self.assertEqual(SurveyUpload.objects.count(), 0)
         self.upload('exit', [{'program': 'BS Computer Science', 'ratings': {'1': 'Very Good', '2': ''}}])
         self.assertEqual(SurveyResponse.objects.get().ratings, {'1': 4})
@@ -275,6 +276,39 @@ class CohortAndSurveyTests(AttainmentBase):
         self.assertEqual(c.get('/api/surveys/results/?programId=BSCS&formType=exit').status_code, 404)
         self.assertEqual(c.get('/api/surveys/forms/?programId=BSCS').status_code, 404)
 
+    def test_university_exit_file_and_analysis(self):
+        # As in the university's FA22 exit file: short programme names, "Unknown",
+        # batches in several layouts, a graduating year column, "." for no comment.
+        AdmissionStudent.objects.create(reg_no='FA22-BSCS-001', name='X', email='x@x.com', department=self.dept, program=self.program)
+        ai = Program.objects.create(code='BSAI', name='BS Artificial Intelligence', department=self.dept)
+        rows = [
+            {'program': 'CS', 'batch': 'CS-FA-22', 'graduationYear': 2026, 'ratings': {'1': 4, '2': 2}, 'comment': 'Add more labs.'},
+            {'program': 'AI', 'batch': 'Fall 22', 'graduationYear': 2026, 'ratings': {'1': 3, '2': 2}, 'comment': '.'},
+            {'program': 'Unknown', 'batch': '2022', 'graduationYear': 2026, 'ratings': {'1': 2, '2': 2}, 'comment': 'No comment'},
+            {'program': 'CK', 'batch': 'Fall 2022', 'graduationYear': 2026, 'ratings': {'1': 5, '2': 5}, 'comment': '-'},
+            {'program': 'CS', 'batch': 'SP-22', 'graduationYear': 2025, 'ratings': {'1': 5, '2': 4}, 'comment': 'Great faculty overall'},
+        ]
+        r = self.upload('exit', rows, year=None, defaultBatch='FA22')
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual((r.data['programs'], r.data['batches']), ({'BSCS': 2, 'BSAI': 1, 'Not specified': 2}, {'FA22': 4, 'SP22': 1}))
+        self.assertEqual(r.data['years'], {'2025': 1, '2026': 4})
+        data = self.client_for(self.qa).get('/api/surveys/analysis/?formType=exit').data
+        self.assertEqual(data['available'], ['SP22', 'FA22'])
+        fa22 = data['groups'][1]
+        self.assertEqual((fa22['key'], fa22['population']), ('FA22', 1))
+        self.assertEqual(fa22['composition'], {'BSCS': 1, 'BSAI': 1, 'Not specified': 2})
+        kpi1 = fa22['stats']['kpis'][0]
+        self.assertEqual((kpi1['average'], kpi1['percent'], kpi1['achieved']), (3.5, 75.0, True))
+        kpi2 = fa22['stats']['kpis'][1]
+        self.assertEqual((kpi2['average'], kpi2['achieved']), (2.75, False))    # 1 of 4 rated 3 or above
+        self.assertEqual(set(fa22['programs']), {'BSCS', 'BSAI'})
+        self.assertEqual(fa22['comments'], [{'program': 'BSCS', 'text': 'Add more labs.'}])
+        self.assertEqual(data['consolidated']['responses'], 5)
+        only = self.client_for(self.qa).get('/api/surveys/analysis/?formType=exit&groups=sp22').data
+        self.assertEqual([g['key'] for g in only['groups']], ['SP22'])
+        self.assertEqual(self.client_for(User.objects.create(username='s2@x.com', email='s2@x.com', role='student'))
+                         .get('/api/surveys/analysis/?formType=exit').status_code, 403)
+
     def test_parsers(self):
         self.assertEqual([parse_rating(v) for v in (5, '5', '4.0', '3 = Good', 'Excellent', 'very good', '', None)],
                          [5, 5, 4, 3, 5, 4, None, None])
@@ -283,5 +317,8 @@ class CohortAndSurveyTests(AttainmentBase):
                 parse_rating(bad)
         self.assertEqual([parse_year(v) for v in (2026, '2025', 'Summer 2026', 'Fall-2025', 'none', '12026', None)],
                          [2026, 2025, 2026, 2025, None, None, None])
-        self.assertEqual([batch_code(v) for v in ('CS-SP-23', 'SP23-BSCS-001', '052-FA23-22144', 'sp 2024', 'none')],
-                         ['SP23', 'SP23', 'FA23', 'SP24', ''])
+        self.assertEqual([batch_code(v) for v in ('CS-SP-23', 'SP23-BSCS-001', '052-FA23-22144', 'sp 2024', 'none',
+                                                  'Fall 22', 'Fall 2022', 'SE-FA-22', 'Ck-FA-22', '2022', 'Spring-2023')],
+                         ['SP23', 'SP23', 'FA23', 'SP24', '', 'FA22', 'FA22', 'FA22', 'FA22', '', 'SP23'])
+        self.assertEqual([meaningful_comment(v) for v in ('.', '-', '/', 'No comment', 'All is good.', 'Deal students Politely', '')],
+                         [False, False, False, False, True, True, False])

@@ -58,7 +58,7 @@ from .views import (
     CLOCQIReportView,
     CohortLevelGAView,
 )
-from .survey_views import SurveyFormsView, SurveyMappingView, SurveyResultsView, SurveyUploadDetailView, SurveyUploadView
+from .survey_views import SurveyAnalysisView, SurveyFormsView, SurveyMappingView, SurveyResultsView, SurveyUploadDetailView, SurveyUploadView
 
 urlpatterns = [
     path('health/', health_check, name='health_check'),
@@ -140,6 +140,7 @@ urlpatterns = [
     path('surveys/forms/',                 SurveyFormsView.as_view(),          name='survey_forms'),
     path('surveys/mapping/',               SurveyMappingView.as_view(),        name='survey_mapping'),
     path('surveys/results/',               SurveyResultsView.as_view(),        name='survey_results'),
+    path('surveys/analysis/',              SurveyAnalysisView.as_view(),       name='survey_analysis'),
     path('surveys/uploads/',               SurveyUploadView.as_view(),         name='survey_uploads'),
     path('surveys/uploads/<int:upload_id>/', SurveyUploadDetailView.as_view(), name='survey_upload_detail'),
 ]

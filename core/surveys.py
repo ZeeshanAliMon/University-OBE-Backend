@@ -89,10 +89,63 @@ GA_FORMS = ('internship', 'exit')
 PO_FORMS = ('alumni', 'employer')
 
 
+SEASONS = {'FALL': 'FA', 'SPRING': 'SP', 'SUMMER': 'SU'}
+
+
 def batch_code(value):
-    """'SP23' from a batch or reg number in any layout: 'CS-SP-23', '052-SP23-22144'."""
-    m = re.search(r'(FA|SP|SU|SM|WI)[-\s]?(\d{2,4})', str(value or '').upper())
-    return f'{m.group(1)}{int(m.group(2)) % 100:02d}' if m else ''
+    """
+    'SP23' from a batch or reg number in any layout: 'CS-SP-23', '052-SP23-22144',
+    'Fall 22', 'Fall 2022'. '' when it has no season, as in a bare '2022'.
+    """
+    m = re.search(r'(FALL|SPRING|SUMMER|FA|SP|SU|SM|WI)[-\s]?(\d{2,4})(?!\d)', str(value or '').upper())
+    if not m:
+        return ''
+    return f'{SEASONS.get(m.group(1), m.group(1))}{int(m.group(2)) % 100:02d}'
+
+
+def batch_sort_key(code):
+    """Batches in the order they were admitted: SP22, FA22, SP23."""
+    m = re.match(r'([A-Z]{2})(\d{2})$', code or '')
+    return (int(m.group(2)), {'SP': 0, 'SU': 1, 'FA': 2}.get(m.group(1), 3)) if m else (99, 9)
+
+
+NOT_COMMENTS = {'no comment', 'no comments', 'none', 'nil', 'na', 'n a', 'nothing', 'no', 'nope', 'ok', 'okay'}
+
+
+def meaningful_comment(text):
+    """False for '.', '-', 'No comment' and the like, which forms are full of."""
+    plain = re.sub(r'[^a-z ]+', ' ', str(text or '').lower()).strip()
+    plain = re.sub(r'\s+', ' ', plain)
+    return len(plain.replace(' ', '')) > 3 and plain not in NOT_COMMENTS
+
+
+def default_target(form_type, no):
+    """The framework's mapping label for a question: GA3, or PO2."""
+    form = SURVEY_FORMS[form_type]
+    return f'GA{no}' if form['usedFor'] == 'GA' else form['defaultPOs'].get(no, '')
+
+
+def rating_stats(responses, question_count):
+    """
+    Each question's average rating (1-5) and share rated 3 or above, the way the
+    university reports them: a KPI is Achieved when the majority rate it 3 or above.
+    """
+    rows = []
+    for no in range(1, question_count + 1):
+        ratings = [r.ratings[str(no)] for r in responses if str(no) in (r.ratings or {})]
+        ok = sum(1 for v in ratings if v >= RATING_PASS)
+        percent = _pct(ok, len(ratings))
+        rows.append({
+            'no': no, 'responses': len(ratings),
+            'average': round(sum(ratings) / len(ratings), 2) if ratings else None,
+            'percent': percent, 'achieved': percent is not None and percent >= SURVEY_KPI,
+        })
+    averages = [r['average'] for r in rows if r['average'] is not None]
+    return {
+        'responses': len(responses),
+        'overallAverage': round(sum(averages) / len(averages), 2) if averages else None,
+        'kpis': rows,
+    }
 
 
 def parse_year(value):
