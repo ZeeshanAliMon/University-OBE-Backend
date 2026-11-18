@@ -337,7 +337,7 @@ class InstructorCourse(models.Model):
     selected_grading_system = models.CharField(
         max_length=10, choices=GRADING_SYSTEM_CHOICES, default='ready1'
     )
-    # Semester and academic year — required for cohort comparison reports
+    # Semester and academic year
     semester                = models.CharField(
         max_length=10, blank=True,
         choices=[
@@ -860,6 +860,18 @@ class SurveyMapping(models.Model):
 
     class Meta:
         unique_together = ('program', 'form_type', 'question_no')
+        ordering        = ['form_type', 'question_no']
+
+
+class SurveyQuestionText(models.Model):
+    """QA's wording of a survey question. A department's programs share one form, so one wording each."""
+    department  = models.ForeignKey(Department, on_delete=models.CASCADE, related_name='survey_question_texts')
+    form_type   = models.CharField(max_length=20, choices=SURVEY_FORM_CHOICES)
+    question_no = models.PositiveSmallIntegerField()
+    text        = models.CharField(max_length=500)
+
+    class Meta:
+        unique_together = ('department', 'form_type', 'question_no')
         ordering        = ['form_type', 'question_no']
 
 

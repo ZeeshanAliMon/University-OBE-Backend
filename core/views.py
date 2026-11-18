@@ -3505,23 +3505,6 @@ GA_QUESTION_PREFETCH = (
 )
 
 
-def _offering_ga_student_pcts(ic, students, threshold=None):
-    """
-    GA attainment of each student of one offering, by questions passed
-    (question -> CLO -> GA; same rule as the QA "GA by Course" report).
-    Returns {ga_id: [percent per student]}. Students with no marks at all in
-    this offering are left out, so unmarked rosters don't pull averages to 0.
-    """
-    threshold = ATTAINMENT_THRESHOLD if threshold is None else threshold
-    ga_items = _ga_question_items(ic)[0]
-    marked = [s for s in students if list(s.marks.all()) or list(s.obe_marks.all())]
-    out = {}
-    for g, items in ga_items.items():
-        if marked:
-            out[g] = [round(_ga_questions_passed(s, items, threshold) / len(items) * 100, 1) for s in marked]
-    return out
-
-
 def _student_ga_attainments(course_student, threshold=None):
     """
     One student's GA attainment in one course by questions passed -- the same
@@ -4035,83 +4018,6 @@ class POAttainmentView(APIView):
         })
 
 
-class InstructorPerformanceView(APIView):
-    """
-    GET /api/reports/instructor-performance/?departmentId=computing
-
-    Shows per-instructor: which courses are below attainment threshold.
-    For dept_admin and QA use.
-    """
-    # SECURITY: was IsAuthenticated only — any logged-in student could pull
-    # instructor names and their per-course performance breakdown. A prior
-    # commit (5927da4) claimed to apply IsStaffReport here but the string
-    # replace silently didn't match and this was left unfixed — verified
-    # and actually applied now.
-    permission_classes = [IsStaffReport]
-
-    def get(self, request):
-        dept_id = request.query_params.get('departmentId', '').strip()
-        if not dept_id:
-            return Response({'error': 'departmentId is required'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            department = Department.objects.get(dept_id=dept_id)
-        except Department.DoesNotExist:
-            return Response({'error': f'Department "{dept_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        instructors = list(
-            InstructorProfile.objects.filter(
-                department=department
-            ).select_related('user').prefetch_related(
-                'instructor_courses__clos',
-                'instructor_courses__obe_questions',
-            )
-        )
-
-        # Perf fix: this previously ran one OBEStudentMark query per course,
-        # inside a loop over every instructor — for a department with 15
-        # instructors averaging 3 courses each, that's 45+ queries just for
-        # marks. Batch-fetch every mark for every question across every
-        # instructor's courses in this department in a single query instead.
-        result = []
-        plan_cache = {}
-        for profile in instructors:
-            courses_data = []
-            # Only report on active (current) courses, not historical closed ones.
-            # Closed courses are already finalized — their data is in FinalResult.
-            for ic in profile.instructor_courses.filter(status='active', is_historical=False).select_related('program').prefetch_related('students__obe_marks'):
-                # Each CLO's figure: the percentage of students who attain it.
-                clo_attainments = []
-                questions = list(ic.obe_questions.all())
-                student_pcts = [_clo_attainments_for_student(s, questions) for s in _graded_students(ic) if list(s.obe_marks.all())]
-                for clo in ic.clos.all():
-                    pcts = [p[clo.code] for p in student_pcts if clo.code in p]
-                    clo_attainments.append(round(sum(1 for p in pcts if p >= ATTAINMENT_THRESHOLD) / len(pcts) * 100, 1) if pcts else 0)
-
-                avg = round(sum(clo_attainments) / len(clo_attainments), 1) if clo_attainments else 0
-                courses_data.append({
-                    'courseCode':        ic.code,
-                    'courseTitle':       ic.title,
-                    'programCode':       ic.program.code if ic.program else '',
-                    'semester':          ic.semester or _plan_semester(ic.program_id, ic.code, plan_cache),
-                    'academicYear':      ic.academic_year,
-                    'avgCLOAttainment':  avg,
-                    'belowThreshold':    avg < ATTAINMENT_THRESHOLD,
-                })
-
-            below_count = sum(1 for c in courses_data if c['belowThreshold'])
-            result.append({
-                'employeeId':       profile.employee_id,
-                'name':             profile.user.get_full_name() or profile.user.username,
-                'designation':      profile.designation,
-                'totalCourses':     len(courses_data),
-                'coursesBelowThreshold': below_count,
-                'courses':          courses_data,
-            })
-
-        return Response({'departmentId': dept_id, 'instructors': result})
-
-
 class CLOCQIReportView(APIView):
     """
     GET /api/reports/clo-cqi/?departmentId=ee&programId=bsee&academicYear=Fall-2025&semester=3rd
@@ -4253,66 +4159,6 @@ class CLOCQIReportView(APIView):
         })
 
 
-class CohortComparisonView(APIView):
-    """
-    GET /api/reports/cohort-comparison/?programId=bscs&gaId=GA-1
-
-    Compares GA attainment across academic years/batches.
-    Requires InstructorCourse.academic_year to be populated.
-    """
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        program_id = request.query_params.get('programId', '').strip()
-        ga_id      = request.query_params.get('gaId', '').strip()
-
-        if not program_id:
-            return Response({'error': 'programId is required'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            program = Program.objects.get(code__iexact=program_id)
-        except Program.DoesNotExist:
-            return Response({'error': f'Program "{program_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        ga = None
-        if ga_id:
-            try:
-                ga = GraduateAttribute.objects.get(ga_id=ga_id)
-            except GraduateAttribute.DoesNotExist:
-                return Response({'error': f'GA "{ga_id}" not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        # Each term's figure uses the same rule as the direct GA result: the average
-        # of the courses' scores, a score being the percentage of students attaining.
-        offerings = _program_offerings(program)
-        if ga:
-            offerings = offerings.filter(clos__mapped_ga=ga).distinct()
-
-        by_year = {}
-        for ic in offerings:
-            scores = by_year.setdefault(ic.academic_year or 'Unknown', [])
-            students = [s for s in _graded_students(ic) if list(s.marks.all()) or list(s.obe_marks.all())]
-            if not students:
-                continue
-            for g, pcts in _offering_ga_student_pcts(ic, students).items():
-                if not ga or g == ga.ga_id:
-                    scores.append(sum(1 for p in pcts if p >= ATTAINMENT_THRESHOLD) / len(pcts) * 100)
-
-        cohorts = []
-        for year in sorted(by_year.keys(), key=_term_sort_key):
-            scores = by_year[year]
-            cohorts.append({
-                'academicYear':      year,
-                'attainmentPercent': round(sum(scores) / len(scores), 1) if scores else 0,
-            })
-
-        return Response({
-            'programId': program.code.lower(),
-            'gaId':      ga_id,
-            'gaName':    ga.name if ga else None,
-            'cohorts':   cohorts,
-        })
-
-
 class AtRiskStudentsView(APIView):
     """
     GET /api/reports/at-risk-students/?programId=bscs&semester=6th
@@ -4321,9 +4167,8 @@ class AtRiskStudentsView(APIView):
     For dept_admin and admission early intervention.
     """
     # SECURITY: was IsAuthenticated only — any logged-in student could see
-    # classmates flagged as at-risk by name. Same silent-replace-failure
-    # issue as InstructorPerformanceView above — verified and actually
-    # applied now.
+    # classmates flagged as at-risk by name. Verified and actually applied
+    # now.
     permission_classes = [IsStaffReport]
 
     def get(self, request):

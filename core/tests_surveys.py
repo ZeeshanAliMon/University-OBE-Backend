@@ -140,6 +140,10 @@ class CohortAndSurveyTests(AttainmentBase):
         return self.client_for(self.qa).post('/api/surveys/uploads/', {
             'formType': form, 'year': year, 'fileName': 'r.xlsx', 'rows': rows, **extra}, format='json')
 
+    def map_questions(self, form, mapping, program='BSCS'):
+        r = self.client_for(self.qa).put('/api/surveys/mapping/', {'programId': program, 'formType': form, 'mapping': mapping}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+
     def graduate(self):
         SemesterPlan.objects.create(program=self.program, semester='8th', course_codes=['C8'])
         self.offering('C8', 'Spring-2026', {'SP23-BSCS-001': 90, 'SP23-BSCS-002': 40})
@@ -157,6 +161,8 @@ class CohortAndSurveyTests(AttainmentBase):
         self.graduate()    # direct: 1 of 2 graduates attains = 50
         AdmissionStudent.objects.create(reg_no='FA24-BSCS-001', name='N', email='n@x.com', department=self.dept, program=self.program)
         self.offering('C1', 'Fall-2025', {'FA24-BSCS-001': 0})   # not graduated: left out
+        self.map_questions('internship', {'1': 'GA-BSCS-1'})
+        self.map_questions('exit', {'1': 'GA-BSCS-1'})
         self.upload('internship', [
             {'program': 'BSCS', 'regNo': 'SP23-BSCS-001', 'ratings': {'1': 5}},
             {'program': 'BSCS', 'regNo': 'SP23-BSCS-002', 'ratings': {'1': 2}},
@@ -174,6 +180,7 @@ class CohortAndSurveyTests(AttainmentBase):
 
     def test_cohort_weights_are_configurable(self):
         self.graduate()    # direct 50
+        self.map_questions('exit', {'1': 'GA-BSCS-1'})
         self.upload('exit', [{'program': 'BSCS', 'batch': 'SP23', 'ratings': {'1': 5}}])    # indirect 100
         c = self.client_for(self.qa)
         self.assertEqual(c.get('/api/reports/cohort-ga/?programId=BSCS').data['attributes'][0]['combined'], 60.0)
@@ -244,6 +251,7 @@ class CohortAndSurveyTests(AttainmentBase):
         self.assertEqual(SurveyResponse.objects.get().ratings, {'1': 4})
 
     def test_mapping_change_leaves_past_results_alone(self):
+        self.map_questions('exit', {'1': 'GA-BSCS-1'})
         self.upload('exit', [{'program': 'BSCS', 'batch': 'SP23', 'ratings': {'1': 5}}])
         c = self.client_for(self.qa)
         r = c.put('/api/surveys/mapping/', {'programId': 'BSCS', 'formType': 'exit', 'mapping': {'1': 'GA-BSCS-2'}}, format='json')
@@ -253,6 +261,57 @@ class CohortAndSurveyTests(AttainmentBase):
         form = next(f for f in c.get('/api/surveys/forms/?programId=BSCS').data['forms'] if f['formType'] == 'exit')
         self.assertEqual(form['questions'][0]['target'], 'GA-BSCS-2')
         self.assertEqual(c.put('/api/surveys/mapping/', {'programId': 'BSCS', 'formType': 'exit', 'mapping': {'1': 'PO9'}}, format='json').status_code, 400)
+
+    def test_ga_questions_start_unmapped_and_count_once_chosen(self):
+        c = self.client_for(self.qa)
+        forms = {f['formType']: f for f in c.get('/api/surveys/forms/?programId=BSCS').data['forms']}
+        self.assertEqual({q['target'] for f in ('internship', 'exit') for q in forms[f]['questions']}, {''})
+        self.assertEqual(forms['alumni']['questions'][0]['target'], 'PO1')
+
+        self.upload('exit', [{'program': 'BSCS', 'batch': 'SP23', 'ratings': {'1': 5, '2': 5}}])
+        results = c.get('/api/surveys/results/?programId=BSCS&formType=exit').data
+        self.assertEqual([q['target'] for q in results['questions']], ['', ''])
+
+        self.map_questions('exit', {'1': 'GA-BSCS-7'})
+        results = c.get('/api/surveys/results/?programId=BSCS&formType=exit').data
+        self.assertEqual([q['target'] for q in results['questions']], ['GA-BSCS-7', ''])
+        kpis = c.get('/api/surveys/analysis/?formType=exit').data['kpis']
+        self.assertEqual((kpis[0]['target'], kpis[1]['target']), ('GA7', ''))
+
+    def edit_question(self, user, **changes):
+        body = {'programId': 'BSCS', 'formType': 'exit', 'questionNo': 1, 'text': 'New wording', **changes}
+        return self.client_for(user).put('/api/surveys/questions/', body, format='json')
+
+    def test_edited_question_shows_on_the_form_and_past_results(self):
+        self.map_questions('exit', {'1': 'GA-BSCS-1'})
+        self.upload('exit', [{'program': 'BSCS', 'batch': 'SP23', 'ratings': {'1': 5}}])
+        r = self.edit_question(self.qa, text='  New   wording ')
+        self.assertEqual((r.status_code, r.data), (200, {'no': 1, 'text': 'New wording'}))
+        self.assertEqual(self.edit_question(self.qa, text='Newer wording').status_code, 200)
+        c = self.client_for(self.qa)
+        form = next(f for f in c.get('/api/surveys/forms/?programId=BSCS').data['forms'] if f['formType'] == 'exit')
+        self.assertEqual(form['questions'][0]['text'], 'Newer wording')
+        self.assertEqual(form['questions'][0]['target'], 'GA-BSCS-1')
+        results = c.get('/api/surveys/results/?programId=BSCS&formType=exit').data
+        self.assertEqual((results['questions'][0]['text'], results['questions'][0]['responses']), ('Newer wording', 1))
+        analysis = c.get('/api/surveys/analysis/?formType=exit').data
+        self.assertEqual((analysis['kpis'][0]['text'], analysis['groups'][0]['stats']['responses']), ('Newer wording', 1))
+        internship = next(f for f in c.get('/api/surveys/forms/?programId=BSCS').data['forms'] if f['formType'] == 'internship')
+        self.assertEqual(internship['questions'][0]['text'], 'Possess and apply relevant knowledge and skill')
+
+    def test_question_edit_is_checked(self):
+        second = 'The program provides sufficient problem analysis skills'
+        for changes in ({'text': '   '}, {'text': 'x' * 501}, {'text': second.upper()}, {'questionNo': 11}, {'questionNo': 'one'}):
+            self.assertEqual(self.edit_question(self.qa, **changes).status_code, 400, changes)
+        self.assertEqual(self.edit_question(self.qa, formType='other').status_code, 404)
+
+    def test_only_qa_of_the_department_edits_questions(self):
+        self.assertEqual(self.edit_question(self.admin).status_code, 403)
+        self.assertEqual(self.edit_question(self.teacher.user).status_code, 403)
+        other = Department.objects.create(dept_id='biz', name='Business')
+        outsider = User.objects.create(username='qa2@x.com', email='qa2@x.com', role='qa')
+        QAProfile.objects.create(user=outsider, employee_id='QA2', department=other)
+        self.assertEqual(self.edit_question(outsider).status_code, 404)
 
     def test_students_and_teachers_cannot_see_survey_data(self):
         self.upload('exit', [{'program': 'BSCS', 'ratings': {'1': 5}}])

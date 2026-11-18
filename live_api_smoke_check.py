@@ -466,7 +466,6 @@ if qa_token:
         f"/reports/co-attainment-summary/?programId={test_prog_id}",
         f"/reports/gap-analysis/?programId={test_prog_id}",
         f"/reports/at-risk-students/?programId={test_prog_id}",
-        f"/reports/cohort-comparison/?programId={test_prog_id}",
     ]
     student_endpoints = []
     if test_reg_no:

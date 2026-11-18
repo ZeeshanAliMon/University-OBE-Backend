@@ -8,7 +8,7 @@ responses must score 3 or above on the 1-5 scale.
 """
 import re
 
-from .models import GraduateAttribute, SurveyMapping, SurveyResponse, SurveyUpload
+from .models import SurveyMapping, SurveyQuestionText, SurveyResponse, SurveyUpload
 
 RATING_PASS = 3
 SURVEY_KPI = 50.0
@@ -119,12 +119,6 @@ def meaningful_comment(text):
     return len(plain.replace(' ', '')) > 3 and plain not in NOT_COMMENTS
 
 
-def default_target(form_type, no):
-    """The framework's mapping label for a question: GA3, or PO2."""
-    form = SURVEY_FORMS[form_type]
-    return f'GA{no}' if form['usedFor'] == 'GA' else form['defaultPOs'].get(no, '')
-
-
 def rating_stats(responses, question_count):
     """
     Each question's average rating (1-5) and share rated 3 or above, the way the
@@ -172,17 +166,40 @@ def _ga_number(ga_id):
     return int(numbers[-1]) if numbers else None
 
 
+def form_questions(department, form_type):
+    """The form's question texts in order: QA's wording over the framework's."""
+    questions = list(SURVEY_FORMS[form_type]['questions'])
+    for row in SurveyQuestionText.objects.filter(department=department, form_type=form_type):
+        if row.question_no <= len(questions):
+            questions[row.question_no - 1] = row.text
+    return questions
+
+
 def current_mapping(program, form_type):
-    """{question number: target}, a GA id or a PO code. QA's changes over the framework's default."""
+    """
+    {question no: target}, a GA id or a PO code. QA chooses each question's GA, so
+    a GA question starts unmapped; a PO question starts at the framework's default.
+    """
     form = SURVEY_FORMS[form_type]
     if form['usedFor'] == 'GA':
-        by_number = {_ga_number(g.ga_id): g.ga_id for g in GraduateAttribute.objects.filter(program=program)}
-        mapping = {n: by_number.get(n, '') for n in range(1, len(form['questions']) + 1)}
+        mapping = {n: '' for n in range(1, len(form['questions']) + 1)}
     else:
         mapping = dict(form['defaultPOs'])
     for row in SurveyMapping.objects.filter(program=program, form_type=form_type):
         mapping[row.question_no] = row.target
     return mapping
+
+
+def department_targets(programs, form_type):
+    """{question no: 'GA7'} over a department's programs; 'GA2, GA7' where they map it differently."""
+    uses_ga = SURVEY_FORMS[form_type]['usedFor'] == 'GA'
+    labels = {}
+    for program in programs:
+        for no, target in current_mapping(program, form_type).items():
+            label = f'GA{_ga_number(target)}' if uses_ga and target else target
+            if label and label not in labels.setdefault(no, []):
+                labels[no].append(label)
+    return {no: ', '.join(sorted(found, key=lambda t: _ga_number(t) or 0)) for no, found in labels.items() if found}
 
 
 def _pct(ok, n):
@@ -215,7 +232,7 @@ def question_results(program, form_type, year=None, batches=None, graduation_yea
             row = rows.setdefault((no, target), {'questionNo': no, 'target': target, 'counts': {str(r): 0 for r in range(1, 6)}})
             row['counts'][str(rating)] += 1
 
-    questions = SURVEY_FORMS[form_type]['questions']
+    questions = form_questions(program.department, form_type)
     out = []
     for (no, target) in sorted(rows):
         row = rows[(no, target)]

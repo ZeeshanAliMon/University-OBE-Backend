@@ -75,8 +75,7 @@ class IsStaffReport(BasePermission):
     For internal reporting endpoints that name individual students or
     instructors by name — must never be reachable by plain 'student' or
     'instructor' roles since they expose data about other people.
-    Was previously guarded by IsAuthenticated only on AtRiskStudentsView
-    and InstructorPerformanceView.
+    Was previously guarded by IsAuthenticated only on AtRiskStudentsView.
     """
     def has_permission(self, request, view):
         return bool(
@@ -94,8 +93,8 @@ class IsInstructorOrStaffReport(BasePermission):
     QA / dept_admin / admission / admin also need READ access to the full
     course roster across all instructors for analytics, allocation
     matrices, and attainment reports (they already see equivalent
-    student-level attainment data via COAttainmentSummaryView,
-    AtRiskStudentsView, and InstructorPerformanceView — this does not
+    student-level attainment data via COAttainmentSummaryView and
+    AtRiskStudentsView — this does not
     expose a new category of data, just fixes access to data these roles
     are already authorized to see).
 

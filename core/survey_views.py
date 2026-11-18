@@ -7,12 +7,12 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import GraduateAttribute, Program, SurveyMapping, SurveyResponse, SurveyUpload
+from .models import GraduateAttribute, Program, SurveyMapping, SurveyQuestionText, SurveyResponse, SurveyUpload
 from .permissions import IsDeptAdminOrQA, IsQA
 from .models import AdmissionStudent
 from .surveys import (
-    SURVEY_FORMS, SURVEY_KPI, batch_code, batch_sort_key, current_mapping, default_target, meaningful_comment,
-    parse_rating, parse_year, question_results, rating_stats,
+    SURVEY_FORMS, SURVEY_KPI, batch_code, batch_sort_key, current_mapping, department_targets, form_questions,
+    meaningful_comment, parse_rating, parse_year, question_results, rating_stats,
 )
 
 MAX_ROWS = 5000
@@ -62,7 +62,7 @@ class SurveyFormsView(APIView):
                 'targets':  _targets(program, form_type),
                 'questions': [
                     {'no': i, 'text': text, 'target': mapping.get(i, '')}
-                    for i, text in enumerate(form['questions'], start=1)
+                    for i, text in enumerate(form_questions(program.department, form_type), start=1)
                 ],
             })
         return Response({'programId': program.code.lower(), 'forms': forms})
@@ -100,6 +100,42 @@ class SurveyMappingView(APIView):
                 SurveyMapping.objects.update_or_create(
                     program=program, form_type=form_type, question_no=no, defaults={'target': target})
         return Response({'saved': len(rows)})
+
+
+class SurveyQuestionView(APIView):
+    """
+    PUT /api/surveys/questions/ { programId, formType, questionNo, text }
+    Changes a question's wording for the program's department. Its number stays,
+    so responses already uploaded still count for the same question.
+    """
+    permission_classes = [IsQA]
+
+    def put(self, request):
+        program = _scoped_program(request, str(request.data.get('programId', '')).strip())
+        form_type = request.data.get('formType')
+        if not program or form_type not in SURVEY_FORMS:
+            return Response({'error': 'Program or form not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        questions = form_questions(program.department, form_type)
+        number = str(request.data.get('questionNo', '')).strip()
+        if not number.isdigit() or not 1 <= int(number) <= len(questions):
+            return Response({'error': f'Question "{number}" is not on this form.'}, status=status.HTTP_400_BAD_REQUEST)
+        question_no = int(number)
+
+        text = ' '.join(str(request.data.get('text') or '').split())
+        limit = SurveyQuestionText._meta.get_field('text').max_length
+        if not text:
+            return Response({'error': 'Write the question.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(text) > limit:
+            return Response({'error': f'A question can have at most {limit} characters.'}, status=status.HTTP_400_BAD_REQUEST)
+        # Uploaded files are matched to questions by their wording, so each must be distinct.
+        for no, other in enumerate(questions, start=1):
+            if no != question_no and other.casefold() == text.casefold():
+                return Response({'error': f'Question {no} already has this wording.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        SurveyQuestionText.objects.update_or_create(
+            department=program.department, form_type=form_type, question_no=question_no, defaults={'text': text})
+        return Response({'no': question_no, 'text': text})
 
 
 def _clean(row, key, limit=200):
@@ -258,7 +294,8 @@ class SurveyUploadView(APIView):
                 continue
             code = response.program.code.upper()
             if code not in snapshot:
-                snapshot[code] = {str(k): v for k, v in current_mapping(response.program, form_type).items()}
+                # Questions not mapped yet are left out, so they count once QA maps them.
+                snapshot[code] = {str(k): v for k, v in current_mapping(response.program, form_type).items() if v}
         with transaction.atomic():
             replaced.delete()
             SurveyUpload.objects.filter(department=department, form_type=form_type, responses__isnull=True).delete()
@@ -379,6 +416,7 @@ class SurveyAnalysisView(APIView):
         groups = [g for g in available if not wanted or g in wanted]
         programs = list(Program.objects.filter(department=department).order_by('code'))
         count = len(form['questions'])
+        targets = department_targets(programs, form_type)
 
         population = {}
         if by_batch:
@@ -414,8 +452,8 @@ class SurveyAnalysisView(APIView):
             'groupBy':      'batch' if by_batch else 'graduationYear',
             'department':   department.name,
             'kpi':          SURVEY_KPI,
-            'kpis':         [{'no': i, 'text': text, 'target': default_target(form_type, i)}
-                             for i, text in enumerate(form['questions'], start=1)],
+            'kpis':         [{'no': i, 'text': text, 'target': targets.get(i, '')}
+                             for i, text in enumerate(form_questions(department, form_type), start=1)],
             'programs':     [{'code': p.code, 'name': p.name} for p in programs],
             'available':    available,
             'groups':       groups_out,

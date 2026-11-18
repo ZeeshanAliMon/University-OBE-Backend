@@ -51,14 +51,15 @@ from .views import (
     StudentSummaryView,
     COAttainmentSummaryView,
     POAttainmentView,
-    InstructorPerformanceView,
-    CohortComparisonView,
     AtRiskStudentsView,
     GapAnalysisView,
     CLOCQIReportView,
     CohortLevelGAView,
 )
-from .survey_views import SurveyAnalysisView, SurveyFormsView, SurveyMappingView, SurveyResultsView, SurveyUploadDetailView, SurveyUploadView
+from .survey_views import (
+    SurveyAnalysisView, SurveyFormsView, SurveyMappingView, SurveyQuestionView, SurveyResultsView,
+    SurveyUploadDetailView, SurveyUploadView,
+)
 
 urlpatterns = [
     path('health/', health_check, name='health_check'),
@@ -129,8 +130,6 @@ urlpatterns = [
     # here — every request to them from the frontend was silently 404ing.
     path('reports/co-attainment-summary/', COAttainmentSummaryView.as_view(),  name='report_co_summary'),
     path('reports/po-attainment/',         POAttainmentView.as_view(),         name='report_po_attainment'),
-    path('reports/instructor-performance/', InstructorPerformanceView.as_view(), name='report_instructor_performance'),
-    path('reports/cohort-comparison/',     CohortComparisonView.as_view(),     name='report_cohort_comparison'),
     path('reports/at-risk-students/',      AtRiskStudentsView.as_view(),       name='report_at_risk_students'),
     path('reports/gap-analysis/',          GapAnalysisView.as_view(),          name='report_gap_analysis'),
     path('reports/clo-cqi/',               CLOCQIReportView.as_view(),         name='report_clo_cqi'),
@@ -139,6 +138,7 @@ urlpatterns = [
     # Surveys (indirect assessment)
     path('surveys/forms/',                 SurveyFormsView.as_view(),          name='survey_forms'),
     path('surveys/mapping/',               SurveyMappingView.as_view(),        name='survey_mapping'),
+    path('surveys/questions/',             SurveyQuestionView.as_view(),       name='survey_questions'),
     path('surveys/results/',               SurveyResultsView.as_view(),        name='survey_results'),
     path('surveys/analysis/',              SurveyAnalysisView.as_view(),       name='survey_analysis'),
     path('surveys/uploads/',               SurveyUploadView.as_view(),         name='survey_uploads'),
