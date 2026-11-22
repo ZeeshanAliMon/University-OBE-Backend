@@ -7,10 +7,11 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import GraduateAttribute, Program, SurveyMapping, SurveyResponse, SurveyUpload
+from .models import GraduateAttribute, Program, SurveyMapping, SurveyRecipients, SurveyResponse, SurveyUpload
 from .permissions import IsDeptAdminOrQA, IsQA
 from .models import AdmissionStudent
 from .surveys import (
+    batch_graduation_year,
     SURVEY_FORMS, SURVEY_KPI, batch_code, batch_sort_key, current_mapping, default_target, meaningful_comment,
     parse_rating, parse_year, question_results, rating_stats,
 )
@@ -341,15 +342,39 @@ class SurveyResultsView(APIView):
 
 class SurveyAnalysisView(APIView):
     """
-    GET /api/surveys/analysis/?formType=exit[&groups=SP22,FA22]
+    GET /api/surveys/analysis/?formType=exit[&groups=SP22,FA22][&year=2026]
 
-    The data for a survey analysis report in the university's format: respondents
-    by programme and batch, each KPI's average rating and share rated 3 or above,
-    per programme within each batch, per batch and consolidated, and the written
-    comments. Internship and exit responses are grouped by batch; alumni and
-    employer responses by graduation year. groups limits the report to some.
+    The data for a survey analysis report in the university's format: each
+    question's average rating and share rated 3 or above, per group and
+    consolidated, the respondents and how many the survey was sent to, and the
+    written comments. Exit responses are grouped by batch, internship responses
+    by programme, alumni and employer responses by graduation year. groups limits
+    the report to some, year to the responses of one year.
+
+    PUT {formType, groupKey, count} (QA) records how many people a group's survey
+    was sent to; a blank count goes back to the students counted from admissions.
     """
-    permission_classes = [IsDeptAdminOrQA]
+    NOT_RECORDED = 'Not recorded'
+    NOT_SPECIFIED = 'Not specified'
+
+    def get_permissions(self):
+        return [IsDeptAdminOrQA()] if self.request.method == 'GET' else [IsQA()]
+
+    def put(self, request):
+        form_type = request.data.get('formType')
+        key = str(request.data.get('groupKey') or '').strip()[:20]
+        department = _user_department(request.user)
+        if form_type not in SURVEY_FORMS or not key or not department:
+            return Response({'error': 'formType and groupKey are required'}, status=status.HTTP_400_BAD_REQUEST)
+        count = str(request.data.get('count') if request.data.get('count') is not None else '').strip()
+        if not count:
+            SurveyRecipients.objects.filter(department=department, form_type=form_type, group_key=key).delete()
+            return Response({'groupKey': key, 'count': None})
+        if not count.isdigit() or int(count) < 1:
+            return Response({'error': 'The number sent to must be a whole number above 0'}, status=status.HTTP_400_BAD_REQUEST)
+        SurveyRecipients.objects.update_or_create(department=department, form_type=form_type, group_key=key,
+                                                  defaults={'count': int(count)})
+        return Response({'groupKey': key, 'count': int(count)})
 
     def get(self, request):
         form_type = request.query_params.get('formType')
@@ -360,34 +385,64 @@ class SurveyAnalysisView(APIView):
             return Response({'error': 'Department not found'}, status=status.HTTP_403_FORBIDDEN)
 
         form = SURVEY_FORMS[form_type]
-        by_batch = form_type in ('internship', 'exit')
+        group_by = {'exit': 'batch', 'internship': 'program'}.get(form_type, 'graduationYear')
         responses = list(SurveyResponse.objects.filter(upload__department=department, upload__form_type=form_type)
                          .select_related('program'))
+        years = sorted({r.year for r in responses})
+        year = request.query_params.get('year', '').strip()
+        if year.isdigit():
+            responses = [r for r in responses if r.year == int(year)]
+
+        def program_of(r):
+            return r.program.code if r.program else self.NOT_SPECIFIED
 
         def group_of(r):
-            if by_batch:
-                return r.batch or 'Not recorded'
-            return str(r.graduation_year) if r.graduation_year else 'Not recorded'
+            if group_by == 'batch':
+                return r.batch or self.NOT_RECORDED
+            if group_by == 'program':
+                return program_of(r)
+            return str(r.graduation_year) if r.graduation_year else self.NOT_RECORDED
 
         def order(key):
-            if key == 'Not recorded':
-                return (1, (0, 0))
-            return (0, batch_sort_key(key) if by_batch else (int(key), 0))
+            if key in (self.NOT_RECORDED, self.NOT_SPECIFIED):
+                return (1, (0, 0), '')
+            if group_by == 'batch':
+                return (0, batch_sort_key(key), '')
+            if group_by == 'program':
+                return (0, (0, 0), key)
+            return (0, (int(key), 0), '')
 
         available = sorted({group_of(r) for r in responses}, key=order)
-        wanted = [g.strip().upper() if by_batch else g.strip() for g in request.query_params.get('groups', '').split(',') if g.strip()]
-        groups = [g for g in available if not wanted or g in wanted]
+        wanted = [g.strip().upper() if group_by != 'graduationYear' else g.strip()
+                  for g in request.query_params.get('groups', '').split(',') if g.strip()]
+        groups = [g for g in available if not wanted or g.upper() in wanted or g in wanted]
         programs = list(Program.objects.filter(department=department).order_by('code'))
         count = len(form['questions'])
 
-        population = {}
-        if by_batch:
-            for adm in AdmissionStudent.objects.filter(department=department).select_related('program'):
-                key = batch_code(adm.reg_no)
-                if key:
-                    population.setdefault(key, {'total': 0})
-                    population[key]['total'] += 1
-                    population[key][adm.program.code] = population[key].get(adm.program.code, 0) + 1
+        # Students from admissions: {batch: {programme code: n}}.
+        students = {}
+        for adm in AdmissionStudent.objects.filter(department=department).select_related('program'):
+            code = batch_code(adm.reg_no)
+            if code:
+                by_program = students.setdefault(code, {})
+                by_program[adm.program.code] = by_program.get(adm.program.code, 0) + 1
+
+        def counted_students(key, rs):
+            """Students the survey was meant for, when admissions can tell; else None."""
+            if group_by == 'batch':
+                return sum(students.get(key, {}).values()) or None
+            if group_by == 'program':
+                # The students of the batches these interns belong to.
+                if key == self.NOT_SPECIFIED:
+                    return None
+                return sum(students.get(b, {}).get(key, 0) for b in {r.batch for r in rs if r.batch}) or None
+            if form_type == 'alumni' and key.isdigit():
+                # Graduates: the batches finishing their 8 semesters that year.
+                return sum(sum(v.values()) for b, v in students.items() if batch_graduation_year(b) == int(key)) or None
+            return None
+
+        entered = dict(SurveyRecipients.objects.filter(department=department, form_type=form_type)
+                       .values_list('group_key', 'count'))
 
         groups_out = []
         selected = []
@@ -396,28 +451,41 @@ class SurveyAnalysisView(APIView):
             selected += rs
             by_program = {}
             for r in rs:
-                by_program.setdefault(r.program.code if r.program else '', []).append(r)
+                by_program.setdefault(program_of(r), []).append(r)
+            if group_by == 'program':
+                composition = {}
+                for r in rs:
+                    sub = r.batch or self.NOT_RECORDED
+                    composition[sub] = composition.get(sub, 0) + 1
+            else:
+                composition = {code: len(v) for code, v in by_program.items()}
+            counted = counted_students(key, rs)
             groups_out.append({
-                'key':        key,
-                'population': population.get(key, {}).get('total'),
-                'composition': {code or 'Not specified': len(v) for code, v in by_program.items()},
-                'stats':      rating_stats(rs, count),
-                'programs':   {code: rating_stats(v, count) for code, v in by_program.items() if code},
-                'comments':   [{'program': r.program.code if r.program else '', 'text': r.comment.strip()}
-                               for r in rs if meaningful_comment(r.comment)],
+                'key':         key,
+                'population':  entered.get(key, counted),
+                'populationSource': 'entered' if key in entered else ('students' if counted else None),
+                'countedStudents': counted,
+                'composition': composition,
+                'stats':       rating_stats(rs, count),
+                'programs':    {} if group_by == 'program' else
+                               {code: rating_stats(v, count) for code, v in by_program.items() if code != self.NOT_SPECIFIED},
+                'comments':    [{'program': '' if program_of(r) == self.NOT_SPECIFIED else program_of(r), 'text': r.comment.strip()}
+                                for r in rs if meaningful_comment(r.comment)],
             })
 
         return Response({
             'formType':     form_type,
             'formTitle':    form['title'],
             'usedFor':      form['usedFor'],
-            'groupBy':      'batch' if by_batch else 'graduationYear',
+            'groupBy':      group_by,
             'department':   department.name,
             'kpi':          SURVEY_KPI,
             'kpis':         [{'no': i, 'text': text, 'target': default_target(form_type, i)}
                              for i, text in enumerate(form['questions'], start=1)],
             'programs':     [{'code': p.code, 'name': p.name} for p in programs],
             'available':    available,
+            'years':        years,
+            'year':         int(year) if year.isdigit() else None,
             'groups':       groups_out,
             'consolidated': rating_stats(selected, count),
         })

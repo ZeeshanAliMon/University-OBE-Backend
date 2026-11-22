@@ -912,3 +912,18 @@ class SurveyResponse(models.Model):
 
     class Meta:
         ordering = ['id']
+
+
+class SurveyRecipients(models.Model):
+    """
+    How many people a survey was sent to, for one group of its report (a batch,
+    a programme or a graduation year), entered by QA. Reports show responses out
+    of this; without it they fall back to the students counted from admissions.
+    """
+    department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name='survey_recipients')
+    form_type  = models.CharField(max_length=20)
+    group_key  = models.CharField(max_length=20)
+    count      = models.PositiveIntegerField()
+
+    class Meta:
+        unique_together = ('department', 'form_type', 'group_key')

@@ -309,6 +309,38 @@ class CohortAndSurveyTests(AttainmentBase):
         self.assertEqual(self.client_for(User.objects.create(username='s2@x.com', email='s2@x.com', role='student'))
                          .get('/api/surveys/analysis/?formType=exit').status_code, 403)
 
+    def test_analysis_groups_and_sent_to(self):
+        for n in range(1, 5):
+            AdmissionStudent.objects.create(reg_no=f'FA22-BSCS-00{n}', name='X', email=f'x{n}@x.com', department=self.dept, program=self.program)
+        # Internship: grouped by programme, out of the students of the interns' batches.
+        self.upload('internship', [
+            {'program': 'BSCS', 'batch': 'FA22', 'year': 2025, 'ratings': {'1': 4}},
+            {'program': 'BSCS', 'batch': 'FA22', 'year': 2024, 'ratings': {'1': 2}},
+            {'program': 'BBA', 'batch': 'FA22', 'year': 2025, 'ratings': {'1': 5}},
+        ], year=None)
+        data = self.client_for(self.qa).get('/api/surveys/analysis/?formType=internship').data
+        self.assertEqual((data['groupBy'], data['available'], data['years']), ('program', ['BSCS', 'Not specified'], [2024, 2025]))
+        bscs = data['groups'][0]
+        self.assertEqual((bscs['stats']['responses'], bscs['population'], bscs['composition'], bscs['programs']),
+                         (2, 4, {'FA22': 2}, {}))
+        y2025 = self.client_for(self.qa).get('/api/surveys/analysis/?formType=internship&year=2025').data
+        self.assertEqual([g['stats']['responses'] for g in y2025['groups']], [1, 1])
+        # Alumni: out of the graduates of that year (FA22 and SP23 both finish in 2026).
+        self.upload('alumni', [{'program': 'BSCS', 'graduationYear': 2026, 'ratings': {'1': 4}}])
+        alumni = self.client_for(self.qa).get('/api/surveys/analysis/?formType=alumni').data['groups'][0]
+        self.assertEqual((alumni['key'], alumni['population'], alumni['populationSource']), ('2026', 6, 'students'))
+        # Employers: nothing to count from, until QA enters how many it was sent to.
+        self.upload('employer', [{'program': 'BSCS', 'graduationYear': 2026, 'ratings': {'1': 4}}])
+        url = '/api/surveys/analysis/'
+        self.assertIsNone(self.client_for(self.qa).get(url + '?formType=employer').data['groups'][0]['population'])
+        self.assertEqual(self.client_for(self.admin).put(url, {'formType': 'employer', 'groupKey': '2026', 'count': 12}, format='json').status_code, 403)
+        self.assertEqual(self.client_for(self.qa).put(url, {'formType': 'employer', 'groupKey': '2026', 'count': 'x'}, format='json').status_code, 400)
+        self.assertEqual(self.client_for(self.qa).put(url, {'formType': 'employer', 'groupKey': '2026', 'count': 12}, format='json').status_code, 200)
+        employer = self.client_for(self.admin).get(url + '?formType=employer').data['groups'][0]
+        self.assertEqual((employer['population'], employer['populationSource']), (12, 'entered'))
+        self.client_for(self.qa).put(url, {'formType': 'employer', 'groupKey': '2026', 'count': ''}, format='json')
+        self.assertIsNone(self.client_for(self.qa).get(url + '?formType=employer').data['groups'][0]['population'])
+
     def test_parsers(self):
         self.assertEqual([parse_rating(v) for v in (5, '5', '4.0', '3 = Good', 'Excellent', 'very good', '', None)],
                          [5, 5, 4, 3, 5, 4, None, None])

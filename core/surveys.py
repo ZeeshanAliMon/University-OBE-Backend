@@ -109,6 +109,14 @@ def batch_sort_key(code):
     return (int(m.group(2)), {'SP': 0, 'SU': 1, 'FA': 2}.get(m.group(1), 3)) if m else (99, 9)
 
 
+def batch_graduation_year(code):
+    """The year a batch finishes its 8 semesters: FA22 in 2026 (Spring), SP23 in 2026 (Fall)."""
+    m = re.match(r'(FA|SP)(\d{2})$', code or '')
+    if not m:
+        return None
+    return 2000 + int(m.group(2)) + (4 if m.group(1) == 'FA' else 3)
+
+
 NOT_COMMENTS = {'no comment', 'no comments', 'none', 'nil', 'na', 'n a', 'nothing', 'no', 'nope', 'ok', 'okay'}
 
 
