@@ -4,7 +4,7 @@ from rest_framework.test import APIClient
 from .models import (
     AdmissionStudent, CLO, Course, CourseStudent, Department, DeptAdminProfile, FinalResult,
     GraduateAttribute, InstructorCourse, InstructorProfile, MarksCategory, OBEQuestion, OBEStudentMark,
-    POGAMapping, Program, ProgramObjective, QAProfile, SemesterPlan, SurveyResponse, SurveyUpload, UnitItem, User,
+    POGAMapping, Program, ProgramObjective, QAProfile, SemesterPlan, SurveyMapping, SurveyResponse, SurveyUpload, UnitItem, User,
 )
 from .surveys import batch_code, meaningful_comment, parse_rating, parse_year
 
@@ -340,6 +340,32 @@ class CohortAndSurveyTests(AttainmentBase):
         self.assertEqual((employer['population'], employer['populationSource']), (12, 'entered'))
         self.client_for(self.qa).put(url, {'formType': 'employer', 'groupKey': '2026', 'count': ''}, format='json')
         self.assertIsNone(self.client_for(self.qa).get(url + '?formType=employer').data['groups'][0]['population'])
+
+    def test_alumni_report(self):
+        # As in the university's BSAI alumni report: PO-04 is 24 of 25 responses rated 3 or above.
+        for n in range(1, 6):
+            AdmissionStudent.objects.create(reg_no=f'SP22-BSCS-00{n}', name='X', email=f'a{n}@x.com', department=self.dept, program=self.program)
+        q12 = [5, 5, 4, 4, 2]
+        rows = [{'program': 'BSCS', 'batch': 'CS-SP-2022', 'graduationYear': 2026, 'respondentName': f'Alumnus {i}', 'regNo': f'052-21-{i}',
+                 'organization': 'Zaim associate', 'designation': 'Team Lead', 'employmentStatus': status,
+                 'ratings': {str(q): (q12[i] if q == 12 else 4) for q in range(1, 14)}}
+                for i, status in enumerate(['Employed', 'Currently employed', 'Freelancing', 'Entrepreneur (own business)', 'Unemployed'])]
+        self.assertEqual(self.upload('alumni', rows).status_code, 201)
+        for no, target in {5: 'PO4', 6: 'PO4', 8: 'PO4', 11: 'PO4', 12: 'PO4', 13: 'PO3'}.items():
+            SurveyMapping.objects.update_or_create(program=self.program, form_type='alumni', question_no=no, defaults={'target': target})
+        data = self.client_for(self.admin).get('/api/surveys/alumni-report/?programId=bscs').data
+        self.assertEqual(data['available'], ['SP22'])
+        g = data['groups'][0]
+        self.assertEqual((g['responses'], g['population'], g['recipientsKey']), (5, 5, 'BSCS:SP22'))
+        self.assertEqual(g['employment'], {'Employed': 2, 'Freelancer': 1, 'Entrepreneur': 1, 'Unemployed': 1})
+        q = g['questions'][11]
+        self.assertEqual((q['counts'], q['percent']), ({'5': 2, '4': 2, '3': 0, '2': 1, '1': 0}, 80.0))
+        po4 = next(p for p in g['pos'] if p['code'] == 'PO4')
+        self.assertEqual((po4['score'], po4['attained'], po4['questions']), (96.0, True, [5, 6, 8, 11, 12]))
+        self.assertEqual(g['students'][0]['organization'], 'Zaim associate')
+        self.client_for(self.qa).put('/api/surveys/analysis/', {'formType': 'alumni', 'groupKey': 'BSCS:SP22', 'count': 8}, format='json')
+        self.assertEqual(self.client_for(self.qa).get('/api/surveys/alumni-report/?programId=bscs').data['groups'][0]['population'], 8)
+        self.assertEqual(self.client_for(self.teacher.user).get('/api/surveys/alumni-report/?programId=bscs').status_code, 403)
 
     def test_parsers(self):
         self.assertEqual([parse_rating(v) for v in (5, '5', '4.0', '3 = Good', 'Excellent', 'very good', '', None)],

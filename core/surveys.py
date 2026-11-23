@@ -117,6 +117,26 @@ def batch_graduation_year(code):
     return 2000 + int(m.group(2)) + (4 if m.group(1) == 'FA' else 3)
 
 
+EMPLOYMENT_STATUSES = ['Employed', 'Freelancer', 'Entrepreneur', 'Unemployed']
+
+
+def employment_status(value):
+    """Employed, Freelancer, Entrepreneur or Unemployed from a form's answer; other answers as written."""
+    text = re.sub(r'\s+', ' ', str(value or '')).strip()
+    plain = text.lower()
+    if not plain:
+        return ''
+    if 'unemploy' in plain or 'not employed' in plain or 'jobless' in plain or 'looking for' in plain:
+        return 'Unemployed'
+    if 'freelanc' in plain:
+        return 'Freelancer'
+    if 'entrepreneur' in plain or 'own business' in plain or 'business owner' in plain or 'self employ' in plain or 'self-employ' in plain:
+        return 'Entrepreneur'
+    if 'employ' in plain or 'job' in plain:
+        return 'Employed'
+    return text[:40]
+
+
 NOT_COMMENTS = {'no comment', 'no comments', 'none', 'nil', 'na', 'n a', 'nothing', 'no', 'nope', 'ok', 'okay'}
 
 

@@ -11,7 +11,7 @@ from .models import GraduateAttribute, Program, SurveyMapping, SurveyRecipients,
 from .permissions import IsDeptAdminOrQA, IsQA
 from .models import AdmissionStudent
 from .surveys import (
-    batch_graduation_year,
+    EMPLOYMENT_STATUSES, batch_graduation_year, employment_status,
     SURVEY_FORMS, SURVEY_KPI, batch_code, batch_sort_key, current_mapping, default_target, meaningful_comment,
     parse_rating, parse_year, question_results, rating_stats,
 )
@@ -231,6 +231,7 @@ class SurveyUploadView(APIView):
                 supervisor_name=_clean(row, 'supervisorName'), employee_name=_clean(row, 'employeeName'),
                 designation=_clean(row, 'designation'), organization=_clean(row, 'organization'),
                 organization_type=_clean(row, 'organizationType', 60), working_since=_clean(row, 'workingSince', 60),
+                employment_status=employment_status(row.get('employmentStatus')),
                 comment=str(row.get('comment') or '').strip(), submitted_at=_clean(row, 'submittedAt', 40),
             ))
 
@@ -490,3 +491,102 @@ class SurveyAnalysisView(APIView):
             'consolidated': rating_stats(selected, count),
         })
 
+
+def _po_order(code):
+    digits = ''.join(ch for ch in code if ch.isdigit())
+    return (int(digits) if digits else 999, code)
+
+
+class SurveyAlumniReportView(APIView):
+    """
+    GET /api/surveys/alumni-report/?programId=bsai[&batches=FA21,SP22]
+
+    The Alumni Survey report of one programme in the university's format, one
+    section per admission batch: how many of the batch's alumni responded, their
+    employment status, the count of each rating per question, each PO's score
+    (responses rated 3 or above out of all responses to its questions) against
+    the KPI target, and the respondents.
+
+    How many alumni a batch has is the number QA entered for it (PUT to
+    /api/surveys/analysis/ with groupKey "BSAI:SP22"), else the batch's students
+    from admissions.
+    """
+    permission_classes = [IsDeptAdminOrQA]
+    NOT_RECORDED = 'Not recorded'
+
+    def get(self, request):
+        program = _scoped_program(request, request.query_params.get('programId', '').strip())
+        if not program:
+            return Response({'error': 'Program not found'}, status=status.HTTP_404_NOT_FOUND)
+        form = SURVEY_FORMS['alumni']
+        count = len(form['questions'])
+        mapping = current_mapping(program, 'alumni')
+        objectives = {o.code: o.description for o in program.objectives.all()}
+        responses = list(SurveyResponse.objects.filter(program=program, upload__form_type='alumni'))
+
+        def group_of(r):
+            return r.batch or self.NOT_RECORDED
+
+        available = sorted({group_of(r) for r in responses},
+                           key=lambda k: (1, (0, 0)) if k == self.NOT_RECORDED else (0, batch_sort_key(k)))
+        wanted = [b.strip().upper() for b in request.query_params.get('batches', '').split(',') if b.strip()]
+        groups = [g for g in available if not wanted or g.upper() in wanted]
+
+        students = {}
+        for adm in AdmissionStudent.objects.filter(program=program):
+            code = batch_code(adm.reg_no)
+            if code:
+                students[code] = students.get(code, 0) + 1
+        entered = dict(SurveyRecipients.objects.filter(
+            department=program.department, form_type='alumni', group_key__startswith=f'{program.code}:'
+        ).values_list('group_key', 'count'))
+
+        out = []
+        for key in groups:
+            rs = [r for r in responses if group_of(r) == key]
+            questions = []
+            for no in range(1, count + 1):
+                ratings = [r.ratings[str(no)] for r in rs if str(no) in (r.ratings or {})]
+                ok = sum(1 for v in ratings if v >= 3)
+                questions.append({
+                    'no': no, 'target': mapping.get(no, ''), 'responses': len(ratings),
+                    'counts': {str(v): sum(1 for x in ratings if x == v) for v in (5, 4, 3, 2, 1)},
+                    'percent': round(ok / len(ratings) * 100, 1) if ratings else None,
+                })
+            pos = []
+            for code in sorted({q['target'] for q in questions if q['target']}, key=_po_order):
+                mapped = [q for q in questions if q['target'] == code]
+                n = sum(q['responses'] for q in mapped)
+                ok = sum(q['counts']['5'] + q['counts']['4'] + q['counts']['3'] for q in mapped)
+                score = round(ok / n * 100, 1) if n else None
+                pos.append({'code': code, 'description': objectives.get(code, ''), 'questions': [q['no'] for q in mapped],
+                            'score': score, 'attained': score is not None and score >= SURVEY_KPI})
+            employment = {s: 0 for s in EMPLOYMENT_STATUSES}
+            for r in rs:
+                status_ = r.employment_status or 'Not reported'
+                employment[status_] = employment.get(status_, 0) + 1
+            group_key = f'{program.code}:{key}'
+            counted = students.get(key)
+            out.append({
+                'key':              key,
+                'population':       entered.get(group_key, counted),
+                'populationSource': 'entered' if group_key in entered else ('students' if counted else None),
+                'countedStudents':  counted,
+                'recipientsKey':    group_key,
+                'responses':        len(rs),
+                'employment':       employment,
+                'questions':        questions,
+                'pos':              pos,
+                'students':         [{'name': r.respondent_name, 'regNo': r.reg_no, 'organization': r.organization,
+                                      'designation': r.designation, 'employmentStatus': r.employment_status} for r in rs],
+                'comments':         [r.comment.strip() for r in rs if meaningful_comment(r.comment)],
+            })
+
+        return Response({
+            'program':   {'code': program.code, 'name': program.name},
+            'formTitle': form['title'],
+            'kpi':       SURVEY_KPI,
+            'questions': [{'no': i, 'text': text, 'target': mapping.get(i, '')} for i, text in enumerate(form['questions'], start=1)],
+            'available': available,
+            'groups':    out,
+        })

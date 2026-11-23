@@ -907,6 +907,7 @@ class SurveyResponse(models.Model):
     organization      = models.CharField(max_length=200, blank=True)
     organization_type = models.CharField(max_length=60, blank=True)
     working_since     = models.CharField(max_length=60, blank=True)
+    employment_status = models.CharField(max_length=40, blank=True)   # Employed, Freelancer, Entrepreneur, Unemployed
     comment           = models.TextField(blank=True)
     submitted_at      = models.CharField(max_length=40, blank=True)
 
