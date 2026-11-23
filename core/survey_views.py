@@ -107,14 +107,13 @@ def _clean(row, key, limit=200):
     return str(row.get(key) or '').strip()[:limit]
 
 
-def _find_program(value, department, default):
+def _find_program(value, programs, default):
     """
     A program from the form's Program answer: its code (BSCS), the end of its code
     (CS, AI), its name, or part of its name. None when it names no programme, as
     forms often say "Unknown".
     """
     text = str(value or '').strip().lower()
-    programs = list(Program.objects.filter(department=department))
     if not text:
         return default
     for program in programs:
@@ -189,6 +188,7 @@ class SurveyUploadView(APIView):
         default = Program.objects.filter(department=department, code__iexact=default_id).first() if default_id else None
         default_batch = batch_code(request.data.get('defaultBatch'))
         unrecognized = {}
+        programs = list(Program.objects.filter(department=department))
         question_count = len(SURVEY_FORMS[form_type]['questions'])
 
         cleaned, errors = [], []
@@ -196,7 +196,7 @@ class SurveyUploadView(APIView):
             if not isinstance(row, dict):
                 errors.append({'row': index, 'error': 'Not a response.'})
                 continue
-            program = _find_program(row.get('program'), department, default)
+            program = _find_program(row.get('program'), programs, default)
             if not program:
                 answer = str(row.get('program') or '').strip() or '(blank)'
                 unrecognized[answer] = unrecognized.get(answer, 0) + 1
